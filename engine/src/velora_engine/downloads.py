@@ -64,6 +64,7 @@ class DownloadCoordinator:
         self._root = Path(cache_root) if cache_root is not None else _cache_root()
         self._engine_id = uuid.uuid4().hex
         self._sequence = 0
+        self._changed = asyncio.Event()
         self._entries: dict[tuple[str, str], _Entry] = {}
         self._active: dict[str, str] = {}
         self._control = asyncio.Lock()
@@ -76,12 +77,34 @@ class DownloadCoordinator:
                 "sequence": self._sequence, "snapshot": True,
                 "downloads": [copy.deepcopy(entry.item) for entry in self._entries.values()]}
 
+    def _snapshot_after(self, sequence: int | None) -> dict | None:
+        # Materialize authoritative state only after a mutation; an idle
+        # publisher with the current sequence allocates no detached entries.
+        if self._sequence == sequence:
+            return None
+
+        return self.snapshot()
+
+    async def _wait_changed(self, sequence: int | None) -> None:
+        # Each mutation wakes every waiter on its old event. Replacing that
+        # event preserves wakeups across sends without a polling timer:
+        # mutation -> set old event -> next wait captures fresh event
+        while self._sequence == sequence:
+            await self._changed.wait()
+
+    def _notify_changed(self) -> None:
+        # Advance the authoritative version and wake readers together, so
+        # entry creation and every subsequent state/progress update publish.
+        self._sequence += 1
+        changed, self._changed = self._changed, asyncio.Event()
+        changed.set()
+
     def _update(self, entry, **values):
         entry.item.update(values)
         state = entry.item["state"]
         entry.item["retry_allowed"] = state in _RECOVERY_STATES
         entry.item["restart_allowed"] = state in _RECOVERY_STATES
-        self._sequence += 1
+        self._notify_changed()
 
     def _new_entry(self, model, kind):
         if self._closed:
@@ -107,7 +130,7 @@ class DownloadCoordinator:
                         "retry_allowed": False, "restart_allowed": False,
                         "active_model": self._active.get(kind)})
         self._entries[(model, kind)] = entry
-        self._sequence += 1
+        self._notify_changed()
         return entry
 
     async def ensure(self, model_id: str, kind: str) -> DownloadResult:

@@ -132,7 +132,12 @@ final class EngineClient {
             NSLog("Velora: refusing to send invalid JSON control frame")
             return
         }
-        send(type: .json, payload: data)
+        // The ordered write receipt exposes backlog after the capture drain.
+        let stoppedSession = object["cmd"] as? String == "stop"
+            ? object["session"] as? String : nil
+        send(type: .json, payload: data, stopReceipt: stoppedSession.map {
+            ($0, ProcessInfo.processInfo.systemUptime)
+        })
     }
 
     /// Sends a raw PCM audio chunk (16 kHz mono Float32 LE).
@@ -140,7 +145,10 @@ final class EngineClient {
         send(type: .audio, payload: data)
     }
 
-    private func send(type: FrameType, payload: Data) {
+    private func send(
+        type: FrameType, payload: Data,
+        stopReceipt: (session: String, queuedAt: TimeInterval)? = nil
+    ) {
         writeQueue.async { [weak self] in
             guard let self else { return }
             self.stateLock.lock()
@@ -167,7 +175,15 @@ final class EngineClient {
                 }
                 return false
             }
-            if failed { self.disconnect(ifGeneration: gen) }
+            if failed {
+                self.disconnect(ifGeneration: gen)
+                return
+            }
+            if let stopReceipt {
+                let uptime = ProcessInfo.processInfo.systemUptime
+                let sendMs = Int(max(0, uptime - stopReceipt.queuedAt) * 1_000)
+                veloraLog("Velora: stop-path session=\(stopReceipt.session) stage=stop-written send_ms=\(sendMs) uptime_ms=\(Int(uptime * 1_000))")
+            }
         }
     }
 

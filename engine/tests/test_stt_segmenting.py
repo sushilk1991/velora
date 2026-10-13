@@ -128,6 +128,9 @@ class FakeWhisper:
 
 @pytest.fixture
 def whisper(monkeypatch):
+    # Faked decodes own no Metal buffers; keep cache hygiene off real hardware.
+    monkeypatch.setattr(stt_mod, "_clear_mlx_cache", lambda: None)
+
     def make(texts, previews=False):
         fake = FakeWhisper(texts)
         mod = types.ModuleType("mlx_whisper")
@@ -146,6 +149,53 @@ def whisper(monkeypatch):
         return backend, fake
 
     return make
+
+
+@pytest.mark.parametrize("end", ["finalize", "abort"])
+def test_whisper_cache_at_stop(whisper, monkeypatch, end):
+    backend, decoder = whisper(["some words"])
+    weight_bytes = 1_600
+    scratch_bytes = 800
+    memory = types.SimpleNamespace(active=weight_bytes, cached=scratch_bytes)
+    releases = []
+
+    # Session scratch becomes unused at stop; loaded weights stay active.
+    def release_cache():
+        assert backend._samples == 0
+        assert backend._chunks == []
+        memory.cached = 0
+        releases.append(True)
+
+    monkeypatch.setattr(stt_mod, "_clear_mlx_cache", release_cache)
+    feed_seconds(backend, 3)
+    assert memory.cached == scratch_bytes
+    assert releases == []
+
+    if end == "finalize":
+        assert backend.finalize() == "some words"
+        assert len(decoder.calls) == 1
+    else:
+        backend.reset()
+        assert decoder.calls == []
+
+    assert memory.cached == 0
+    assert memory.active == weight_bytes
+    assert backend._loaded is True
+    assert releases == [True]
+
+    # An empty start/reset must not clear again before the next decode.
+    backend.start_session()
+    backend.reset()
+    assert releases == [True]
+
+
+def test_unloaded_cache_untouched(monkeypatch):
+    releases = []
+    monkeypatch.setattr(stt_mod, "_clear_mlx_cache", lambda: releases.append(True))
+    backend = WhisperBackend("unused")
+    backend.feed_chunk(loud())
+    backend.reset()
+    assert releases == []
 
 
 def test_whisper_load_populates_transcribe_model_holder(monkeypatch):

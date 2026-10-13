@@ -42,6 +42,16 @@ or updates change:
 | Signed release DMG | Signature, notarization, staple, Gatekeeper, bundle identity, and packaged engine/CLI/MCP runtime checks all pass |
 | Software update window | Full release-note structure is readable; closing a manual changelog changes nothing; closing an automatic prompt defers only that version; one Install click downloads, verifies, replaces a disposable app copy, and relaunches that copy; a local-feed E2E leaves the real Skip/Later/check preferences unchanged |
 
+## Stop-to-delivery timing
+
+After a real dictation, run `rg 'stop-path' ~/.velora/velora-app.log`.
+Join entries by `session`: `requested`, `capture-drained`, `stop-enqueued`,
+`stop-written`, `final-received`, then `clipboard-staged` or `inserted`.
+`elapsed_ms` starts at the stop request; `send_ms` includes the socket queue
+and write. All entries use monotonic `uptime_ms`. A clipboard receipt does
+not prove insertion. Existing engine/history timing excludes capture and
+delivery, so keep it separate from these client measurements.
+
 ## Local history performance baseline
 
 Run the history benchmark locally from `engine/` with every input and output

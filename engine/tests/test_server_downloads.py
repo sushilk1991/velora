@@ -13,6 +13,7 @@ import pytest
 
 from velora_engine import protocol
 from velora_engine.config import Config
+from velora_engine.cleanup_process import LOAD_TIMEOUT_S
 from velora_engine.downloads import DownloadCoordinator, DownloadError, DownloadResult
 from velora_engine.server import Engine
 from velora_engine.stt import FakeBackend
@@ -181,7 +182,7 @@ async def test_cold_edit_phases(recovery):
     phases = [event for event in events if event["event"] == "edit_phase"]
     assert [event["phase"] for event in phases] == ["loading", "inference"]
     assert all(set(event) == {"event", "id", "phase", "stall_after_s"} for event in phases)
-    assert phases[0]["stall_after_s"] >= server.LOAD_TIMEOUT_S
+    assert phases[0]["stall_after_s"] >= LOAD_TIMEOUT_S
     assert phases[1]["stall_after_s"] < phases[0]["stall_after_s"]
     assert events[-1]["event"] == "edited"
 
@@ -249,6 +250,73 @@ async def test_reconnect_snapshot_order(recovery, socket_engine):
     assert snapshot["downloads"][0]["state"] == "ready"
     assert (await second.recv())["event"] == "ready"
     second.writer.close()
+
+
+async def test_idle_download_no_copy(recovery, monkeypatch):
+    # Repeated publication without a mutation must reuse the sent sequence,
+    # avoiding detached snapshot allocation even while a model is listed.
+    coordinator = recovery.coordinator
+    coordinator._new_entry("example/model", "stt")
+    engine = recovery.engine
+    engine._send = AsyncMock()
+    await engine._publish_downloads()
+    snapshot = Mock(wraps=coordinator.snapshot)
+    monkeypatch.setattr(coordinator, "snapshot", snapshot)
+
+    for _ in range(10):
+        await engine._publish_downloads()
+
+    snapshot.assert_not_called()
+    assert engine._send.call_count == 1
+
+
+async def test_download_watch_idle(recovery, monkeypatch):
+    # Watch once, then remain blocked until a mutation; background download
+    # monitoring must not wake ten times each second on an idle engine.
+    engine = recovery.engine
+    engine._send = AsyncMock()
+    publish = AsyncMock(wraps=engine._publish_downloads)
+    monkeypatch.setattr(engine, "_publish_downloads", publish)
+    watch = asyncio.create_task(engine._watch_downloads())
+    try:
+        await asyncio.sleep(.25)
+        assert publish.call_count == 1
+    finally:
+        watch.cancel()
+        await asyncio.gather(watch, return_exceptions=True)
+
+
+async def test_download_watch_mutations(recovery, monkeypatch):
+    # A new entry and a later state change must wake the watch immediately,
+    # including a mutation that arrives while its previous send is blocked.
+    engine = recovery.engine
+    snapshots = []
+    sending, release, ready = asyncio.Event(), asyncio.Event(), asyncio.Event()
+
+    async def send(event):
+        snapshots.append(event)
+        if event["downloads"] and event["downloads"][0]["state"] == "queued":
+            sending.set()
+            await release.wait()
+        if event["downloads"] and event["downloads"][0]["state"] == "failed":
+            ready.set()
+
+    monkeypatch.setattr(engine, "_send", send)
+    watch = asyncio.create_task(engine._watch_downloads())
+    try:
+        await asyncio.sleep(0)
+        entry = recovery.coordinator._new_entry("example/model", "stt")
+        await asyncio.wait_for(sending.wait(), 1)
+        await recovery.coordinator.mark_failed("example/model", "stt", entry.item["attempt"], {
+            "category": "disk", "code": "disk_full", "message": "Free space.", "retryable": False,
+        })
+        release.set()
+        await asyncio.wait_for(ready.wait(), 1)
+        assert [event["sequence"] for event in snapshots] == [0, 1, 2]
+    finally:
+        release.set()
+        watch.cancel()
+        await asyncio.gather(watch, return_exceptions=True)
 
 
 @pytest.mark.parametrize("failure", ["load", "save", "cache"])

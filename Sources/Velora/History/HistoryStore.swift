@@ -559,24 +559,6 @@ final class HistoryStore {
         try? FileManager.default.removeItem(at: url)
     }
 
-    /// Deletes rows older than `days` (matches the audio retention window so
-    /// the transcript store and the clips age out together). Called once at
-    /// startup; fire-and-forget.
-    func pruneOlderThan(days: Double) {
-        beginWrite()
-        queue.async { [self] in
-            defer { endWrite() }
-            guard db != nil, days > 0 else { return }
-            let cutoff = Date().timeIntervalSince1970 - days * 86_400
-            var stmt: OpaquePointer?
-            guard sqlite3_prepare_v2(db, "DELETE FROM dictations WHERE ts < ?;", -1, &stmt, nil) == SQLITE_OK
-            else { return }
-            defer { sqlite3_finalize(stmt) }
-            sqlite3_bind_double(stmt, 1, cutoff)
-            sqlite3_step(stmt)
-        }
-    }
-
     private func bindText(_ stmt: OpaquePointer?, _ index: Int32, _ value: String?) {
         if let value {
             sqlite3_bind_text(stmt, index, value, -1, Self.transient)

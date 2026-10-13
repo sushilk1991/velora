@@ -7,7 +7,21 @@ import sys
 import numpy as np
 
 from velora_engine import models
+import velora_engine.stt as stt_mod
 from velora_engine.stt import TranscribeCppWhisperBackend
+
+
+def test_native_cache_untouched(monkeypatch):
+    # Native session cleanup must not initialize MLX or clear another backend.
+    def reject_clear():
+        raise AssertionError("native decode does not own an MLX cache")
+
+    monkeypatch.setattr(stt_mod, "_clear_mlx_cache", reject_clear)
+    backend = TranscribeCppWhisperBackend(models.TRANSCRIBE_CPP_Q8_MODEL)
+    backend._loaded = True
+    backend.feed_chunk(np.zeros(160, dtype=np.float32))
+    backend.reset()
+    assert backend._samples == 0
 
 
 def test_pinned_transcribe_cpp_runtime_exports_the_adapter_contract():

@@ -7,7 +7,14 @@ import huggingface_hub
 import pytest
 from huggingface_hub.errors import LocalEntryNotFoundError
 
-from velora_engine import models
+from velora_engine import download_cache, models
+
+
+@pytest.fixture(autouse=True)
+def isolated_owned_cache(monkeypatch, tmp_path):
+    # A user's verified download must not satisfy a mocked Hub cache miss.
+    # Each test may still populate this isolated root to exercise owned reuse.
+    monkeypatch.setattr(download_cache, "_cache_root", lambda: tmp_path / "owned-cache")
 
 
 def test_ensure_downloaded_accepts_an_exact_local_snapshot(monkeypatch, tmp_path):

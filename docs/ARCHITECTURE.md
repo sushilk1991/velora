@@ -38,6 +38,10 @@ Settings › Advanced exports that same versioned, portable-by-construction docu
 3. App quit → engine terminated (it also self-exits if socket closes / parent pid dies).
 4. Idle unload (optional setting): engine drops LLM weights after N min idle to free memory.
 
+Socket retry polling runs only while disconnected; EOF or a completed engine
+replacement re-arms it. Child stdout/stderr retain up to 5 MB in `engine.log`
+and 5 MB in `engine.log.1`, including the final bytes at process exit.
+
 ## Foreground audio coexistence
 
 Opening a Bluetooth headset microphone makes macOS switch that headset from
@@ -159,7 +163,7 @@ app → engine  {"cmd":"start","session":"uuid","context":{"bundle_id":"com.tiny
 app → engine  AUDIO frames (streamed live during recording, ~100ms chunks)
 app → engine  {"cmd":"stop","session":"uuid",             # only already-ready context
                "entities":[{"type":"glossary","value":"authCheck.ts"}]}
-engine → app  {"event":"partial","session":"...","text":"..."}       # protocol-compatible telemetry; not rendered
+engine → app  {"event":"partial","session":"...","text":"..."}       # only context.stream_typing:true
 engine → app  {"event":"transcript","session":"...","raw":"...","ms":412}
 engine → app  {"event":"final","session":"...","text":"...","raw":"...","mode":"chat",
                "cleanup_ms":389,"cleanup_wall_ms":402,"cleanup_applied":true,

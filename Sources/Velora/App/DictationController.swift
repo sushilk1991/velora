@@ -385,6 +385,8 @@ final class DictationController: NSObject {
     private let supervisor: EngineSupervisor
     private let dictionary: DictionaryRepository
     private let micAuthorized: () -> Bool
+    // Read secure input at each guard; fake capture tests supply an isolated reader.
+    private let secureInputActive: () -> Bool
     private let recordingLimit: () -> Double
     private let now: () -> Date
     private let scheduleGrace: (TimeInterval, @escaping () -> Void) -> Timer
@@ -497,6 +499,16 @@ final class DictationController: NSObject {
     /// metrics must not count STT/cleanup latency as time spent speaking.
     private var recordingDurationMs: Int?
     private var transcribeStartedAt: Date?
+    private enum StopStage: String {
+        case requested
+        case captureDrained = "capture-drained"
+        case stopEnqueued = "stop-enqueued"
+        case finalReceived = "final-received"
+        case clipboardStaged = "clipboard-staged"
+        case inserted
+    }
+    // Monotonic receipts separate drain, engine work, and delivery latency.
+    private var stopTiming: (session: String, uptime: TimeInterval)?
     private var activeTranscribeTimeout = minimumTranscribeTimeout
     private var transcribeSleeping = false
     private var lastSTTProgressPercent = 0
@@ -643,6 +655,7 @@ final class DictationController: NSObject {
         micAuthorized: @escaping () -> Bool = {
             AVCaptureDevice.authorizationStatus(for: .audio) == .authorized
         },
+        secureInputActive: @escaping () -> Bool = { SecureInput.isActive },
         recordingLimit: @escaping () -> Double = {
             AppConfig.shared.portableEngineSettings.maximumRecordingSeconds
         },
@@ -662,6 +675,7 @@ final class DictationController: NSObject {
         self.capture = capture
         self.mediaPlayback = mediaPlayback
         self.micAuthorized = micAuthorized
+        self.secureInputActive = secureInputActive
         self.recordingLimit = recordingLimit
         self.now = now
         self.scheduleGrace = scheduleGrace
@@ -812,7 +826,7 @@ final class DictationController: NSObject {
                     message: "Action Mode needs Accessibility permission to control apps")))
                 return
             }
-            guard !SecureInput.isActive else {
+            guard !secureInputActive() else {
                 completion(.failure(ControlFailure(
                     code: "secure_input",
                     message: "A password field is active; keystrokes are blocked")))
@@ -960,7 +974,7 @@ final class DictationController: NSObject {
             showError("Didn't catch a command")
             return
         }
-        guard !SecureInput.isActive else {
+        guard !secureInputActive() else {
             showError("Password field. Action stopped")
             return
         }
@@ -1292,7 +1306,7 @@ final class DictationController: NSObject {
     func beginEditSession(locked: Bool) {
         guard phase == .idle else { return }
         guard config.voiceEdit else { return }
-        guard !SecureInput.isActive else {
+        guard !secureInputActive() else {
             showEditStartError("Secure field. Can't edit")
             return
         }
@@ -1342,7 +1356,7 @@ final class DictationController: NSObject {
         if !sessionID.isEmpty {
             protectedLateFinalSessionID = sessionID
         }
-        guard !SecureInput.isActive else {
+        guard !secureInputActive() else {
             showProofreadStartError("Secure field. Can't proofread")
             return
         }
@@ -1733,7 +1747,7 @@ final class DictationController: NSObject {
             showNotice(symbol: "pencil.slash", message: "Couldn't apply that edit")
             return
         }
-        guard !SecureInput.isActive else {
+        guard !secureInputActive() else {
             pending.selection.discardMutableIdentity()
             showNotice(
                 symbol: "lock.fill",
@@ -1762,7 +1776,7 @@ final class DictationController: NSObject {
             return
         }
         guard Permissions.accessibilityGranted, TextInserter.canPostEvents,
-              !SecureInput.isActive,
+              !secureInputActive(),
               let bundleID = pending.bundleID,
               NSWorkspace.shared.frontmostApplication?.bundleIdentifier == bundleID
         else {
@@ -1857,7 +1871,7 @@ final class DictationController: NSObject {
         text: String,
         ms: Int
     ) {
-        guard !SecureInput.isActive,
+        guard !secureInputActive(),
               let bundleID = pending.bundleID,
               NSWorkspace.shared.frontmostApplication?.bundleIdentifier == bundleID
         else {
@@ -1947,7 +1961,7 @@ final class DictationController: NSObject {
             // the grant, into a secure field, or into a different app. The
             // text is already on the clipboard for a manual paste either way.
             guard Permissions.accessibilityGranted, TextInserter.canPostEvents,
-                  !SecureInput.isActive,
+                  !secureInputActive(),
                   NSWorkspace.shared.frontmostApplication?.bundleIdentifier == bundleID
             else {
                 NSLog("Velora: as-heard paste skipped — target not ready (text on clipboard)")
@@ -1981,7 +1995,7 @@ final class DictationController: NSObject {
                 // into an app other than the reformat's origin. The text is
                 // already on the clipboard for a manual paste either way.
                 guard Permissions.accessibilityGranted, TextInserter.canPostEvents,
-                      !SecureInput.isActive,
+                      !secureInputActive(),
                       NSWorkspace.shared.frontmostApplication?.bundleIdentifier == bundleID
                 else {
                     NSLog("Velora: reformat paste skipped — target not ready (text on clipboard)")
@@ -2279,7 +2293,7 @@ final class DictationController: NSObject {
         hud.model.retryTitle = "Retry"
 
         // Secure input (password fields): refuse with an error HUD.
-        guard !SecureInput.isActive else {
+        guard !secureInputActive() else {
             NSLog("Velora: recording refused — secure input active")
             showError("Secure field. Can't dictate")
             return false
@@ -2304,6 +2318,7 @@ final class DictationController: NSObject {
         mediaPlayback.pauseForDictation()
 
         sessionID = UUID().uuidString
+        stopTiming = nil
         protectedLateFinalSessionID = nil
         stopEnqueuedSession = nil
         rawTranscript = nil
@@ -2485,6 +2500,8 @@ final class DictationController: NSObject {
 
     private func stopAndTranscribe() {
         guard isRecording else { return }
+        stopTiming = (sessionID, ProcessInfo.processInfo.systemUptime)
+        logStopStage(.requested, session: sessionID)
         recordingLimitTimer?.invalidate()
         recordingLimitTimer = nil
 
@@ -2504,6 +2521,7 @@ final class DictationController: NSObject {
         phase = .transcribing
         capture.stop { [weak self] in
             guard let self else { return }
+            self.logStopStage(.captureDrained, session: stoppedSession)
             self.mediaPlayback.restoreAfterDictation()
             guard self.sessionID == stoppedSession,
                   self.phase == .transcribing,
@@ -2521,8 +2539,17 @@ final class DictationController: NSObject {
         // Preserve a newer engine-announced bound instead of re-arming here.
         guard stopEnqueuedSession != session else { return }
         supervisor.send(command)
+        logStopStage(.stopEnqueued, session: session)
         stopEnqueuedSession = session
         armTranscribeTimeout()
+    }
+
+    // All stages share the same clock; no wall-clock adjustment affects the receipt.
+    private func logStopStage(_ stage: StopStage, session: String) {
+        guard let timing = stopTiming, timing.session == session else { return }
+        let uptime = ProcessInfo.processInfo.systemUptime
+        let elapsed = Int(max(0, uptime - timing.uptime) * 1_000)
+        veloraLog("Velora: stop-path session=\(session) stage=\(stage.rawValue) elapsed_ms=\(elapsed) uptime_ms=\(Int(uptime * 1_000))")
     }
 
     /// (Re)arms the stop→final watchdog from each engine step bound. The
@@ -2855,6 +2882,7 @@ final class DictationController: NSObject {
                       session, sessionID, cancelledSessionID ?? "none", consumedSessionID ?? "none")
                 return
             }
+            logStopStage(.finalReceived, session: session)
             failedWindowCount = gapCount
             failedWindowS = gapSeconds
             if graceSessionID == session {
@@ -3287,6 +3315,9 @@ final class DictationController: NSObject {
         StreamFinalOutputStagingPolicy.stage(
             text, alreadyStaged: finalOutputAlreadyStaged,
             write: inserter.stageFinalOutput)
+        if !finalOutputAlreadyStaged {
+            logStopStage(.clipboardStaged, session: sessionID)
+        }
 
         // Own-window insertion (onboarding try-it): the TextEditor lives inside
         // Velora's own window. AppContextTracker deliberately ignores Velora's
@@ -3315,6 +3346,7 @@ final class DictationController: NSObject {
                     finalizationMs: finalizationMs, audio: audio)
             },
             typed: {
+                logStopStage(.inserted, session: sessionID)
                 NSLog("Velora: insert method=own-window session=%@ chars=%ld", sessionID, text.count)
                 errorRetryAction = nil
                 errorRetryIntent = .dictation
@@ -3357,7 +3389,7 @@ final class DictationController: NSObject {
                 trusted ? "yes" : "no", canPost ? "yes" : "no")
             fallbackMessage = "Needs Accessibility. Copied"
             isPermissionFallback = true
-        } else if SecureInput.isActive {
+        } else if secureInputActive() {
             fallbackMessage = "Secure field. Copied"
         } else if let target = context?.bundleID,
                   NSWorkspace.shared.frontmostApplication?.bundleIdentifier != target {
@@ -3419,6 +3451,7 @@ final class DictationController: NSObject {
                     message: self.finalNotice("Interrupted. Copied"))
                 return
             }
+            self.logStopStage(.inserted, session: session)
             if self.failedWindowCount > 0 {
                 self.showNotice(
                     symbol: "exclamationmark.triangle.fill",
@@ -3669,7 +3702,7 @@ final class DictationController: NSObject {
     private func executeVoiceCommand(_ command: VoiceCommand) {
         phase = .idle
         guard Permissions.accessibilityGranted, TextInserter.canPostEvents,
-              !SecureInput.isActive
+              !secureInputActive()
         else {
             NSLog("Velora: voice command refused — cannot post events")
             hud.transition(to: .hidden(.cancel))

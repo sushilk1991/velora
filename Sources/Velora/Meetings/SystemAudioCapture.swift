@@ -371,11 +371,6 @@ final class CoreAudioSystemAudioCapture {
     private var failureReported = false
     private var stopping = false
 
-    var hasCapturedFrames: Bool {
-        healthLock.lock(); defer { healthLock.unlock() }
-        return capturedFrames > 0
-    }
-
     func start(to url: URL) throws {
         _ = stop()
         resetHealth()
