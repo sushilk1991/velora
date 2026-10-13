@@ -1692,6 +1692,7 @@ class WhisperBackend:
         return text
 
     def reset(self) -> None:
+        had_audio = self._samples > 0
         self._chunks = []
         self._samples = 0
         self._decoded_samples = 0
@@ -1713,11 +1714,23 @@ class WhisperBackend:
         # reset on purpose — the server sets the prompt per session and reads
         # the finalize flags right after finalize() has reset the audio state.
 
+        # Stop/abort -> drained STT executor -> reset -> unused decode buffers.
+        # Keep weights loaded; clearing between audio chunks would churn buffers.
+        if had_audio and self._loaded:
+            self._release_decode_cache()
+
+    def _release_decode_cache(self) -> None:
+        """Release unused decode scratch while retaining the loaded weights."""
+        _clear_mlx_cache()
+
 
 class TranscribeCppWhisperBackend(WhisperBackend):
     """Whisper Q8 through transcribe.cpp, retaining Velora's session logic."""
 
     fallback_model_id = "mlx-community/whisper-large-v3-turbo"
+
+    def _release_decode_cache(self) -> None:
+        """Native decode owns no MLX buffers; close() releases its handles."""
 
     def __init__(self, model_id: str, language: str = "auto") -> None:
         super().__init__(model_id, language)

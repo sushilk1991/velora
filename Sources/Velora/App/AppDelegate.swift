@@ -233,8 +233,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         dictionarySync = ICloudDictionarySync(repository: dictionary)
         // Transcript text is tiny and kept indefinitely; only the audio archive
         // expires (the engine prunes clips). Play just disables when a row's
-        // clip has aged out. `pruneOlderThan` stays available for a future
-        // user-configurable text-retention setting.
+        // clip has aged out.
         dictation = DictationController(
             supervisor: supervisor,
             contextTracker: contextTracker,

@@ -216,6 +216,8 @@ enum Selftest {
         testEngineStatusCaption()
         testEngineUpdateStatus()
         testEngineStatusFollowsState()
+        testEngineReconnectPolling()
+        testEngineLogBounds()
         testHomeMicrophoneChooser()
         testHomeMicrophoneRows()
         testShellCopy()
@@ -13820,6 +13822,7 @@ enum Selftest {
             "com.velora.selftest.final.\(UUID().uuidString)"))
         var clock = Date()
         var maxSeconds = 3_600.0
+        var secureInput = true
         var graceActions: [() -> Void] = []
         var graceTimers: [Timer] = []
         defer { graceTimers.forEach { $0.invalidate() } }
@@ -13829,6 +13832,7 @@ enum Selftest {
             history: history, sounds: SoundPlayer(cues: []),
             dictionary: makeSyncRepository(fixture), pasteboard: pasteboard,
             capture: capture, mediaPlayback: playback, micAuthorized: { true },
+            secureInputActive: { secureInput },
             recordingLimit: { maxSeconds }, now: { clock },
             scheduleGrace: { delay, action in
                 graceActions.append(action)
@@ -13838,6 +13842,11 @@ enum Selftest {
                 graceTimers.append(timer)
                 return timer
             })
+        // A secure field refuses capture before any audio or engine start.
+        controller.toggleFromHome()
+        expect(source.starts.isEmpty && commands.isEmpty,
+               "secure input refuses fake capture and engine start")
+        secureInput = false
         let format = AVAudioFormat(
             commonFormat: .pcmFormatFloat32, sampleRate: 16_000,
             channels: 1, interleaved: false)!
@@ -14587,6 +14596,173 @@ enum Selftest {
     /// A crash takes a ready engine to degraded with no loading or status
     /// reply, so the supervisor posts its state change and the line leaves
     /// "Ready" for the reason at once, without polling.
+    /// Poll only while disconnected; an EOF re-arms external-engine recovery.
+    private static func testEngineReconnectPolling() {
+        var attempts = 0
+        var connected = false
+        var accepts = true
+        let supervisor = EngineSupervisor.forSelftest(
+            commandSink: { _ in }, readyOverride: { true }, restartSink: {},
+            connectAttempt: {
+                attempts += 1
+                connected = accepts
+                return connected
+            }, connectionIsOpen: { connected })
+        defer { supervisor.stop() }
+        // Inspect the timer only in the test; production state stays private.
+        func pollIsArmed() -> Bool {
+            let timer = Mirror(reflecting: supervisor).children.first {
+                $0.label == "connectTimer"
+            }?.value as? Timer
+            return timer?.isValid == true
+        }
+        supervisor.start()
+        expect(attempts == 1, "connection attempts immediately on start")
+        expect(!pollIsArmed(), "connected engine disarms its reconnect timer")
+        waitUntil(timeout: 0.7) { attempts > 1 }
+        expect(attempts == 1, "connected engine makes no repeat connection attempts")
+
+        // EOF must resume retries even when no owned Process can report exit.
+        connected = false
+        accepts = false
+        supervisor.engineClientDidDisconnect(supervisor.client)
+        expect(attempts == 2, "external EOF attempts reconnect immediately")
+        expect(waitUntil(timeout: 0.7) { attempts > 2 },
+               "failed reconnect continues probing")
+        accepts = true
+        expect(waitUntil(timeout: 0.7) { connected },
+               "reconnect picks up a replacement engine")
+        expect(!pollIsArmed(), "successful reconnect disarms its timer")
+        let afterReconnect = attempts
+        waitUntil(timeout: 0.7) { attempts > afterReconnect }
+        expect(attempts == afterReconnect, "successful reconnect stops polling")
+        supervisor.stop()
+        connected = false
+        supervisor.engineClientDidDisconnect(supervisor.client)
+        expect(attempts == afterReconnect, "quit prevents reconnect")
+    }
+
+    /// Byte retention also covers a child that emits no newlines at all.
+    private static func testEngineLogBounds() {
+        let directory = FileManager.default.temporaryDirectory
+            .appendingPathComponent("velora-engine-log-\(UUID().uuidString)")
+        try! FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let url = directory.appendingPathComponent("engine.log")
+        let capacity = 64
+        let supervisor = EngineSupervisor.forSelftest(
+            commandSink: { _ in }, readyOverride: { true }, restartSink: {},
+            logURL: url, logMaxBytes: capacity)
+        defer { supervisor.stop() }
+        let first = Data(repeating: 65, count: capacity)
+        let second = Data(repeating: 66, count: capacity)
+        let tail = Data("crash-tail".utf8)
+        supervisor.simulateSpawn(firstBootstrap: false, engineRefreshed: false, output: first)
+        supervisor.simulateSpawn(firstBootstrap: false, engineRefreshed: false, output: second + tail)
+        expect((try? Data(contentsOf: url)) == tail,
+               "active engine log retains newest tail after oversized output")
+        expect((try? Data(contentsOf: url.appendingPathExtension("1"))) == second,
+               "previous engine log retains one bounded preceding chunk")
+
+        // A final stderr write is drained even when the process exits immediately.
+        let process = Process()
+        process.executableURL = URL(fileURLWithPath: "/bin/sh")
+        process.arguments = ["-c", "printf stdout; printf stderr >&2"]
+        supervisor.simulateSpawn(firstBootstrap: false, engineRefreshed: false, process: process)
+        try! process.run()
+        expect(waitUntil(timeout: 2) { !process.isRunning }, "log child exits")
+        expect(waitUntil(timeout: 2) {
+            (try? Data(contentsOf: url)) == tail + Data("stdoutstderr".utf8)
+        }, "pipe preserves terminal stdout and stderr")
+
+        // Existing oversized files retain their newest bytes on upgrade.
+        let oldURL = directory.appendingPathComponent("old.log")
+        let oldOutput = first + second + tail
+        try! oldOutput.write(to: oldURL)
+        try! oldOutput.write(to: oldURL.appendingPathExtension("1"))
+        let upgraded = EngineSupervisor.forSelftest(
+            commandSink: { _ in }, readyOverride: { true }, restartSink: {},
+            logURL: oldURL, logMaxBytes: capacity)
+        defer { upgraded.stop() }
+        for file in [oldURL, oldURL.appendingPathExtension("1")] {
+            expect((try? Data(contentsOf: file)) == oldOutput.suffix(capacity),
+                   "upgrade bounds existing log while retaining its tail")
+        }
+
+        // Pipe pressure cannot strand a child that writes a large line.
+        let largeURL = directory.appendingPathComponent("large.log")
+        let pipeCapacity = 32_768
+        let large = EngineSupervisor.forSelftest(
+            commandSink: { _ in }, readyOverride: { true }, restartSink: {},
+            logURL: largeURL, logMaxBytes: pipeCapacity)
+        defer { large.stop() }
+        let verbose = Process()
+        verbose.executableURL = URL(fileURLWithPath: "/bin/sh")
+        verbose.arguments = ["-c", "/bin/dd if=/dev/zero bs=\(pipeCapacity) count=8 2>/dev/null; printf large-tail >&2"]
+        large.simulateSpawn(firstBootstrap: false, engineRefreshed: false, process: verbose)
+        try! verbose.run()
+        expect(waitUntil(timeout: 2) { !verbose.isRunning },
+               "continuous pipe drain lets a verbose child exit")
+        expect(waitUntil(timeout: 2) {
+            (try? Data(contentsOf: largeURL)) == Data("large-tail".utf8)
+        }, "oversized pipe output preserves the final tail")
+        expect((try? Data(contentsOf: largeURL.appendingPathExtension("1")))?.count == pipeCapacity,
+               "oversized pipe output keeps its predecessor bounded")
+
+        // Quit keeps the child's shutdown diagnostic before closing its pipe.
+        let quitting = Process()
+        quitting.executableURL = URL(fileURLWithPath: "/bin/sh")
+        quitting.arguments = ["-c", "trap 'printf term-tail; exit 0' TERM; printf ready; while :; do sleep 0.1; done"]
+        large.simulateSpawn(firstBootstrap: false, engineRefreshed: false, process: quitting)
+        try! quitting.run()
+        expect(waitUntil(timeout: 2) {
+            (try? Data(contentsOf: largeURL))?.suffix(5) == Data("ready".utf8)
+        }, "shutdown fixture starts before termination")
+        large.stop()
+        // The shell can emit its own signal diagnostic between these markers.
+        let shutdownData = (try? Data(contentsOf: largeURL)) ?? Data()
+        let shutdownPrefix = Data("large-tailready".utf8)
+        let shutdownTail = Data("term-tail".utf8)
+        expect(shutdownData.starts(with: shutdownPrefix)
+               && shutdownData.suffix(shutdownTail.count) == shutdownTail
+               && quitting.terminationStatus == EXIT_SUCCESS,
+               "quit drains terminal output before closing the pipe")
+
+        // Rotation keeps UTF-8 scalars intact even when separate reads split one.
+        let prefix = Data(repeating: 65, count: capacity - 1)
+        for (index, scalar) in ["é", "🍃"].enumerated() {
+            let encoded = Data(scalar.utf8)
+            for split in [false, true] {
+                let unicodeURL = directory.appendingPathComponent("unicode-\(index)-\(split).log")
+                let unicode = EngineSupervisor.forSelftest(
+                    commandSink: { _ in }, readyOverride: { true }, restartSink: {},
+                    logURL: unicodeURL, logMaxBytes: capacity)
+                if split {
+                    unicode.simulateSpawn(firstBootstrap: false, engineRefreshed: false,
+                                          output: prefix + encoded.prefix(1))
+                    unicode.simulateSpawn(firstBootstrap: false, engineRefreshed: false,
+                                          output: Data(encoded.dropFirst()))
+                } else {
+                    unicode.simulateSpawn(firstBootstrap: false, engineRefreshed: false,
+                                          output: prefix + encoded)
+                }
+                expect((try? Data(contentsOf: unicodeURL)) == encoded
+                       && (try? Data(contentsOf: unicodeURL.appendingPathExtension("1"))) == prefix,
+                       "rotation preserves complete \(scalar) across split=\(split)")
+                unicode.stop()
+            }
+        }
+        let unicodeOld = directory.appendingPathComponent("unicode-old.log")
+        let alignedTail = Data(repeating: 90, count: capacity - 1)
+        try! (prefix + Data("é".utf8) + alignedTail).write(to: unicodeOld)
+        let unicodeUpgrade = EngineSupervisor.forSelftest(
+            commandSink: { _ in }, readyOverride: { true }, restartSink: {},
+            logURL: unicodeOld, logMaxBytes: capacity)
+        expect((try? Data(contentsOf: unicodeOld)) == alignedTail,
+               "upgrade skips a leading partial UTF-8 scalar")
+        unicodeUpgrade.stop()
+    }
+
     private static func testEngineStatusFollowsState() {
         let supervisor = EngineSupervisor()
         let model = EngineStatusModel(supervisor: supervisor, version: "9.9.9")

@@ -50,7 +50,7 @@ from .cleanup import (
     _RETRACTION_RE,
     adaptive_timeout_ms,
 )
-from .cleanup_process import CleanupProcess, LOAD_TIMEOUT_S, respawn_backoff_s
+from .cleanup_process import CleanupProcess, respawn_backoff_s
 from .downloads import DownloadCoordinator, DownloadError, DownloadResult
 from .config import Config, velora_home
 from .formatting import STATIC_SYSTEM_PROMPT
@@ -641,6 +641,9 @@ class Session:
         self.preview_task: asyncio.Task[None] | None = None
         self.last_partial = ""
         self.last_raw_partial = ""
+        # Capture the consumer's start-time choice; ordinary sessions retain
+        # raw text for cleanup warm-up without projecting or sending drafts.
+        self._partials_enabled = self.context.get("stream_typing") is True
         self.cancelled = False
         self.samples = 0
         self.stt_time_s = 0.0
@@ -1097,17 +1100,22 @@ class Engine:
         await self._send({"event": "setup_complete"})
 
     async def _publish_downloads(self, *, force: bool = False) -> None:
-        snapshot = self._downloads.snapshot()
-        if not force and snapshot["sequence"] == self._download_sequence:
+        # Reconnects force a detached snapshot; unchanged watch/adoption
+        # publications check the sequence before copying the listed entries.
+        snapshot = (self._downloads.snapshot() if force
+                    else self._downloads._snapshot_after(self._download_sequence))
+        if snapshot is None:
             return
+
         self._download_sequence = snapshot["sequence"]
         await self._send({"event": "download_status", **snapshot})
 
     async def _watch_downloads(self) -> None:
-        # Poll only authoritative mutations, never estimates or cache growth.
+        # Block between authoritative mutations. A mutation during a socket
+        # send remains visible through its newer sequence on the next wait.
         while True:
+            await self._downloads._wait_changed(self._download_sequence)
             await self._publish_downloads()
-            await asyncio.sleep(_DOWNLOAD_POLL_S)
 
     def _queue_model_job(self, model: str, kind: str, *,
                          origin: _ModelJobOrigin = _ModelJobOrigin.selection,
@@ -2386,12 +2394,21 @@ class Engine:
     async def _emit_partial(self, session: Session, partial: str | None) -> None:
         """Send one current-session partial, shared by stream and preview lanes."""
         raw = (partial or "").strip()
-        if raw:
-            session.last_raw_partial = raw
+        # Empty/repeated hypotheses cannot change the draft. Completed chunk
+        # cleanup has its own projection callback, so audio-only feeds skip it.
+        if not raw or raw == session.last_raw_partial:
+            return
+
+        session.last_raw_partial = raw
         await self._emit_projected_partial(session)
 
     async def _emit_projected_partial(self, session: Session) -> None:
         """Publish cleaned stable chunks plus the latest unconfirmed ASR tail."""
+        # Only a live Stream Typing consumer needs a full segment projection.
+        # Keep internal ASR/cleanup state independent of this socket surface.
+        if not session._partials_enabled or session.cancelled or self.session is not session:
+            return
+
         cleaned: list[str] = []
         for task in session.chunk_tasks:
             if (
@@ -2410,8 +2427,6 @@ class Engine:
         if (
             not text
             or text == session.last_partial
-            or session.cancelled
-            or self.session is not session
         ):
             return
         # Record before awaiting socket backpressure so two ready producers
@@ -3282,7 +3297,10 @@ class Engine:
         session: Session,
         task: asyncio.Task[_ChunkResult],
     ) -> None:
-        if task.cancelled() or task.exception() is not None:
+        # Ordinary dictation keeps the cleaned chunk for finalize, but has no
+        # draft consumer needing a separate projection task after completion.
+        if (not session._partials_enabled or session.cancelled or self.session is not session
+                or task.cancelled() or task.exception() is not None):
             return
         # The callback runs on the engine event loop. Re-projecting uses only
         # tasks still present in the session's contiguous chunk list, so a

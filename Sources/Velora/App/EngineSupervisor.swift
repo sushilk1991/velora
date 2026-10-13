@@ -39,6 +39,179 @@ protocol EngineSupervisorDelegate: AnyObject {
 /// engine (e.g. started by a developer in a terminal) is picked up
 /// automatically.
 final class EngineSupervisor: NSObject, EngineClientDelegate {
+    private static let engineLogBytes = 5_000_000
+
+    /// Fixed byte chunks keep both disk retention and pipe memory bounded.
+    /// child -> nonblocking pipe -> serial writer -> engine.log / engine.log.1
+    private final class OutputLog {
+        final class Capture {
+            let pipe = Pipe()
+            var finished = false
+        }
+
+        private static let readBytes = 32_768
+        private enum UTF8 {
+            static let scalarBytes = 4
+            static let continuationMask: UInt8 = 0xC0
+            static let continuation: UInt8 = 0x80
+        }
+        private let lock = NSLock()
+        private let url: URL
+        private let previous: URL
+        private let limit: Int
+        private var handle: FileHandle?
+        private var size = 0
+
+        init(url: URL, limit: Int) {
+            self.url = url
+            self.previous = url.appendingPathExtension("1")
+            self.limit = max(UTF8.scalarBytes, limit)
+            // Upgrade existing append-only logs without retaining oversized files.
+            trim(url)
+            trim(previous)
+            open()
+        }
+
+        deinit { try? handle?.close() }
+
+        // The reader writes directly: a verbose child cannot grow a queued log backlog.
+        func attach(to process: Process) -> Capture {
+            let capture = Capture()
+            let reader = capture.pipe.fileHandleForReading
+            let descriptor = reader.fileDescriptor
+            _ = fcntl(descriptor, F_SETFL, fcntl(descriptor, F_GETFL) | O_NONBLOCK)
+            reader.readabilityHandler = { [weak self, weak capture] _ in
+                guard let self, let capture else { return }
+                self.lock.lock()
+                defer { self.lock.unlock() }
+                self.drain(capture)
+            }
+            process.standardOutput = capture.pipe
+            process.standardError = capture.pipe
+            return capture
+        }
+
+        // Exit/quit drains the already-written tail before the reader closes.
+        func finish(_ capture: Capture) {
+            lock.lock()
+            defer { lock.unlock() }
+            guard !capture.finished else { return }
+            capture.pipe.fileHandleForReading.readabilityHandler = nil
+            drain(capture)
+            capture.finished = true
+            try? capture.pipe.fileHandleForReading.close()
+            try? capture.pipe.fileHandleForWriting.close()
+        }
+
+        func append(_ data: Data) {
+            lock.lock()
+            defer { lock.unlock() }
+            write(data)
+        }
+
+        private func drain(_ capture: Capture) {
+            guard !capture.finished else { return }
+            let reader = capture.pipe.fileHandleForReading
+            var bytes = [UInt8](repeating: 0, count: Self.readBytes)
+            while true {
+                let count = Darwin.read(reader.fileDescriptor, &bytes, bytes.count)
+                if count > 0 {
+                    write(Data(bytes.prefix(count)))
+                    continue
+                }
+                if count < 0 && errno == EINTR { continue }
+                if count == 0 { reader.readabilityHandler = nil }
+                return
+            }
+        }
+
+        private func open() {
+            let manager = FileManager.default
+            if !manager.fileExists(atPath: url.path) {
+                manager.createFile(atPath: url.path, contents: nil)
+            }
+            handle = try? FileHandle(forWritingTo: url)
+            size = Int((try? handle?.seekToEnd()) ?? 0)
+        }
+
+        private func write(_ data: Data) {
+            // Split large writes at the byte cap; a single long line stays bounded.
+            var offset = 0
+            while offset < data.count {
+                if size >= limit {
+                    rotate()
+                }
+                guard let handle, size < limit else { return }
+                let count = min(limit - size, data.count - offset)
+                do {
+                    try handle.write(contentsOf: data.subdata(in: offset..<(offset + count)))
+                } catch {
+                    return
+                }
+                size += count
+                offset += count
+            }
+        }
+
+        private func rotate() {
+            // A scalar split at the byte cap moves whole to the new file.
+            // For example, trailing C3 moves before its next A9 byte (é).
+            let carry = scalarCarry()
+            if !carry.isEmpty {
+                try? handle?.truncate(atOffset: UInt64(size - carry.count))
+            }
+            try? handle?.close()
+            handle = nil
+            let manager = FileManager.default
+            try? manager.removeItem(at: previous)
+            do {
+                try manager.moveItem(at: url, to: previous)
+            } catch {
+                // Still cap the current file if preserving its predecessor fails.
+                try? Data().write(to: url)
+            }
+            open()
+            guard !carry.isEmpty, let handle, size + carry.count <= limit else { return }
+            do {
+                try handle.write(contentsOf: carry)
+                size += carry.count
+            } catch {
+                return
+            }
+        }
+
+        // Inspect at most one scalar; pipe/read boundaries need no line buffer.
+        private func scalarCarry() -> Data {
+            guard size > 0, let reader = try? FileHandle(forReadingFrom: url) else { return Data() }
+            defer { try? reader.close() }
+            let count = min(size, UTF8.scalarBytes)
+            try? reader.seek(toOffset: UInt64(size - count))
+            guard let tail = try? reader.read(upToCount: count), !tail.isEmpty else { return Data() }
+            var lead = tail.count - 1
+            while lead > 0 && Self.isContinuation(tail[lead]) {
+                lead -= 1
+            }
+            let expected = (~tail[lead]).leadingZeroBitCount
+            guard expected > 1, expected <= UTF8.scalarBytes,
+                  tail.count - lead < expected else { return Data() }
+            return tail.subdata(in: lead..<tail.count)
+        }
+
+        private static func isContinuation(_ byte: UInt8) -> Bool {
+            (byte & UTF8.continuationMask) == UTF8.continuation
+        }
+
+        private func trim(_ file: URL) {
+            guard let reader = try? FileHandle(forReadingFrom: file) else { return }
+            defer { try? reader.close() }
+            guard let bytes = try? reader.seekToEnd(), bytes > UInt64(limit) else { return }
+            try? reader.seek(toOffset: bytes - UInt64(limit))
+            guard let tail = try? reader.read(upToCount: limit) else { return }
+            // The retained tail may begin inside a scalar; keep only its full suffix.
+            try? Data(tail.drop(while: Self.isContinuation)).write(to: file, options: .atomic)
+        }
+    }
+
     /// The Python sidecar uses BSD `EX_TEMPFAIL` after it has already returned
     /// raw text from an unkillable cleanup-model wedge. This is a controlled
     /// replacement request, not a crash that benefits from backoff.
@@ -146,6 +319,9 @@ final class EngineSupervisor: NSObject, EngineClientDelegate {
 
     private var process: Process?
     private var connectTimer: Timer?
+    private static let connectInterval: TimeInterval = 0.5
+    private var outputLog: OutputLog?
+    private var outputCapture: OutputLog.Capture?
     private var restartAttempts = 0
     private(set) var processGeneration = 0
     private(set) var stallRestartCount = 0
@@ -153,15 +329,26 @@ final class EngineSupervisor: NSObject, EngineClientDelegate {
     private let commandSink: (([String: Any]) -> Void)?
     private let readyOverride: (() -> Bool)?
     private let restartSink: (() -> Void)?
+    private let connectAttempt: (() -> Bool)?
+    private let connectionIsOpen: (() -> Bool)?
 
     private init(
         commandSink: (([String: Any]) -> Void)? = nil,
         readyOverride: (() -> Bool)? = nil,
-        restartSink: (() -> Void)? = nil
+        restartSink: (() -> Void)? = nil,
+        connectAttempt: (() -> Bool)? = nil,
+        connectionIsOpen: (() -> Bool)? = nil,
+        logURL: URL? = nil,
+        logMaxBytes: Int = engineLogBytes
     ) {
         self.commandSink = commandSink
         self.readyOverride = readyOverride
         self.restartSink = restartSink
+        self.connectAttempt = connectAttempt
+        self.connectionIsOpen = connectionIsOpen
+        if let logURL {
+            outputLog = OutputLog(url: logURL, limit: logMaxBytes)
+        }
         super.init()
         downloads.bind { [weak self] command in self?.send(command) }
         Self.latestDownloads = downloads
@@ -175,11 +362,17 @@ final class EngineSupervisor: NSObject, EngineClientDelegate {
     static func forSelftest(
         commandSink: @escaping ([String: Any]) -> Void,
         readyOverride: @escaping () -> Bool,
-        restartSink: @escaping () -> Void
+        restartSink: @escaping () -> Void,
+        connectAttempt: (() -> Bool)? = nil,
+        connectionIsOpen: (() -> Bool)? = nil,
+        logURL: URL? = nil,
+        logMaxBytes: Int = engineLogBytes
     ) -> EngineSupervisor {
         EngineSupervisor(
             commandSink: commandSink, readyOverride: readyOverride,
-            restartSink: restartSink)
+            restartSink: restartSink, connectAttempt: connectAttempt,
+            connectionIsOpen: connectionIsOpen,
+            logURL: logURL, logMaxBytes: logMaxBytes)
     }
 
     /// Replace an unresponsive process while keeping normal crash recovery.
@@ -194,6 +387,7 @@ final class EngineSupervisor: NSObject, EngineClientDelegate {
         stallRestartCount += 1
         client.disconnect(notify: false)
         state = .launching
+        stopConnectLoop()
         proc.terminate()
         DispatchQueue.main.asyncAfter(deadline: .now() + 2) { [weak self, weak proc] in
             guard let self, let proc, self.process === proc, proc.isRunning else { return }
@@ -208,17 +402,24 @@ final class EngineSupervisor: NSObject, EngineClientDelegate {
         guard !isQuitting else { return }
         AppConfig.shared.ensureVeloraDirectory()
         AppConfig.shared.writeEngineConfigIfMissing()
-        spawnEngineProcess()
+        client.delegate = self
+        // A fake socket driver exercises supervision without launching Python.
+        if connectAttempt == nil {
+            spawnEngineProcess()
+        }
         beginConnectLoop()
     }
 
     /// Terminates the engine and stops all supervision. Call on app quit.
     func stop() {
         isQuitting = true
-        connectTimer?.invalidate()
-        connectTimer = nil
+        stopConnectLoop()
         client.disconnect(notify: false)
         terminateProcess()
+        if let outputCapture {
+            outputLog?.finish(outputCapture)
+        }
+        outputCapture = nil
         state = .stopped
     }
 
@@ -284,26 +485,22 @@ final class EngineSupervisor: NSObject, EngineClientDelegate {
             engineUpdatePending = true
         }
 
-        // Engine logs go to a file so crashes are diagnosable. Append (never
-        // truncate) so the evidence from a crash survives the restart spawn.
+        // Preserve recent output across crashes without unbounded disk growth.
         let logURL = AppConfig.veloraDirectory.appendingPathComponent("engine.log")
-        if !FileManager.default.fileExists(atPath: logURL.path) {
-            FileManager.default.createFile(atPath: logURL.path, contents: nil)
+        let log = outputLog ?? OutputLog(url: logURL, limit: Self.engineLogBytes)
+        outputLog = log
+        let stamp = ISO8601DateFormatter().string(from: Date())
+        log.append(Data("\n===== engine spawn \(stamp) =====\n".utf8))
+        if firstBootstrap {
+            log.append(Data(
+                "First-run bootstrap: uv is creating the engine venv and downloading Python dependencies (can take several minutes; progress below).\n".utf8))
         }
-        if let handle = try? FileHandle(forWritingTo: logURL) {
-            handle.seekToEndOfFile()
-            let stamp = ISO8601DateFormatter().string(from: Date())
-            handle.write(Data("\n===== engine spawn \(stamp) =====\n".utf8))
-            if firstBootstrap {
-                handle.write(Data(
-                    "First-run bootstrap: uv is creating the engine venv and downloading Python dependencies (can take several minutes; progress below).\n".utf8))
-            }
-            proc.standardOutput = handle
-            proc.standardError = handle
-        }
+        let capture = log.attach(to: proc)
+        outputCapture = capture
         announceStartup(firstBootstrap: firstBootstrap)
 
         proc.terminationHandler = { [weak self] p in
+            log.finish(capture)
             DispatchQueue.main.async {
                 self?.handleProcessExit(status: p.terminationStatus)
             }
@@ -316,6 +513,8 @@ final class EngineSupervisor: NSObject, EngineClientDelegate {
             state = .launching
             NSLog("Velora: engine spawned (pid %d)", proc.processIdentifier)
         } catch {
+            log.finish(capture)
+            outputCapture = nil
             state = .degraded("Failed to launch engine: \(error.localizedDescription)")
         }
     }
@@ -339,7 +538,18 @@ final class EngineSupervisor: NSObject, EngineClientDelegate {
     }
 
     /// Test seam for spawn status and process-generation fencing.
-    func simulateSpawn(firstBootstrap: Bool, engineRefreshed: Bool) {
+    func simulateSpawn(
+        firstBootstrap: Bool, engineRefreshed: Bool,
+        output: Data? = nil, process: Process? = nil
+    ) {
+        // Selftest output uses the same writer and pipe as a real engine spawn.
+        if let output { outputLog?.append(output) }
+        if let process, let outputLog {
+            self.process = process
+            let capture = outputLog.attach(to: process)
+            outputCapture = capture
+            process.terminationHandler = { _ in outputLog.finish(capture) }
+        }
         if engineRefreshed {
             engineUpdatePending = true
         }
@@ -362,6 +572,7 @@ final class EngineSupervisor: NSObject, EngineClientDelegate {
         // re-reports its own progress.
         updateLoading(phase: nil, fraction: nil)
         client.disconnect(notify: false)
+        stopConnectLoop()
         restartAttempts = Self.nextRestartAttempt(status: status, current: restartAttempts)
         let delay = Self.restartDelay(status: status, attempt: restartAttempts)
         if delay == 0 {
@@ -374,6 +585,7 @@ final class EngineSupervisor: NSObject, EngineClientDelegate {
         DispatchQueue.main.asyncAfter(deadline: .now() + delay) { [weak self] in
             guard let self, !self.isQuitting else { return }
             self.spawnEngineProcess()
+            self.beginConnectLoop()
         }
     }
 
@@ -398,6 +610,7 @@ final class EngineSupervisor: NSObject, EngineClientDelegate {
             usleep(50_000)  // 50 ms poll
         }
         if proc.isRunning { kill(proc.processIdentifier, SIGKILL) }
+        proc.waitUntilExit()
         process = nil
     }
 
@@ -435,9 +648,10 @@ final class EngineSupervisor: NSObject, EngineClientDelegate {
     // MARK: - Socket connect loop
 
     private func beginConnectLoop() {
-        connectTimer?.invalidate()
-        client.delegate = self
-        let timer = Timer(timeInterval: 0.5, repeats: true) { [weak self] _ in
+        guard !isQuitting else { return }
+        stopConnectLoop()
+        guard !(connectionIsOpen?() ?? client.isConnected) else { return }
+        let timer = Timer(timeInterval: Self.connectInterval, repeats: true) { [weak self] _ in
             self?.attemptConnect()
         }
         RunLoop.main.add(timer, forMode: .common)
@@ -445,9 +659,16 @@ final class EngineSupervisor: NSObject, EngineClientDelegate {
         attemptConnect()
     }
 
+    // Connected sockets report EOF themselves; polling adds no health signal.
+    private func stopConnectLoop() {
+        connectTimer?.invalidate()
+        connectTimer = nil
+    }
+
     private func attemptConnect() {
-        guard !isQuitting, !client.isConnected else { return }
-        if client.connect(path: AppConfig.socketPath) {
+        guard !isQuitting, !(connectionIsOpen?() ?? client.isConnected) else { return }
+        if connectAttempt?() ?? client.connect(path: AppConfig.socketPath) {
+            stopConnectLoop()
             state = .connecting
             downloads.connect()
             client.send(json: ["cmd": "ping"])
@@ -524,6 +745,7 @@ final class EngineSupervisor: NSObject, EngineClientDelegate {
         } else {
             state = .launching
         }
-        // connect loop keeps running and will re-establish the session
+        // EOF re-arms polling for external engines as well as owned processes.
+        beginConnectLoop()
     }
 }

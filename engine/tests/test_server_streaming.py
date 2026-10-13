@@ -6,6 +6,7 @@ exact legacy behavior when streaming_cleanup is off."""
 # ruff: noqa: F811
 
 import asyncio
+from unittest.mock import Mock
 
 import pytest
 
@@ -182,6 +183,72 @@ async def run_dictation(client, session_id: str, chunks: int = 6, context: dict 
     await client.send_json({"cmd": "stop", "session": session_id})
 
 
+async def test_ordinary_chunk_cleanup(engine, segments, monkeypatch):
+    # Ordinary dictation still decodes and cleans stable segments while
+    # recording, but sends only its final transcript to the client.
+    eng, sock = engine
+    cleanup = FakeCleanup()
+    eng.cleanup = cleanup
+    project = Mock(wraps=server_mod._project_partial)
+    monkeypatch.setattr(server_mod, "_project_partial", project)
+    client = await connect(sock)
+    await client.recv_event("ready")
+    await client.send_json({"cmd": "start", "session": "ordinary-chunks", "context": {}})
+    for _ in range(4):
+        await client.send_audio(AUDIO)
+    async with asyncio.timeout(5):
+        while (eng.session is None or eng.session.stt_processed_samples < 4 * len(AUDIO)
+               or len(cleanup.calls) != 2
+               or not all(task.done() for task in eng.session.chunk_tasks)):
+            await asyncio.sleep(.01)
+    session = eng.session
+    assert session.last_raw_partial == f"{SEG1} {SEG2}"
+    assert [call[0] for call in cleanup.calls] == [SEG1, SEG2]
+
+    await client.send_json({"cmd": "stop", "session": session.id})
+    events = []
+    while not events or events[-1]["event"] != "final":
+        events.append(await client.recv())
+    assert "partial" not in [event["event"] for event in events]
+    assert events[-1]["text"] == f"<{SEG1}> <{SEG2}> <{TAIL}>."
+    project.assert_not_called()
+    client.close()
+
+
+@pytest.mark.parametrize("repeated", [None, "Stable raw partial"])
+async def test_unchanged_partial_scan(engine, monkeypatch, repeated):
+    # After one stream draft, feed frames with no changed hypothesis. Their
+    # audio still reaches STT without re-projecting all committed chunks.
+    eng, sock = engine
+    feed = eng.stt.feed_chunk
+    calls = 0
+
+    def steady_feed(chunk):
+        nonlocal calls
+        calls += 1
+        feed(chunk)
+        return "Stable raw partial" if calls == 1 else repeated
+
+    project = Mock(wraps=server_mod._project_partial)
+    monkeypatch.setattr(eng.stt, "feed_chunk", steady_feed)
+    monkeypatch.setattr(server_mod, "_project_partial", project)
+    client = await connect(sock)
+    await client.recv_event("ready")
+    await client.send_json({
+        "cmd": "start", "session": "stable-draft", "context": {"stream_typing": True},
+    })
+    for _ in range(10):
+        await client.send_audio(AUDIO)
+    async with asyncio.timeout(5):
+        while eng.session is None or eng.session.stt_processed_samples < 10 * len(AUDIO):
+            await asyncio.sleep(.01)
+    assert (await client.recv_event("partial"))["text"] == "Stable raw partial"
+    assert project.call_count == 1
+    await client.send_json({"cmd": "cancel", "session": "stable-draft"})
+    await client.recv_event("cancelled")
+    client.close()
+
+
 async def test_streaming_pipeline_end_to_end(engine, segments):
     eng, sock = engine
     cleanup = FakeCleanup()
@@ -189,7 +256,7 @@ async def test_streaming_pipeline_end_to_end(engine, segments):
     client = await connect(sock)
     await client.recv_event("ready")
 
-    await client.send_json({"cmd": "start", "session": "st1", "context": {}})
+    await client.send_json({"cmd": "start", "session": "st1", "context": {"stream_typing": True}})
     partials = []
     for _ in range(4):
         await client.send_audio(AUDIO)
@@ -909,11 +976,11 @@ async def test_streaming_cleanup_off_uses_whole_text_path(engine, segments):
     client = await connect(sock)
     await client.recv_event("ready")
 
-    await client.send_json({"cmd": "start", "session": "st4", "context": {}})
+    await client.send_json({"cmd": "start", "session": "st4", "context": {"stream_typing": True}})
     partial_seen = False
     for _ in range(4):
         await client.send_audio(AUDIO)
-    # segments are still decoded for HUD preview partials
+    # Stream Typing still receives raw segments when chunk cleanup is off.
     evt = await client.recv(timeout=5)
     if evt.get("event") == "partial":
         partial_seen = True

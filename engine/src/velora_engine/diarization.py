@@ -49,8 +49,6 @@ _EMB_URL = (
 )
 _EMB_SHA256 = "ad4a1802485d8b34c722d2a9d04249662f2ece5d28a7a039063ca22f515a789e"
 
-DOWNLOAD_BYTES = 6_900_000 + 40_257_283  # tarball + titanet, for progress UI
-
 # Auto speaker count with these settings beat fixed-count in every spike test:
 # the segmentation model emits ~0.35 s phantom overlap segments at some turn
 # boundaries, and a fixed cluster count lets the phantom eat a real speaker's
@@ -103,11 +101,6 @@ def available() -> bool:
     return True
 
 
-def models_ready() -> bool:
-    root = models_dir()
-    return (root / _SEG_NAME).is_file() and (root / _EMB_NAME).is_file()
-
-
 def _hash_ok(path: Path, expected: str) -> bool:
     return path.is_file() and sha256(path.read_bytes()).hexdigest() == expected
 
@@ -133,7 +126,7 @@ def ensure_models(progress: Callable[[int], None] | None = None) -> None:
     leave a truncated file that passes an existence check forever. All writes
     are verify-then-atomic-rename, so a crash at any point leaves either the
     old state or a fully verified file. Raises on any failure. ``progress``
-    receives cumulative bytes downloaded (vs DOWNLOAD_BYTES).
+    receives cumulative bytes downloaded.
     """
     root = models_dir()
     root.mkdir(parents=True, exist_ok=True)

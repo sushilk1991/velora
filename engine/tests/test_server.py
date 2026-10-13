@@ -680,7 +680,8 @@ async def test_cleanup_load_retry_waits_for_dictation(home, fake_stt, monkeypatc
             await client.recv_event("setup_complete")
         await client.send_json({"cmd": "start", "session": "held", "context": {}})
         await client.send_audio(AUDIO)
-        await client.recv_event("partial")
+        await wait_for(lambda: eng.session is not None
+                       and eng.session.stt_processed_samples == len(AUDIO))
         built = len(workers)
         await asyncio.sleep(0.6)
 
@@ -813,7 +814,8 @@ async def test_dictation_start_abandons_a_cleanup_retry_load(
 
         await client.send_json({"cmd": "start", "session": "mid-load", "context": {}})
         await client.send_audio(AUDIO)
-        await client.recv_event("partial")
+        await wait_for(lambda: eng.session is not None
+                       and eng.session.stt_processed_samples == len(AUDIO))
         await wait_for(lambda: process_gone(retry_pid), timeout_s=1.0)
         assert eng.cleanup is None
         assert len(spawned) == 2
@@ -855,7 +857,8 @@ async def test_cleanup_retry_rechecks_for_a_dictation_after_the_cache_check(
         built = len(spawned)
         await client.send_json({"cmd": "start", "session": "held", "context": {}})
         await client.send_audio(AUDIO)
-        await client.recv_event("partial")
+        await wait_for(lambda: eng.session is not None
+                       and eng.session.stt_processed_samples == len(AUDIO))
         await asyncio.sleep(0.5)
         assert len(spawned) == built
 
@@ -2239,7 +2242,7 @@ async def test_partials_emitted(engine):
     eng, sock = engine
     client = await connect(sock)
     await client.recv_event("ready")
-    await client.send_json({"cmd": "start", "session": "s2", "context": {}})
+    await client.send_json({"cmd": "start", "session": "s2", "context": {"stream_typing": True}})
     await client.send_audio(AUDIO)
     partial = await client.recv_event("partial")
     assert partial["session"] == "s2"
@@ -2280,8 +2283,9 @@ async def test_recording_never_runs_cleanup_prefill_against_live_stt(engine):
         },
     })
     await client.send_audio(AUDIO)
-    partial = await client.recv_event("partial")
-    assert partial["session"] == "no-prefill-race"
+    await wait_for(lambda: eng.session is not None
+                   and eng.session.stt_processed_samples == len(AUDIO))
+    assert eng.session.last_raw_partial
     assert cleanup.calls == []
 
     await client.send_json({"cmd": "stop", "session": "no-prefill-race"})
@@ -3267,7 +3271,9 @@ async def test_preview_decode_does_not_block_socket_ingest(engine, monkeypatch):
     client = await connect(sock)
     await client.recv_event("ready")
     try:
-        await client.send_json({"cmd": "start", "session": "preview-live", "context": {}})
+        await client.send_json({
+            "cmd": "start", "session": "preview-live", "context": {"stream_typing": True},
+        })
         await client.send_audio(AUDIO)
         assert await asyncio.to_thread(decode_started.wait, 2)
 
