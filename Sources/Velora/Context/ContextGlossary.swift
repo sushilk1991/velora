@@ -11,6 +11,10 @@ enum ContextGlossary {
     private static let maxSourceCharacters = 8_000
     private static let maxSourceStrings = 128
     private static let tokenPattern = #"[\p{L}\p{N}][\p{L}\p{M}\p{N}._+'\u2019-]*"#
+    /// Compiled once. `NSRegularExpression` is immutable and safe to match
+    /// concurrently; options stay empty, matching the per-call compile.
+    private static let tokenExpression: NSRegularExpression? =
+        try? NSRegularExpression(pattern: tokenPattern)
     private static let trailingPunctuation = CharacterSet(charactersIn: ".'-_")
     private static let contractionTails = ["n't", "'ll", "'ve", "'re", "'d"]
     private static let inflectionTails = ["ed", "d", "ing"]
@@ -25,6 +29,10 @@ enum ContextGlossary {
             .split(separator: " ").map(String.init))
     private static let instructionPattern =
         #"(?i)\b(ignore|disregard|instructions?|system|assistant|output|respond|repeat|insert|execute|override)\b|<\||\|>|https?://"#
+    /// Same compiled-once expression as `tokenExpression`. Case folding stays
+    /// the inline `(?i)`; no `NSRegularExpression.Options` are set.
+    private static let instructionExpression: NSRegularExpression? =
+        try? NSRegularExpression(pattern: instructionPattern)
     private static let signalTypes: Set<String> = ["site", "person", "file", "channel"]
     private static let systemWordListPath = "/usr/share/dict/words"
 
@@ -46,7 +54,11 @@ enum ContextGlossary {
                 // Reject oversized strings rather than manufacture a clipped token.
                 remaining -= text.unicodeScalars.count
                 guard text.unicodeScalars.count <= maxSourceCharacters,
-                      text.range(of: instructionPattern, options: .regularExpression) == nil
+                      instructionExpression?.firstMatch(
+                          in: text,
+                          options: [],
+                          range: NSRange(location: 0, length: (text as NSString).length)
+                      ) == nil
                 else { continue }
                 for term in candidates(in: text) {
                     let key = term.folding(options: .caseInsensitive, locale: Locale(identifier: "en_US_POSIX"))
@@ -110,7 +122,7 @@ enum ContextGlossary {
     /// not prose. Trailing punctuation is part of the sentence, not the term:
     /// an OCR line break leaves "auto-" and a list leaves "Redis,".
     private static func candidates(in text: String) -> [String] {
-        guard let regex = try? NSRegularExpression(pattern: tokenPattern) else { return [] }
+        guard let regex = tokenExpression else { return [] }
         let ns = text as NSString
         return regex.matches(in: text, range: NSRange(location: 0, length: ns.length))
             .compactMap { match in
