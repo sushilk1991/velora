@@ -228,6 +228,7 @@ enum Selftest {
         testAudioCaptureQuickReleasePreservesFirstPCM()
         testAudioCaptureStopPreservesConvertedTail()
         testAudioCaptureSampleLimit()
+        testAudioCaptureMixesStereoToMono()
         testAudioCaptureRapidRestart()
         testMediaPlaybackNoop()
         testMediaPlaybackUnknownStateFailsClosed()
@@ -15638,6 +15639,64 @@ enum Selftest {
 
         capture.stop()
         source.stops[0]()
+    }
+
+    /// A stereo mic must reach the engine whichever channel carries the voice.
+    /// Some USB webcams (field report: Angetube Live Camera, 2 ch, 48 kHz)
+    /// leave channel 1 empty; a converter that keeps only channel 1 archived
+    /// pure silence and every take ended "Couldn't transcribe".
+    ///
+    ///     ch 1  ________________   dead capsule
+    ///     ch 2  ~~~~~~~~~~~~~~~~   voice
+    ///     mono  ~~~~~~~~~~~~~~~~   must carry the voice
+    private static func testAudioCaptureMixesStereoToMono() {
+        let voiceAmplitude: Float = 0.1
+        let toneHz: Float = 440
+        let deviceRate: Double = 48_000
+        let deviceFrames = 4_800  // 100 ms at 48 kHz
+        let format = AVAudioFormat(
+            commonFormat: .pcmFormatFloat32, sampleRate: deviceRate,
+            channels: 2, interleaved: false)!
+
+        // Voice on one channel only; `live` is the channel index carrying it.
+        for live in 0..<2 {
+            let source = FakeMicrophoneSource()
+            let capture = AudioCapture(source: source)
+            let buffer = AVAudioPCMBuffer(
+                pcmFormat: format, frameCapacity: AVAudioFrameCount(deviceFrames))!
+            buffer.frameLength = AVAudioFrameCount(deviceFrames)
+            for index in 0..<deviceFrames {
+                let phase = 2 * Float.pi * toneHz * Float(index) / Float(deviceRate)
+                buffer.floatChannelData![live][index] = voiceAmplitude * sin(phase)
+                buffer.floatChannelData![1 - live][index] = 0
+            }
+            var samples: [Float] = []
+            var started = false
+
+            capture.start(
+                onChunk: { data in
+                    data.withUnsafeBytes { samples += $0.bindMemory(to: Float.self) }
+                },
+                onLevel: { _ in },
+                completion: { result in
+                    if case .success = result { started = true }
+                })
+            source.starts[0].completion(.success(()))
+            source.starts[0].onBuffer(buffer)
+            _ = waitUntil { started }
+            var stopped = false
+            capture.stop { stopped = true }
+            source.stops[0]()
+            _ = waitUntil { stopped }
+
+            // A 0.1 sine has RMS 0.0707; an even two-channel mix halves it.
+            // Anything above the engine's 0.003 speech floor proves the voice
+            // survived; silence measures 0.
+            let power = samples.reduce(Float(0)) { $0 + $1 * $1 }
+            let rms = samples.isEmpty ? 0 : (power / Float(samples.count)).squareRoot()
+            expect(rms > 0.02,
+                   "stereo mic with voice only on channel \(live + 1) reaches the engine (rms \(rms))")
+        }
     }
 
     /// A coordinator on a scripted Core Audio snapshot. `toggles` counts the

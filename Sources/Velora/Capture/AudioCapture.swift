@@ -219,6 +219,10 @@ final class AudioCapture {
         let inFormat = buffer.format
         if converter == nil || converterInputFormat != inFormat {
             converter = AVAudioConverter(from: inFormat, to: outFormat)
+            // Mix every input channel into mono. The default channel map keeps
+            // only channel 1, so a USB webcam that carries its mic on channel
+            // 2 recorded pure silence.
+            converter?.downmix = true
             converterInputFormat = inFormat
         }
         guard let converter else {
