@@ -3,7 +3,11 @@ name = "velora-engine"
 version = "0.1.0"
 description = "Velora on-device inference engine: streaming STT + LLM cleanup over a unix socket"
 readme = "README.md"
-requires-python = ">=3.12"
+# The app ships no .python-version, so uv takes the first Python it finds
+# (Homebrew's python3 is 3.15 now). mlx and torch publish no cp315 wheels, so
+# a venv on 3.15 fails to install and the engine never starts. Raise the bound
+# once tests/test_lock_wheels.py passes on the next version.
+requires-python = ">=3.12,<3.15"
 dependencies = [
     "mlx-lm>=0.31.3",
     "mlx-whisper>=0.4.3",
