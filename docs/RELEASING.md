@@ -88,7 +88,11 @@ on `main`.
    ```
 
    Output: `build/Velora-X.Y.Z.dmg` — signed, notarized, stapled, and already
-   passed `verify-dmg.sh`. The script refuses to overwrite an existing DMG:
+   passed `verify-dmg.sh`, which also builds the bundled engine the way a
+   fresh install does (`verify-engine-bootstrap.sh`: the bundled uv, the
+   app's PATH, this Mac's Python). The first run on a machine fills
+   `~/Library/Caches/velora-release-uv` with about 1 GB of wheels; later runs
+   reuse it and take seconds. The script refuses to overwrite an existing DMG:
    **a version never ships twice** — if the artifact is wrong, bump again.
 
    `make-app.sh` stamps `Resources/Info.plist` at build time with VERSION and
@@ -130,6 +134,13 @@ on `main`.
   profile; app-specific passwords expire when the Apple ID password changes.
 - **Notarization `Invalid`** — read `build/notarytool-<version>-log.json`;
   every issue names the offending file.
+- **`the bundled engine does not build on this Mac's Python`** — uv's own
+  error is printed above it. A missing wheel for the Python it picked
+  (0.29.2: Homebrew 3.15, no `mlx` cp315 wheel) means every new install
+  would fail the same way: keep `requires-python` in `engine/pyproject.toml`
+  below that version, run `uv lock`, and confirm
+  `engine/tests/test_lock_wheels.py` passes. A download error is the
+  network; re-run.
 - **Release exists with a different asset** — that version already shipped
   with different bytes. Never replace it: bump the version and release again.
 - **Tap pushed before the GitHub release** (broken `brew install`) — run

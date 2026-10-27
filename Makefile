@@ -45,6 +45,7 @@ test-sublime-plugin:
 test-release-scripts:
 	./scripts/test-signing-config.sh
 	./scripts/test-publish-release.sh
+	./scripts/test-engine-bootstrap.sh
 
 test-update-lifecycle:
 	python3 scripts/test-update-lifecycle.py
