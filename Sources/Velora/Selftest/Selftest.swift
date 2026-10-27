@@ -263,6 +263,7 @@ enum Selftest {
         }
         testEngineRestartDelay()
         testEmptyFinalFeedback()
+        testAudioCaptureTakeLevel()
         testClipboardStaging()
         testClipboardSelectionCapture()
         testActionMode()
@@ -16430,6 +16431,79 @@ enum Selftest {
         expect(
             DictationOutputFailure.message(for: "Recognized text.") == nil,
             "recognized output does not produce an error")
+
+        // An empty final names what the mic delivered, so a dead input is
+        // not reported as a transcription fault.
+        //
+        //     peak ≤ 1 LSB                 → "Mic is silent"
+        //     loudest 100 ms < 0.003 RMS   → "Didn't hear any speech"
+        //     speaking level               → "Couldn't transcribe. Try again"
+        let deadChannel = CaptureTakeLevel(peak: 1 / 32_768, loudestChunkRMS: 0.00002)
+        let quietRoom = CaptureTakeLevel(peak: 0.01, loudestChunkRMS: 0.002)
+        let speech = CaptureTakeLevel(peak: 0.4, loudestChunkRMS: 0.08)
+        expect(
+            DictationOutputFailure.message(for: "", level: deadChannel) == "Mic is silent",
+            "an empty take of digital silence blames the mic")
+        expect(
+            DictationOutputFailure.message(for: "", level: quietRoom) == "Didn't hear any speech",
+            "an empty take that never reached speaking level says no speech was heard")
+        expect(
+            DictationOutputFailure.message(for: "", level: speech)
+                == "Couldn't transcribe. Try again",
+            "an empty take at speaking level keeps the transcription error")
+        expect(
+            DictationOutputFailure.message(for: "Recognized text.", level: deadChannel) == nil,
+            "recognized output never produces an error, whatever the level")
+    }
+
+    /// The level of a finished take, measured on the mono stream the engine
+    /// receives, is what the empty-final copy reads.
+    private static func testAudioCaptureTakeLevel() {
+        let toneAmplitude: Float = 0.1
+        let format = AVAudioFormat(
+            commonFormat: .pcmFormatFloat32, sampleRate: AudioCapture.sampleRate,
+            channels: 1, interleaved: false)!
+
+        func take(amplitude: Float) -> (running: CaptureTakeLevel?, done: CaptureTakeLevel?) {
+            let source = FakeMicrophoneSource()
+            let capture = AudioCapture(source: source)
+            let buffer = AVAudioPCMBuffer(pcmFormat: format, frameCapacity: 3200)!
+            buffer.frameLength = 3200  // two 100 ms engine chunks
+            for index in 0..<3200 {
+                let phase = 2 * Float.pi * 440 * Float(index) / Float(AudioCapture.sampleRate)
+                buffer.floatChannelData![0][index] = amplitude * sin(phase)
+            }
+            var started = false
+            capture.start(
+                onChunk: { _ in }, onLevel: { _ in },
+                completion: { result in
+                    if case .success = result { started = true }
+                })
+            source.starts[0].completion(.success(()))
+            source.starts[0].onBuffer(buffer)
+            _ = waitUntil { started }
+            let running = capture.lastTakeLevel
+            var stopped = false
+            capture.stop { stopped = true }
+            source.stops[0]()
+            _ = waitUntil { stopped }
+            return (running, capture.lastTakeLevel)
+        }
+
+        expect(AudioCapture(source: FakeMicrophoneSource()).lastTakeLevel == nil,
+               "no take, no level")
+
+        let silent = take(amplitude: 0)
+        expect(silent.running == nil, "a running take has no final level yet")
+        expect(silent.done == CaptureTakeLevel(peak: 0, loudestChunkRMS: 0),
+               "a take of zeros measures as silence")
+
+        // A 0.1 sine peaks near 0.1 with RMS 0.0707.
+        let tone = take(amplitude: toneAmplitude)
+        expect(abs((tone.done?.peak ?? 0) - toneAmplitude) < 0.005,
+               "take peak is the loudest sample (\(tone.done?.peak ?? -1))")
+        expect(abs((tone.done?.loudestChunkRMS ?? 0) - 0.0707) < 0.005,
+               "take RMS is the loudest 100 ms chunk (\(tone.done?.loudestChunkRMS ?? -1))")
     }
 
     private static func testClipboardSelectionCapture() {

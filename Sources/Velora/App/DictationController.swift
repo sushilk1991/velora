@@ -13,11 +13,36 @@ protocol DictationControllerDelegate: AnyObject {
     func dictationController(_ controller: DictationController, didChangePhase phase: DictationController.Phase)
 }
 
+/// HUD copy for a final with no words, chosen by what the mic delivered.
+///
+///     peak ≤ 1 LSB                 "Mic is silent"            dead input or channel
+///     loudest 100 ms < 0.003 RMS   "Didn't hear any speech"   quiet room, nothing said
+///     speaking level, or unknown   "Couldn't transcribe. Try again"
 enum DictationOutputFailure {
-    static func message(for text: String) -> String? {
-        text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
-            ? "Couldn't transcribe. Try again"
-            : nil
+    static let silentMic = "Mic is silent"
+    static let noSpeech = "Didn't hear any speech"
+    static let unreadable = "Couldn't transcribe. Try again"
+    /// The engine's speech floor (stt.py `SilenceTracker._MIN_THRESHOLD`):
+    /// a take whose every 100 ms chunk sits below it never reaches a model
+    /// as speech.
+    private static let speechFloorRMS: Float = 0.003
+
+    static func message(for text: String, level: CaptureTakeLevel? = nil) -> String? {
+        guard text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
+            return nil
+        }
+        guard let level else {
+            return unreadable
+        }
+
+        // Same silence line as meetings' silent-mic alert.
+        if MeetingPCMLevel.isSilent(level.peak) {
+            return silentMic
+        }
+        if level.loudestChunkRMS < speechFloorRMS {
+            return noSpeech
+        }
+        return unreadable
     }
 }
 
@@ -376,6 +401,8 @@ final class DictationController: NSObject {
 
     private let config = AppConfig.shared
     private let capture: AudioCapture
+    /// The session whose audio `capture.lastTakeLevel` measures.
+    private var takeLevelSession: String?
     private let mediaPlayback: MediaPlaybackCoordinator
     private let contextTracker: AppContextTracker
     private let hud: HUDPanel
@@ -2432,6 +2459,7 @@ final class DictationController: NSObject {
         let client = supervisor.client
         let requestedSession = sessionID
         let recordingLimit = recordingLimit()
+        takeLevelSession = requestedSession
         capture.start(
             onChunk: { data in client.send(audio: data) },
             onLevel: { [weak self] bands in self?.hud.model.levels.push(bands) },
@@ -3170,6 +3198,22 @@ final class DictationController: NSObject {
         showError(message, retryIntent: retryIntent)
     }
 
+    /// HUD copy for an empty final of the current take, from what its mic
+    /// delivered. Logged with the level, so a dead input shows up in
+    /// velora-app.log without the user measuring their recordings.
+    private func emptyFinalMessage(for trimmed: String) -> String? {
+        let level = takeLevelSession == sessionID ? capture.lastTakeLevel : nil
+        guard let message = DictationOutputFailure.message(for: trimmed, level: level) else {
+            return nil
+        }
+
+        let measured = level.map {
+            String(format: "peak=%.6f loudest_rms=%.6f", $0.peak, $0.loudestChunkRMS)
+        } ?? "level=unknown"
+        veloraLog("Velora: empty final session=\(sessionID) \(measured) -> \(message)")
+        return message
+    }
+
     private func finishInsertion(
         text: String,
         raw: String,
@@ -3189,7 +3233,7 @@ final class DictationController: NSObject {
 
         if let request = externalRequest, request.session == sessionID {
             let durationMs = recordingDurationMs ?? elapsedRecordingMs
-            if let message = DictationOutputFailure.message(for: trimmed) {
+            if let message = emptyFinalMessage(for: trimmed) {
                 if audio != nil {
                     recordHistory(
                         text: "", raw: raw, context: context, mode: mode,
@@ -3267,7 +3311,7 @@ final class DictationController: NSObject {
         }
 
         if !allowAutomaticInsertion {
-            if let message = DictationOutputFailure.message(for: trimmed) {
+            if let message = emptyFinalMessage(for: trimmed) {
                 if audio != nil {
                     recordHistory(
                         text: "", raw: raw, context: context, mode: mode,
@@ -3292,7 +3336,7 @@ final class DictationController: NSObject {
             return
         }
 
-        if let message = DictationOutputFailure.message(for: trimmed) {
+        if let message = emptyFinalMessage(for: trimmed) {
             // A real recording that survives to `final` must never disappear
             // without feedback. The engine already retried recoverable prompt
             // hallucinations; retain archived audio so History can reprocess it.

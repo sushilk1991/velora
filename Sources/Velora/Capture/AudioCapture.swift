@@ -15,6 +15,16 @@ protocol MicrophoneStreamCapturing: AnyObject {
 
 extension MicrophoneStreamCapture: MicrophoneStreamCapturing {}
 
+/// How loud one finished take was, measured on the 16 kHz mono stream the
+/// engine receives. An empty final reads it to tell a dead mic from a
+/// failed decode.
+struct CaptureTakeLevel: Equatable {
+    /// Loudest sample, 0...1 of full scale.
+    let peak: Float
+    /// RMS of the loudest ~100 ms chunk sent to the engine.
+    let loudestChunkRMS: Float
+}
+
 /// Microphone capture: a directly selected AVCaptureDevice converted to 16 kHz mono
 /// Float32, delivered as ~100 ms chunks (1600 samples / 6400 bytes) for the
 /// engine, plus normalized RMS levels for the HUD waveform.
@@ -62,6 +72,8 @@ final class AudioCapture {
     private var receivedSamples = 0
     private var limitReached = false
     private var limitHandler: (() -> Void)?
+    private var takePeak: Float = 0
+    private var takeLoudestChunkRMS: Float = 0
 
     /// FFT window fed the spectrum analyzer; a ~1024-sample rolling buffer with
     /// a short hop so the HUD updates ~30x/s (lively) instead of ~10x/s.
@@ -121,6 +133,8 @@ final class AudioCapture {
             receivedSamples = 0
             limitReached = false
             limitHandler = onLimit
+            takePeak = 0
+            takeLoudestChunkRMS = 0
         }
         source.start(
             persistedUID: AppConfig.shared.inputDeviceUID,
@@ -191,6 +205,22 @@ final class AudioCapture {
                 self.limitHandler = nil
             }
             completion()
+        }
+    }
+
+    /// The last finished take's level. Nil before any take, while a take is
+    /// starting or running (its numbers are not final), and when no audio
+    /// arrived at all.
+    var lastTakeLevel: CaptureTakeLevel? {
+        guard !isRunning, !isStarting else {
+            return nil
+        }
+
+        return bufferQueue.sync {
+            guard receivedSamples > 0 else {
+                return nil
+            }
+            return CaptureTakeLevel(peak: takePeak, loudestChunkRMS: takeLoudestChunkRMS)
         }
     }
 
@@ -299,10 +329,18 @@ final class AudioCapture {
         let allowed = maxSamples.map { max(0, $0 - receivedSamples) } ?? samples.count
         let accepted = samples.prefix(allowed)
         receivedSamples += accepted.count
+        // Take level: loudest sample, and the loudest chunk's RMS on the same
+        // 100 ms grid the engine's speech tracker uses.
+        for sample in accepted {
+            takePeak = max(takePeak, abs(sample))
+        }
         pending.append(contentsOf: accepted)
         while pending.count >= Self.chunkFrames {
             let chunk = Array(pending.prefix(Self.chunkFrames))
             pending.removeFirst(Self.chunkFrames)
+            let power = chunk.reduce(Float(0)) { $0 + $1 * $1 }
+            takeLoudestChunkRMS = max(
+                takeLoudestChunkRMS, (power / Float(chunk.count)).squareRoot())
             let data = chunk.withUnsafeBufferPointer { Data(buffer: $0) }
             chunkHandler?(data)
         }
