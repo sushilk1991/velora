@@ -26,6 +26,9 @@ _BACKOFF_S = (2, 5, 15)
 _REAP_S = 2
 _SCHEMA = 1
 _RECOVERY_STATES = {"retry_wait", "failed"}
+# Fields that move on every network read. A change limited to these is byte
+# progress, which the publisher paces; any other field is a state change.
+_PROGRESS_FIELDS = frozenset({"bytes_received", "bytes_total"})
 _RESUME_ORDER = {"none": 0, "completed_files": 1, "partial": 2, "file_restarted": 3}
 
 
@@ -65,6 +68,9 @@ class DownloadCoordinator:
         self._engine_id = uuid.uuid4().hex
         self._sequence = 0
         self._changed = asyncio.Event()
+        # Advances only on state changes, never on byte progress.
+        self._material = 0
+        self._material_changed = asyncio.Event()
         self._entries: dict[tuple[str, str], _Entry] = {}
         self._active: dict[str, str] = {}
         self._control = asyncio.Lock()
@@ -92,19 +98,32 @@ class DownloadCoordinator:
         while self._sequence == sequence:
             await self._changed.wait()
 
-    def _notify_changed(self) -> None:
+    async def _wait_material(self, material: int) -> None:
+        # Wakes on the next state change only; byte progress leaves it asleep.
+        while self._material == material:
+            await self._material_changed.wait()
+
+    def _notify_changed(self, *, material: bool = True) -> None:
         # Advance the authoritative version and wake readers together, so
         # entry creation and every subsequent state/progress update publish.
         self._sequence += 1
         changed, self._changed = self._changed, asyncio.Event()
         changed.set()
+        if not material:
+            return
+
+        self._material += 1
+        changed, self._material_changed = self._material_changed, asyncio.Event()
+        changed.set()
 
     def _update(self, entry, **values):
+        material = any(entry.item.get(key) != value for key, value in values.items()
+                       if key not in _PROGRESS_FIELDS)
         entry.item.update(values)
         state = entry.item["state"]
         entry.item["retry_allowed"] = state in _RECOVERY_STATES
         entry.item["restart_allowed"] = state in _RECOVERY_STATES
-        self._notify_changed()
+        self._notify_changed(material=material)
 
     def _new_entry(self, model, kind):
         if self._closed:

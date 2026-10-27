@@ -231,6 +231,10 @@ SET_MODEL_SHUTTING_DOWN = "set_model: engine is shutting down"
 
 PARENT_POLL_S = 2.0
 _DOWNLOAD_POLL_S = 0.1
+# Byte-only download progress publishes at most this often. The worker
+# reports every network read (~2,500/s on a fast link); state changes still
+# publish at once.
+_DOWNLOAD_PROGRESS_S = 0.25
 _STT_LOAD_S = 60.0
 _MODEL_LOAD_RETRIES = 3
 
@@ -1115,7 +1119,17 @@ class Engine:
         # send remains visible through its newer sequence on the next wait.
         while True:
             await self._downloads._wait_changed(self._download_sequence)
+            material = self._downloads._material
             await self._publish_downloads()
+
+            # Each snapshot is complete, so skipping byte-only ones loses
+            # nothing: the next publish carries the latest bytes.
+            #
+            #   publish ─▶ state change ──────────▶ publish at once
+            #          └─▶ bytes only ─(interval)─▶ publish latest
+            with contextlib.suppress(asyncio.TimeoutError):
+                await asyncio.wait_for(
+                    self._downloads._wait_material(material), _DOWNLOAD_PROGRESS_S)
 
     def _queue_model_job(self, model: str, kind: str, *,
                          origin: _ModelJobOrigin = _ModelJobOrigin.selection,

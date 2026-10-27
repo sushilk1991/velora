@@ -319,6 +319,57 @@ async def test_download_watch_mutations(recovery, monkeypatch):
         await asyncio.gather(watch, return_exceptions=True)
 
 
+async def test_download_watch_paces_bytes(recovery, monkeypatch):
+    # A fast link reports bytes on every network read: a real 1.6 GB speech
+    # download sent the app ~2,500 full snapshots a second, and the Models
+    # pane froze on "Connecting to the model engine…". Byte-only progress
+    # publishes at most once per interval and still ends on the latest
+    # bytes; a state change wakes the paced watch at once.
+    interval = .5
+    monkeypatch.setattr(server, "_DOWNLOAD_PROGRESS_S", interval)
+    engine = recovery.engine
+    coordinator = recovery.coordinator
+    snapshots = []
+
+    async def send(event):
+        snapshots.append(event)
+
+    monkeypatch.setattr(engine, "_send", send)
+    entry = coordinator._new_entry("example/model", "stt")
+    coordinator._update(entry, state="downloading")
+    watch = asyncio.create_task(engine._watch_downloads())
+    try:
+        await asyncio.sleep(0)
+        for received in range(1, 1001):
+            coordinator._update(entry, state="downloading",
+                                bytes_received=received, bytes_total=2000)
+            await asyncio.sleep(0)
+
+        # Every byte count was a mutation; at most a few full snapshots leave.
+        async def latest_bytes():
+            while not snapshots or snapshots[-1]["downloads"][0]["bytes_received"] != 1000:
+                await asyncio.sleep(.01)
+
+        await asyncio.wait_for(latest_bytes(), interval * 4)
+        assert len(snapshots) <= 3
+
+        # The watch is pacing after that publish; a failure must not wait it out.
+        published = len(snapshots)
+        await coordinator.mark_failed("example/model", "stt", entry.item["attempt"], {
+            "category": "disk", "code": "disk_full", "message": "Free space.", "retryable": False,
+        })
+
+        async def failed():
+            while len(snapshots) == published:
+                await asyncio.sleep(.01)
+
+        await asyncio.wait_for(failed(), interval / 2)
+        assert snapshots[-1]["downloads"][0]["state"] == "failed"
+    finally:
+        watch.cancel()
+        await asyncio.gather(watch, return_exceptions=True)
+
+
 @pytest.mark.parametrize("failure", ["load", "save", "cache"])
 async def test_switch_failure_retains(recovery, monkeypatch, failure):
     engine = recovery.engine
