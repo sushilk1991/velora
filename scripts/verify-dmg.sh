@@ -100,6 +100,8 @@ codesign --verify --strict --verbose=2 "$UV"
 PROBE_PYTHON="$("$UV" python find 3.12)"
 PYTHONPATH="$ENGINE/src" "$PROBE_PYTHON" -c \
   'import asyncio; from velora_engine.cleanup_process import CleanupProcess; asyncio.run(CleanupProcess("probe").probe_async())'
+# The probe above pins 3.12; users get whatever Python uv picks for the app.
+(cd "$SCRIPT_ROOT" && ./scripts/verify-engine-bootstrap.sh "$APP")
 APP_VERSION="$(/usr/libexec/PlistBuddy -c 'Print :CFBundleShortVersionString' \
   "$APP/Contents/Info.plist")"
 MCP_METADATA="$(printf '%s\n' \
