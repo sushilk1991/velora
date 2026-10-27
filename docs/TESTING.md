@@ -38,6 +38,7 @@ or updates change:
 | Voice action with the screen locked | The plan fails with "the screen is locked" and opens nothing |
 | Voice action while the target conversation is wrong | Only the switcher query is typed; the message body is never sent |
 | Normal text field with a non-text clipboard item | Text lands once and the original clipboard is restored |
+| Proofread a selection in TextEdit, Notes, a Chrome textarea, Gmail compose, Slack, and VS Code | The selection is replaced in place and the HUD shows struck and inserted words; in Terminal or on a static webpage nothing is pasted and the HUD says the text is on the clipboard; a click or key press before the result lands leaves it on the clipboard |
 | Quit during dictation or meeting capture | Capture stops, media state is restored, and recoverable meeting audio is finalized or retained |
 | Signed release DMG | Signature, notarization, staple, Gatekeeper, bundle identity, and packaged engine/CLI/MCP runtime checks all pass |
 | Software update window | Full release-note structure is readable; closing a manual changelog changes nothing; closing an automatic prompt defers only that version; one Install click downloads, verifies, replaces a disposable app copy, and relaunches that copy; a local-feed E2E leaves the real Skip/Later/check preferences unchanged |

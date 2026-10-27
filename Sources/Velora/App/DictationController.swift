@@ -314,6 +314,9 @@ final class DictationController: NSObject {
         "Fix spelling, punctuation, capitalization, and grammar. "
         + "Preserve meaning, tone, formatting, names, numbers, dates, URLs, and code."
     private static let maximumEditScalars = 8_000
+    /// How long the Proofread diff stays up: reading three lines of struck
+    /// and inserted words takes longer than a 2.2 s one-line notice.
+    private static let diffDisplaySeconds: TimeInterval = 5
 
     enum RecordingContextPolicy {
         case ordinary
@@ -594,9 +597,12 @@ final class DictationController: NSObject {
     private var editStopGeneration: UInt64?
     /// The engine `edit_text` round-trip in flight after an edit session's
     /// final: verify-and-replace happens when `edited` comes back.
+    /// `inputGeneration` is the physical-input generation when Proofread
+    /// read an Accessibility selection; nil for Voice Edit, whose recording
+    /// can hide a click.
     private var pendingEdit: (
         id: String, selection: ScreenTextSelection, bundleID: String?,
-        kind: EditRequestKind)?
+        kind: EditRequestKind, inputGeneration: UInt64?)?
     /// Direct proofreading can start after a dictation timeout. Keep that
     /// session history-only even after the edit request itself has completed.
     private var protectedLateFinalSessionID: String?
@@ -1416,7 +1422,8 @@ final class DictationController: NSObject {
             beginClipboardCapture(app: app, intent: .proofread)
             return
         }
-        startCapturedProofread(selected, app: app)
+        startCapturedProofread(
+            selected, app: app, inputGeneration: inputGeneration)
     }
 
     /// Selection capture for apps whose Accessibility tree exposes no
@@ -1593,7 +1600,9 @@ final class DictationController: NSObject {
                                 app: app,
                                 locked: locked)
                         case .proofread:
-                            self.startCapturedProofread(selected, app: app)
+                            self.startCapturedProofread(
+                                selected, app: app,
+                                inputGeneration: inputGeneration)
                         case .streamTyping:
                             selected.discardMutableIdentity()
                         }
@@ -1637,9 +1646,12 @@ final class DictationController: NSObject {
               selected.text.count, app?.bundleIdentifier ?? "unknown")
     }
 
+    /// `inputGeneration` is read before an Accessibility capture; nil for
+    /// clipboard and Sublime captures, which carry their own guards.
     private func startCapturedProofread(
         _ selected: ScreenTextSelection,
-        app: NSRunningApplication?
+        app: NSRunningApplication?,
+        inputGeneration: UInt64? = nil
     ) {
         guard selected.text.unicodeScalars.count <= Self.maximumEditScalars else {
             selected.discardMutableIdentity()
@@ -1650,7 +1662,8 @@ final class DictationController: NSObject {
             selection: selected,
             bundleID: app?.bundleIdentifier,
             instruction: Self.proofreadInstruction,
-            kind: .proofread)
+            kind: .proofread,
+            inputGeneration: inputGeneration)
     }
 
     /// The error capsule's Retry button must retry Safe Voice Edit, not start
@@ -1679,7 +1692,8 @@ final class DictationController: NSObject {
         selection: ScreenTextSelection,
         bundleID: String?,
         instruction: String,
-        kind: EditRequestKind
+        kind: EditRequestKind,
+        inputGeneration: UInt64? = nil
     ) {
         guard supervisor.isReady else {
             selection.discardMutableIdentity()
@@ -1700,7 +1714,8 @@ final class DictationController: NSObject {
         let id = UUID().uuidString
         pendingEdit = (
             id: id, selection: selection,
-            bundleID: bundleID, kind: kind)
+            bundleID: bundleID, kind: kind,
+            inputGeneration: inputGeneration)
         phase = .editing
         if kind == .proofread {
             hud.model.recordingStart = nil
@@ -1746,7 +1761,7 @@ final class DictationController: NSObject {
     private func applyEdit(
         pending: (
             id: String, selection: ScreenTextSelection, bundleID: String?,
-            kind: EditRequestKind
+            kind: EditRequestKind, inputGeneration: UInt64?
         ),
         text: String, applied: Bool, ms: Int, reason: String?
     ) {
@@ -1799,7 +1814,7 @@ final class DictationController: NSObject {
             return
         }
         guard pending.selection.isEditable else {
-            showNotice(symbol: "doc.on.clipboard", message: pending.kind.clipboardNotice)
+            showEditCopied(pending, text: text, message: pending.kind.clipboardNotice)
             return
         }
         guard Permissions.accessibilityGranted, TextInserter.canPostEvents,
@@ -1807,7 +1822,7 @@ final class DictationController: NSObject {
               let bundleID = pending.bundleID,
               NSWorkspace.shared.frontmostApplication?.bundleIdentifier == bundleID
         else {
-            showNotice(symbol: "doc.on.clipboard", message: pending.kind.clipboardNotice)
+            showEditCopied(pending, text: text, message: pending.kind.clipboardNotice)
             return
         }
         // The selection must still be what we edited, in the SAME field — the
@@ -1815,31 +1830,37 @@ final class DictationController: NSObject {
         // "Approved" occurrences, say) must not be overwritten. If the user
         // clicked away or typed, replacing whatever is now selected would
         // corrupt their document. Recovery stays one step: the text is on the
-        // clipboard.
-        let app = NSWorkspace.shared.frontmostApplication
-        guard let current = ScreenContext.selectedText(of: app),
-              pending.selection.canReplace(with: current)
-        else {
-            NSLog("Velora: edit paste skipped — selection changed")
-            showNotice(symbol: "doc.on.clipboard", message: "Selection changed. Edit copied")
+        // clipboard. Voice Edit carries no input generation, so only an exact
+        // AX range passes for it; Proofread also passes an untouched field.
+        let verdict = { () -> SelectionReplaceVerdict in
+            let latestApp = NSWorkspace.shared.frontmostApplication
+            guard latestApp?.bundleIdentifier == bundleID else { return .focusMoved }
+            return pending.selection.replaceVerdict(
+                current: ScreenContext.selectedText(of: latestApp),
+                focusedElement: ScreenContext.focusedElement(of: latestApp),
+                inputUnchanged: pending.inputGeneration
+                    == UserInputActivity.selectionSnapshot())
+        }
+        let initialVerdict = verdict()
+        guard initialVerdict.allowsPaste else {
+            veloraLog("Velora: edit paste skipped — \(initialVerdict)")
+            showEditCopied(pending, text: text, message: "Selection changed. Edit copied")
             return
         }
         guard inserter.insertViaPasteboard(
             text,
             targetBundleID: bundleID,
-            targetElement: current.element,
-            additionalDeliveryCheck: {
-                let latestApp = NSWorkspace.shared.frontmostApplication
-                guard latestApp?.bundleIdentifier == bundleID,
-                      let latest = ScreenContext.selectedText(of: latestApp)
-                else { return false }
-                return pending.selection.canReplace(with: latest)
-            })
+            targetElement: pending.selection.element,
+            additionalDeliveryCheck: { verdict().allowsPaste })
         else {
-            showNotice(symbol: "doc.on.clipboard", message: pending.kind.clipboardNotice)
+            veloraLog("Velora: edit paste refused by delivery guard — result left on clipboard")
+            showEditCopied(pending, text: text, message: pending.kind.clipboardNotice)
             return
         }
-        finishAppliedEdit(bundleID: bundleID, ms: ms, kind: pending.kind)
+        veloraLog("Velora: edit pasted — \(initialVerdict)")
+        finishAppliedEdit(
+            bundleID: bundleID, ms: ms, kind: pending.kind,
+            original: pending.selection.text, edited: text)
     }
 
     /// Pastes over a clipboard-captured selection. No AX range exists to
@@ -1851,14 +1872,14 @@ final class DictationController: NSObject {
     private func applyClipboardCapturedEdit(
         pending: (
             id: String, selection: ScreenTextSelection, bundleID: String?,
-            kind: EditRequestKind
+            kind: EditRequestKind, inputGeneration: UInt64?
         ),
         text: String,
         ms: Int,
         generation: UInt64
     ) {
         guard let bundleID = pending.bundleID else {
-            showNotice(symbol: "doc.on.clipboard", message: pending.kind.clipboardNotice)
+            showEditCopied(pending, text: text, message: pending.kind.clipboardNotice)
             return
         }
         let baseline: UInt64? = pending.kind == .proofread
@@ -1874,7 +1895,7 @@ final class DictationController: NSObject {
                     + (NSWorkspace.shared.frontmostApplication?.bundleIdentifier ?? "none")
                     + " baseline=\(baseline.map(String.init) ?? "none")"
                     + " now=\(UserInputActivity.selectionSnapshot()))")
-            showNotice(symbol: "doc.on.clipboard", message: "Selection changed. Edit copied")
+            showEditCopied(pending, text: text, message: "Selection changed. Edit copied")
             return
         }
         guard inserter.insertViaPasteboard(
@@ -1883,16 +1904,18 @@ final class DictationController: NSObject {
             additionalDeliveryCheck: stillOwned)
         else {
             veloraLog("Velora: edit paste refused by delivery guard — result left on clipboard")
-            showNotice(symbol: "doc.on.clipboard", message: pending.kind.clipboardNotice)
+            showEditCopied(pending, text: text, message: pending.kind.clipboardNotice)
             return
         }
-        finishAppliedEdit(bundleID: bundleID, ms: ms, kind: pending.kind)
+        finishAppliedEdit(
+            bundleID: bundleID, ms: ms, kind: pending.kind,
+            original: pending.selection.text, edited: text)
     }
 
     private func applySublimeEdit(
         pending: (
             id: String, selection: ScreenTextSelection, bundleID: String?,
-            kind: EditRequestKind
+            kind: EditRequestKind, inputGeneration: UInt64?
         ),
         token: SublimeTextSelectionToken,
         text: String,
@@ -1924,7 +1947,8 @@ final class DictationController: NSObject {
                 switch result {
                 case .applied:
                     self.finishAppliedEdit(
-                        bundleID: bundleID, ms: ms, kind: pending.kind)
+                        bundleID: bundleID, ms: ms, kind: pending.kind,
+                        original: pending.selection.text, edited: text)
                 case .rejected:
                     NSLog("Velora: Sublime edit skipped — plugin validation failed")
                     self.showNotice(
@@ -1949,7 +1973,9 @@ final class DictationController: NSObject {
     private func finishAppliedEdit(
         bundleID: String,
         ms: Int,
-        kind: EditRequestKind
+        kind: EditRequestKind,
+        original: String,
+        edited: String
     ) {
         // The edit rewrote text in place; the remembered delivery tail no
         // longer describes what sits before the caret.
@@ -1958,7 +1984,52 @@ final class DictationController: NSObject {
         sounds.play(.stop)
         NSLog("Velora: edit applied (%d ms)", ms)
         let notice = kind.successNotice
-        showNotice(symbol: notice.symbol, message: notice.message)
+        showEditOutcome(
+            kind: kind, original: original, edited: edited,
+            symbol: notice.symbol, message: notice.message)
+    }
+
+    /// The edit result stayed on the clipboard instead of replacing the
+    /// selection.
+    private func showEditCopied(
+        _ pending: (
+            id: String, selection: ScreenTextSelection, bundleID: String?,
+            kind: EditRequestKind, inputGeneration: UInt64?
+        ),
+        text: String,
+        message: String
+    ) {
+        showEditOutcome(
+            kind: pending.kind, original: pending.selection.text, edited: text,
+            symbol: "doc.on.clipboard", message: message)
+    }
+
+    /// Proofread shows what it changed under the outcome line, so a fix is
+    /// visible whether it was pasted or left on the clipboard. Voice Edit
+    /// keeps its one-line notice.
+    private func showEditOutcome(
+        kind: EditRequestKind,
+        original: String,
+        edited: String,
+        symbol: String,
+        message: String
+    ) {
+        let segments = kind == .proofread
+            ? TextDiff.words(from: original, to: edited).excerpt()
+            : []
+        guard !segments.isEmpty else {
+            showNotice(symbol: symbol, message: message)
+            return
+        }
+        actionResultTarget = nil
+        let state = HUDState.diff(symbol: symbol, message: message, segments: segments)
+        hud.transition(to: state)
+        DispatchQueue.main.asyncAfter(deadline: .now() + Self.diffDisplaySeconds) { [weak self] in
+            // Only hide OUR diff: a later toast keeps its own timer.
+            guard let self, self.hud.model.state == state else { return }
+            self.hud.transition(to: .hidden(.success))
+            self.flushDeferredLearnedToastIfPossible()
+        }
     }
 
     /// Pastes the last dictation's ORIGINAL raw transcript — exactly what the

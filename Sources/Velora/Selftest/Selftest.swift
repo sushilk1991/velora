@@ -125,6 +125,7 @@ enum Selftest {
         testOnboardingSetup()
         testKeyboardShortcutMapping()
         testSafeVoiceEditSelection()
+        testProofreadReplaceVerdict()
         testModeCategories()
         testScreenContextSites()
         testContextGlossary()
@@ -190,6 +191,7 @@ enum Selftest {
         testMCPProtocol()
         testLocalControlSocket()
         testHUDGeometry()
+        testProofreadDiffHUD()
         testHUDPerformance()
         testShellNavigation()
         testPillVisibilitySetting()
@@ -2405,6 +2407,111 @@ enum Selftest {
         expect(
             probe.editHotkeyDownCount == 1 && !monitor.handleKeyUp(keyCode: 14),
             "a refused listen-only combo emits nothing and creates no latch")
+    }
+
+    /// Proofread replaces the selection wherever the field takes a paste,
+    /// as Raycast's ⌘C/⌘V does, but never in another app or another field.
+    /// Accessibility proof of the exact range wins; without it, the captured
+    /// field must still hold focus and no key press or click may have
+    /// happened since capture.
+    private static func testProofreadReplaceVerdict() {
+        let field = AXUIElementCreateApplication(1)
+        let otherField = AXUIElementCreateApplication(2)
+        let captured = ScreenTextSelection(
+            text: "Their going", element: field,
+            identity: .characterRange(location: 0, length: 11),
+            isEditable: true)
+
+        expect(
+            captured.replaceVerdict(
+                current: captured, focusedElement: field, inputUnchanged: false)
+                == .exactRange,
+            "an exact AX range replaces even after unrelated input")
+        expect(
+            captured.replaceVerdict(
+                current: nil, focusedElement: field, inputUnchanged: true)
+                == .untouchedSinceCapture,
+            "Chromium/Electron: a lost AX selection read replaces when nothing was touched")
+        let rangeLost = ScreenTextSelection(
+            text: "Their going", element: field,
+            identity: .unavailable, isEditable: true)
+        expect(
+            captured.replaceVerdict(
+                current: rangeLost, focusedElement: field, inputUnchanged: true)
+                == .untouchedSinceCapture,
+            "the same text without a range identity replaces when nothing was touched")
+        expect(
+            rangeLost.replaceVerdict(
+                current: rangeLost, focusedElement: field, inputUnchanged: true)
+                == .untouchedSinceCapture,
+            "a field that never exposed a range replaces when nothing was touched")
+        let markerNow = ScreenTextSelection(
+            text: "Their going", element: field,
+            identity: .textMarkerRange("marker" as CFString), isEditable: true)
+        expect(
+            captured.replaceVerdict(
+                current: markerNow, focusedElement: field, inputUnchanged: true)
+                == .untouchedSinceCapture,
+            "a range read back in another representation is not proof of a move")
+
+        expect(
+            captured.replaceVerdict(
+                current: nil, focusedElement: field, inputUnchanged: false)
+                == .selectionMoved,
+            "without AX proof, a key press or click since capture refuses the paste")
+        expect(
+            captured.replaceVerdict(
+                current: nil, focusedElement: otherField, inputUnchanged: true)
+                == .focusMoved,
+            "another focused field refuses the paste even with no input")
+        expect(
+            captured.replaceVerdict(
+                current: nil, focusedElement: nil, inputUnchanged: true)
+                == .focusMoved,
+            "a field AX cannot name now refuses the paste")
+        let otherText = ScreenTextSelection(
+            text: "going", element: field,
+            identity: .unavailable, isEditable: true)
+        expect(
+            captured.replaceVerdict(
+                current: otherText, focusedElement: field, inputUnchanged: true)
+                == .selectionMoved,
+            "AX showing different selected text refuses the paste")
+        let sameTextElsewhere = ScreenTextSelection(
+            text: "Their going", element: field,
+            identity: .characterRange(location: 40, length: 11),
+            isEditable: true)
+        expect(
+            captured.replaceVerdict(
+                current: sameTextElsewhere, focusedElement: field, inputUnchanged: true)
+                == .selectionMoved,
+            "identical text at another AX range refuses the paste")
+        let readOnly = ScreenTextSelection(
+            text: "Their going", element: field,
+            identity: .characterRange(location: 0, length: 11),
+            isEditable: false)
+        expect(
+            readOnly.replaceVerdict(
+                current: readOnly, focusedElement: field, inputUnchanged: true)
+                == .readOnly,
+            "Terminal and static webpages never get a paste")
+        expect(
+            SelectionReplaceVerdict.exactRange.allowsPaste
+                && SelectionReplaceVerdict.untouchedSinceCapture.allowsPaste
+                && !SelectionReplaceVerdict.readOnly.allowsPaste
+                && !SelectionReplaceVerdict.focusMoved.allowsPaste
+                && !SelectionReplaceVerdict.selectionMoved.allowsPaste,
+            "only the two proven verdicts paste")
+
+        expect(
+            ScreenContext.selectionIsEditable(valueSettable: true, hasEditableRoot: false),
+            "a native field with a settable value takes a paste")
+        expect(
+            ScreenContext.selectionIsEditable(valueSettable: false, hasEditableRoot: true),
+            "Gmail and Slack contenteditable take a paste via their editable root")
+        expect(
+            !ScreenContext.selectionIsEditable(valueSettable: false, hasEditableRoot: false),
+            "Terminal and static webpage text stay clipboard-only")
     }
 
     // Exact schema fixtures include every nullable field and a structured terminal failure.
@@ -12510,6 +12617,114 @@ enum Selftest {
     /// `systemUptime` includes scheduler preemption — a loaded CI box could
     /// blow an absolute millisecond budget with no code regression. The timings
     /// are always printed, so they are visible evidence even in a normal run.
+    /// The Proofread HUD shows what changed: each wrong word struck out with
+    /// its fix after it, long unchanged stretches shrunk to "…", inside a
+    /// card whose size is fixed on entry (DESIGN.md §6).
+    private static func testProofreadDiffHUD() {
+        typealias Segment = TextDiff.Segment
+        let old = "Their going too the stor tomorow."
+        let new = "They're going to the store tomorrow."
+        let diff = TextDiff.words(from: old, to: new)
+        expect(
+            diff.segments == [
+                Segment(kind: .removed, text: "Their"), Segment(kind: .added, text: "They're"),
+                Segment(kind: .same, text: " going "),
+                Segment(kind: .removed, text: "too"), Segment(kind: .added, text: "to"),
+                Segment(kind: .same, text: " the "),
+                Segment(kind: .removed, text: "stor"), Segment(kind: .added, text: "store"),
+                Segment(kind: .same, text: " "),
+                Segment(kind: .removed, text: "tomorow"), Segment(kind: .added, text: "tomorrow"),
+                Segment(kind: .same, text: "."),
+            ],
+            "each wrong word is struck out with its fix right after it")
+        expect(diff.changeCount == 4, "a replaced word counts as one change")
+        let oldBack = diff.segments.filter { $0.kind != .added }.map(\.text).joined()
+        let newBack = diff.segments.filter { $0.kind != .removed }.map(\.text).joined()
+        expect(oldBack == old && newBack == new, "the diff loses no characters")
+
+        let punctuation = TextDiff.words(from: "i think its fine", to: "I think it's fine.")
+        expect(
+            punctuation.segments == [
+                Segment(kind: .removed, text: "i"), Segment(kind: .added, text: "I"),
+                Segment(kind: .same, text: " think "),
+                Segment(kind: .removed, text: "its"), Segment(kind: .added, text: "it's"),
+                Segment(kind: .same, text: " fine"),
+                Segment(kind: .added, text: "."),
+            ],
+            "apostrophes stay inside words and an added full stop is its own insertion")
+        expect(punctuation.changeCount == 3, "a pure insertion counts as a change")
+
+        let unchanged = TextDiff.words(from: "Fine.", to: "Fine.")
+        expect(
+            unchanged.changeCount == 0 && unchanged.excerpt().isEmpty,
+            "an unchanged proofread has nothing to show")
+
+        let lead = TextDiff.words(
+            from: "one two three four five six seven teh end",
+            to: "one two three four five six seven the end")
+        expect(
+            lead.excerpt(context: 3) == [
+                Segment(kind: .same, text: "… five six seven "),
+                Segment(kind: .removed, text: "teh"), Segment(kind: .added, text: "the"),
+                Segment(kind: .same, text: " end"),
+            ],
+            "a long unchanged lead-in shrinks to an ellipsis and three words")
+        let middle = TextDiff.words(
+            from: "teh a b c d e f teh",
+            to: "the a b c d e f the")
+        expect(
+            middle.excerpt(context: 2) == [
+                Segment(kind: .removed, text: "teh"), Segment(kind: .added, text: "the"),
+                Segment(kind: .same, text: " a b … e f "),
+                Segment(kind: .removed, text: "teh"), Segment(kind: .added, text: "the"),
+            ],
+            "a long unchanged stretch between changes keeps context on both sides")
+        let trail = TextDiff.words(
+            from: "Hi,\n\nteh plan is set for Monday",
+            to: "Hi,\n\nthe plan is set for Monday")
+        expect(
+            trail.excerpt(context: 2) == [
+                Segment(kind: .same, text: "Hi, "),
+                Segment(kind: .removed, text: "teh"), Segment(kind: .added, text: "the"),
+                Segment(kind: .same, text: " plan is …"),
+            ],
+            "line breaks read as one space and a long tail shrinks to an ellipsis")
+
+        let message = "Spelling and grammar fixed"
+        let short = HUDState.diff(
+            symbol: "text.badge.checkmark", message: message,
+            segments: TextDiff.words(from: "Their going.", to: "They're going.").excerpt())
+        let shortSize = HUDView.capsuleMetrics(for: short, context: nil).size
+        expect(
+            shortSize.width == HUDGeometry.maxListeningWidth,
+            "the diff card takes the widest capsule width")
+        expect(
+            shortSize.height == HUDGeometry.diffHeight(lines: 1)
+                && shortSize.height > HUDGeometry.height,
+            "a one-line diff sits under its status line")
+
+        let wrong = Array(repeating: "teh", count: 30).joined(separator: " ")
+        let right = Array(repeating: "the", count: 30).joined(separator: " ")
+        let tall = HUDState.diff(
+            symbol: "text.badge.checkmark", message: message,
+            segments: TextDiff.words(from: wrong, to: right).excerpt())
+        let tallSize = HUDView.capsuleMetrics(for: tall, context: nil).size
+        let maximum = HUDGeometry.diffHeight(lines: HUDGeometry.diffMaxLines)
+        expect(
+            tallSize.height == maximum,
+            "a long diff is capped at the maximum line count")
+        expect(
+            maximum <= HUDGeometry.height + VeloraSpacing.xl * 2,
+            "the tallest card grows under 20 pt past the pill each way, inside the screen inset")
+        expect(
+            HUDPanel.panelSize.height >= maximum + (20 + 6) * 2,
+            "the panel holds the tallest card and its shadow")
+        expect(
+            HUDPanel.hitRect(for: tall, edge: .center, context: nil).height
+                == maximum + VeloraSpacing.m,
+            "the click target follows the card, not the pill")
+    }
+
     private static func testHUDPerformance() {
         let context = HUDSessionContext(appIcon: nil, modeName: "Terminal")
 

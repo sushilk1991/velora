@@ -47,6 +47,10 @@ enum HUDState: Equatable {
     /// General transient toast: an SF Symbol + one line of text (file
     /// transcription done, etc.). Auto-hidden by whoever shows it.
     case notice(symbol: String, message: String)
+    /// Proofread outcome: a status line over the changed words, deletions
+    /// struck through in red and insertions in green. `segments` is the
+    /// display excerpt (`TextDiff.excerpt`). Auto-hidden by the controller.
+    case diff(symbol: String, message: String, segments: [TextDiff.Segment])
     /// Action completion stays in the non-activating HUD. Opening the target
     /// is a separate, explicit user click; unverified work never looks done.
     case actionResult(

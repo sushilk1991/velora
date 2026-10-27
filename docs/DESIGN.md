@@ -209,6 +209,10 @@ The pill by the cursor is the product's face. Rules:
 - Listening shows the dot, the waveform, a status word and a monospaced
   timer. Inserted collapses to a circle with a check. Error is 320 pt with a
   single retry chip.
+- The Proofread diff is the one taller state: 420 pt wide, a status line over
+  one to three lines of changes (88 pt at most), sized once on entry. Deleted
+  words are struck through in red, inserted words green, each on a tint of
+  its own colour (`HUDDiffPalette`); long unchanged stretches shrink to `…`.
 - The HUD never takes focus and never appears over a secure input field.
 - Copy in the HUD is ≤ 4 words, present tense: `Listening`, `Transcribing`,
   `Pasted at your cursor`, `Proofread text on clipboard`. Two phrases join
