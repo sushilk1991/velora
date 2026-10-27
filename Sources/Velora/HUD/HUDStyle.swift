@@ -109,6 +109,23 @@ enum VeloraStatus {
         srgbRed: 163 / 255, green: 74 / 255, blue: 0, alpha: 1)
 }
 
+/// Proofread diff colours on the always-dark HUD: deletions red, insertions
+/// green, each on a ground of its own status colour. Dark-mode systemRed
+/// (#ff453a) measures about 4.4:1 on its red ground, under the 4.5:1 that
+/// 12 pt text needs, so the deleted words lift 35 % toward white (#ff8c85,
+/// about 6:1). systemGreen already clears 6:1 on its ground.
+enum HUDDiffPalette {
+    private static let systemRedDark = VeloraBrand.RGB(r: 1, g: 69 / 255, b: 58 / 255)
+    private static let removedLift = 0.35
+
+    static let removedText = VeloraBrand.lerp(
+        systemRedDark, VeloraBrand.RGB(r: 1, g: 1, b: 1), removedLift
+    ).color
+    static let addedText = VeloraStatus.success
+    static let removedGround = VeloraStatus.danger.opacity(0.2)
+    static let addedGround = VeloraStatus.success.opacity(0.2)
+}
+
 /// Motion scale. Every `withAnimation` / `.animation` picks one of these.
 enum VeloraMotion {
     /// Hover, press, highlight.
@@ -190,6 +207,53 @@ enum HUDGeometry {
         - contentInsetH
         - recordingClusterWidth / 2
         - VeloraSpacing.s
+
+    /// The surface every state draws on. Its corner radius is the pill's
+    /// half-height and its corners continuous, like `Capsule()`, so any state
+    /// 56 pt tall or shorter renders pixel-identical to the capsule (SwiftUI
+    /// clamps the radius to half the shorter side), and the taller Proofread
+    /// card keeps the pill's round ends at its corners.
+    static let cornerRadius: CGFloat = height / 2
+    static var surface: RoundedRectangle {
+        RoundedRectangle(cornerRadius: cornerRadius, style: .continuous)
+    }
+
+    /// Proofread diff card: the widest capsule, a status line over up to
+    /// three wrapped lines of changes. The line count is measured once on
+    /// entry, so nothing reflows while the card is up.
+    ///
+    ///   ╭─────────────────────────────────────────────╮  ┬ contentInsetV
+    ///   │ ✓ Spelling and grammar fixed                │  ┼ diffLineHeight
+    ///   │                                             │  ┼ diffRowGap
+    ///   │ Their They're going too to the stor store   │  ┼ diffLineHeight × lines
+    ///   ╰─────────────────────────────────────────────╯  ┴ contentInsetV
+    ///
+    /// Three lines make an 88 pt card. Centred on the 56 pt pill it grows
+    /// 16 pt each way, inside the 20 pt screen inset of top and bottom
+    /// presets, and the 160 pt panel still holds its 26 pt shadow.
+    static let diffWidth: CGFloat = maxListeningWidth
+    static let diffMaxLines = 3
+    static let diffFont = NSFont.systemFont(ofSize: 12, weight: .medium)
+    static let diffRowGap: CGFloat = VeloraSpacing.xs
+    private static let diffFontLineHeight = NSLayoutManager().defaultLineHeight(for: diffFont)
+    static let diffLineHeight = ceil(diffFontLineHeight)
+
+    static func diffHeight(lines: Int) -> CGFloat {
+        let bodyLines = CGFloat(min(max(lines, 1), diffMaxLines))
+        return contentInsetV * 2 + diffLineHeight * (1 + bodyLines) + diffRowGap
+    }
+
+    /// Lines `text` wraps to at the card's inner width, 1 to `diffMaxLines`.
+    static func diffLines(_ text: String) -> Int {
+        let bounds = (text as NSString).boundingRect(
+            with: NSSize(
+                width: diffWidth - contentInsetH * 2,
+                height: .greatestFiniteMagnitude),
+            options: [.usesLineFragmentOrigin, .usesFontLeading],
+            attributes: [.font: diffFont])
+        let lines = Int((bounds.height / diffFontLineHeight).rounded())
+        return min(max(lines, 1), diffMaxLines)
+    }
 
     /// Idle standby pill (persistent HUD): a small capsule that morphs into
     /// the full listening capsule on click.

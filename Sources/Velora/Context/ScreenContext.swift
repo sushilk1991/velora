@@ -27,6 +27,27 @@ enum ScreenTextSelectionIdentity {
     case unavailable
 }
 
+/// Whether a finished Proofread may be pasted over the selection it came
+/// from, and if not, why.
+enum SelectionReplaceVerdict: Equatable {
+    /// Accessibility re-read the exact captured range in the same field.
+    case exactRange
+    /// Accessibility cannot prove the range, but the captured field still
+    /// holds focus and no key press or click happened since capture.
+    case untouchedSinceCapture
+    /// The field does not take text: Terminal, a static webpage.
+    case readOnly
+    /// Another field holds focus, or Accessibility cannot name one.
+    case focusMoved
+    /// Accessibility shows a different selection, or input happened while
+    /// it cannot show one.
+    case selectionMoved
+
+    var allowsPaste: Bool {
+        self == .exactRange || self == .untouchedSinceCapture
+    }
+}
+
 /// Exact selection snapshot used by Safe Voice Edit. Text alone is not an
 /// identity: the same word can appear twice in one editor or webpage.
 struct ScreenTextSelection {
@@ -42,6 +63,13 @@ struct ScreenTextSelection {
               text == current.text,
               CFEqual(element, current.element)
         else { return false }
+        return sameRange(as: current) == true
+    }
+
+    /// Compares range identities. Nil when the two cannot be compared:
+    /// either side has no range, or one is a character range and the other
+    /// a text marker.
+    private func sameRange(as current: ScreenTextSelection) -> Bool? {
         switch (identity, current.identity) {
         case let (
             .characterRange(oldLocation, oldLength),
@@ -53,14 +81,55 @@ struct ScreenTextSelection {
         case (.sublimeToken, _), (_, .sublimeToken):
             // Sublime tokens are validated and replaced inside Sublime; AX
             // cannot produce a comparable current range.
-            return false
+            return nil
         case (.clipboardCapture, _), (_, .clipboardCapture):
             // No range exists to compare; the paste path guards itself.
-            return false
+            return nil
         case (.unavailable, _), (_, .unavailable),
              (.characterRange, .textMarkerRange), (.textMarkerRange, .characterRange):
-            return false
+            return nil
         }
+    }
+
+    /// Proofread's paste decision for an Accessibility-captured selection.
+    /// `current` is the selection AX reads now (nil when it reads none),
+    /// `focusedElement` the app's focused element now, and `inputUnchanged`
+    /// whether no key press or click happened since the capture.
+    ///
+    ///   read-only field ─────────────────────────────► readOnly
+    ///   focus not the captured field ────────────────► focusMoved
+    ///   AX re-reads the exact range ─────────────────► exactRange
+    ///   AX shows other text, field, or range ────────► selectionMoved
+    ///   AX cannot prove either way ─┬─ no input ─────► untouchedSinceCapture
+    ///                               └─ input ────────► selectionMoved
+    ///
+    /// The last row is Raycast's ⌘C/⌘V replacement with a guard: Chromium
+    /// and Electron fields often expose a selection once and then lose the
+    /// range on the re-read, and without a press or click the selection
+    /// cannot have moved.
+    func replaceVerdict(
+        current: ScreenTextSelection?,
+        focusedElement: AXUIElement?,
+        inputUnchanged: Bool
+    ) -> SelectionReplaceVerdict {
+        guard isEditable else { return .readOnly }
+        guard let focusedElement, CFEqual(focusedElement, element) else {
+            return .focusMoved
+        }
+
+        if let current {
+            if canReplace(with: current) {
+                return .exactRange
+            }
+            guard current.text == text, CFEqual(current.element, element) else {
+                return .selectionMoved
+            }
+            if sameRange(as: current) == false {
+                return .selectionMoved
+            }
+        }
+
+        return inputUnchanged ? .untouchedSinceCapture : .selectionMoved
     }
 
     var sublimeToken: SublimeTextSelectionToken? {
@@ -1898,12 +1967,16 @@ enum ScreenContext {
                 ScreenTextSelectionIdentity.characterRange(
                     location: $0.location, length: $0.length)
             } ?? .unavailable
+            // A missing range no longer makes the field read-only: Proofread
+            // replaces it under the input guard (`replaceVerdict`), and Voice
+            // Edit still needs the exact range.
             return ScreenTextSelection(
                 text: selection,
                 element: focused,
                 identity: identity,
-                isEditable: range != nil
-                    && axAttributeIsSettable(focused, kAXValueAttribute))
+                isEditable: selectionIsEditable(
+                    valueSettable: axAttributeIsSettable(focused, kAXValueAttribute),
+                    hasEditableRoot: hasEditableRoot(focused)))
         }
         guard let marker = axSelectedTextMarkerSelection(focused),
               let selection = resolvedSelectionText(
@@ -1915,7 +1988,27 @@ enum ScreenContext {
             identity: .textMarkerRange(marker.range),
             // Static webpage selections are readable but not replaceable.
             // They still enter edit mode and return the result on clipboard.
-            isEditable: axAttributeIsSettable(focused, kAXValueAttribute))
+            isEditable: selectionIsEditable(
+                valueSettable: axAttributeIsSettable(focused, kAXValueAttribute),
+                hasEditableRoot: hasEditableRoot(focused)))
+    }
+
+    /// Whether the field holding a selection takes a paste. Native controls
+    /// say so with a settable value. Chromium and WebKit contenteditable
+    /// regions (Gmail compose, Slack's composer) may not, but they name their
+    /// editable root. Terminal's text view and static webpage text have
+    /// neither, so their selections stay clipboard-only.
+    static func selectionIsEditable(
+        valueSettable: Bool, hasEditableRoot: @autoclosure () -> Bool
+    ) -> Bool {
+        valueSettable || hasEditableRoot()
+    }
+
+    /// Whether a web element sits inside a contenteditable region. Chromium
+    /// and WebKit answer these attributes only for editable content.
+    private static func hasEditableRoot(_ element: AXUIElement) -> Bool {
+        axElement(element, "AXEditableAncestor") != nil
+            || axElement(element, "AXHighestEditableAncestor") != nil
     }
 
     /// True when Accessibility positively reports an empty selection in an

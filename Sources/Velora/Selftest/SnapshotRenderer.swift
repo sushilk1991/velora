@@ -71,6 +71,29 @@ enum SnapshotRenderer {
             ("hud-inserted", .inserted),
             ("hud-learned", .learned(wrong: "valora", right: "Velora")),
             ("hud-error", .error("Microphone disconnected")),
+            ("hud-proofread-diff", .diff(
+                symbol: "text.badge.checkmark",
+                message: "Spelling and grammar fixed",
+                segments: TextDiff.words(
+                    from: "Their going too the stor tomorow, i think its fine",
+                    to: "They're going to the store tomorrow. I think it's fine."
+                ).excerpt())),
+            ("hud-proofread-diff-short", .diff(
+                symbol: "text.badge.checkmark",
+                message: "Spelling and grammar fixed",
+                segments: TextDiff.words(from: "Thanks for you help.", to: "Thanks for your help.")
+                    .excerpt())),
+            ("hud-proofread-diff-clipboard", .diff(
+                symbol: "doc.on.clipboard",
+                message: "Proofread text on clipboard",
+                segments: TextDiff.words(
+                    from: "The quarterly report is attached and teh numbers for "
+                        + "march look good overall but the forecast for q3 need "
+                        + "another review before we sends it to finance on monday",
+                    to: "The quarterly report is attached, and the numbers for "
+                        + "March look good overall, but the forecast for Q3 needs "
+                        + "another review before we send it to finance on Monday."
+                ).excerpt())),
             ("hud-action-reading", .notice(
                 symbol: "wand.and.stars",
                 message: ActionProgress.readingScreen.hudMessage)),

@@ -99,6 +99,13 @@ struct HUDView: View {
                     width: Self.actionResultWidth(message: message, appName: appName),
                     height: HUDGeometry.height),
                 true)
+        case .diff(_, _, let segments):
+            let text = TextDiff.displayRuns(segments).map(\.text).joined()
+            return (
+                CGSize(
+                    width: HUDGeometry.diffWidth,
+                    height: HUDGeometry.diffHeight(lines: HUDGeometry.diffLines(text))),
+                true)
         }
     }
 
@@ -149,7 +156,7 @@ struct HUDView: View {
             background
             content
                 .frame(width: width, height: height)
-                .clipShape(Capsule())
+                .clipShape(HUDGeometry.surface)
             border
             listeningRing
         }
@@ -170,19 +177,19 @@ struct HUDView: View {
 
     @ViewBuilder private var background: some View {
         if #available(macOS 26.0, *) {
-            Color.clear.glassEffect(.regular, in: Capsule())
+            Color.clear.glassEffect(.regular, in: HUDGeometry.surface)
         } else {
-            Capsule().fill(.ultraThinMaterial)
+            HUDGeometry.surface.fill(.ultraThinMaterial)
         }
         // A HUD is a control surface, not ambient content. Keep one stable,
         // dark contrast contract regardless of the app underneath it.
-        Capsule().fill(Color.black.opacity(reduceTransparency ? 0.96 : 0.72))
-        Capsule().fill(VeloraBrand.skyDeep.color.opacity(0.16))
-        Capsule().fill(Color.white.opacity(hovering ? 0.07 : 0))
+        HUDGeometry.surface.fill(Color.black.opacity(reduceTransparency ? 0.96 : 0.72))
+        HUDGeometry.surface.fill(VeloraBrand.skyDeep.color.opacity(0.16))
+        HUDGeometry.surface.fill(Color.white.opacity(hovering ? 0.07 : 0))
     }
 
     private var border: some View {
-        Capsule().strokeBorder(
+        HUDGeometry.surface.strokeBorder(
             Color.white.opacity(hovering ? 0.34 : 0.20),
             lineWidth: 1)
     }
@@ -227,6 +234,8 @@ struct HUDView: View {
                 .opacity(isLearned ? 1 : 0)
             noticeContent
                 .opacity(isNotice ? 1 : 0)
+            diffContent
+                .opacity(isDiff ? 1 : 0)
             actionResultContent
                 .opacity(isActionResult ? 1 : 0)
         }
@@ -696,6 +705,101 @@ struct HUDView: View {
         Self.capsuleMetrics(for: model.state, context: nil).size.width
     }
 
+    // MARK: - Proofread diff
+
+    private var diffParts: (symbol: String, message: String, segments: [TextDiff.Segment]) {
+        if case .diff(let symbol, let message, let segments) = model.state {
+            return (symbol, message, segments)
+        }
+        return ("", "", [])
+    }
+
+    /// The outcome line over the changed words. Deletions are struck
+    /// through in red, insertions green, each on a tinted ground so a
+    /// one-letter fix still stands out; unchanged context stays secondary.
+    ///
+    ///   ╭─────────────────────────────────────────────╮
+    ///   │ ✓ Spelling and grammar fixed                │
+    ///   │ ~Their~ They're going ~too~ to the …        │
+    ///   ╰─────────────────────────────────────────────╯
+    private var diffContent: some View {
+        let parts = diffParts
+        let runs = TextDiff.displayRuns(parts.segments)
+        let size = Self.capsuleMetrics(for: model.state, context: nil).size
+        return VStack(alignment: .leading, spacing: HUDGeometry.diffRowGap) {
+            HStack(spacing: VeloraSpacing.s) {
+                Image(systemName: parts.symbol.isEmpty ? "checkmark.circle.fill" : parts.symbol)
+                    .font(.system(size: 12, weight: .semibold))
+                    .foregroundStyle(VeloraBrand.sky.color)
+                Text(parts.message)
+                    .font(.system(size: 12, weight: .medium))
+                    .foregroundStyle(hudPrimaryText)
+                    .lineLimit(1)
+            }
+            .frame(height: HUDGeometry.diffLineHeight)
+            Text(diffText(runs))
+                .font(.system(size: 12, weight: .medium))
+                .lineLimit(HUDGeometry.diffLines(runs.map(\.text).joined()))
+                .truncationMode(.tail)
+                .frame(maxWidth: .infinity, alignment: .topLeading)
+        }
+        .padding(.horizontal, HUDGeometry.contentInsetH)
+        .padding(.vertical, HUDGeometry.contentInsetV)
+        .frame(width: size.width, height: size.height, alignment: .topLeading)
+    }
+
+    private func diffText(_ runs: [TextDiff.Segment]) -> AttributedString {
+        var text = AttributedString()
+        for run in runs {
+            var piece = AttributedString(run.text)
+            switch run.kind {
+            case .same:
+                piece.swiftUI.foregroundColor = hudSecondaryText
+            case .removed:
+                piece.swiftUI.foregroundColor = HUDDiffPalette.removedText
+                piece.swiftUI.backgroundColor = HUDDiffPalette.removedGround
+                piece.swiftUI.strikethroughStyle = Text.LineStyle(
+                    pattern: .solid, color: HUDDiffPalette.removedText)
+            case .added:
+                piece.swiftUI.foregroundColor = HUDDiffPalette.addedText
+                piece.swiftUI.backgroundColor = HUDDiffPalette.addedGround
+            }
+            text += piece
+        }
+        return text
+    }
+
+    /// VoiceOver reads the changes as pairs: "Their to They're, too to to".
+    static func diffSummary(_ segments: [TextDiff.Segment]) -> String {
+        var phrases: [String] = []
+        var pendingRemoval: String?
+        for segment in segments {
+            switch segment.kind {
+            case .removed:
+                if let removal = pendingRemoval {
+                    phrases.append("removed \(removal)")
+                }
+                pendingRemoval = segment.text
+            case .added:
+                if let removal = pendingRemoval {
+                    phrases.append("\(removal) to \(segment.text)")
+                } else {
+                    phrases.append("added \(segment.text)")
+                }
+                pendingRemoval = nil
+            case .same:
+                if let removal = pendingRemoval {
+                    phrases.append("removed \(removal)")
+                }
+                pendingRemoval = nil
+            }
+        }
+        if let removal = pendingRemoval {
+            phrases.append("removed \(removal)")
+        }
+        return phrases.joined(separator: ", ")
+    }
+
     // MARK: - Action result
 
     private var actionResultValue: ActionResultValue? {
@@ -871,6 +975,8 @@ struct HUDView: View {
             return "\(verification), \(message)"
         case .notice(_, let message):
             return message
+        case .diff(_, let message, let segments):
+            return "\(message). \(Self.diffSummary(segments))"
         // The pill shows no status word while recording, so VoiceOver gets
         // the state's name. Not "Polishing": the engine may not run cleanup
         // (docs/plans/2026-07-11-hud-trust-recovery-design.md).
@@ -919,6 +1025,11 @@ struct HUDView: View {
 
     private var isActionResult: Bool {
         if case .actionResult = model.state { return true }
+        return false
+    }
+
+    private var isDiff: Bool {
+        if case .diff = model.state { return true }
         return false
     }
 
@@ -1134,6 +1245,28 @@ struct HUDView: View {
                 }
             } else {
                 resetInstant(width: actionResultWidth, height: HUDGeometry.height)
+                withAnimation(VeloraMotion.spring) {
+                    opacity = 1
+                    scale = 1
+                    yOffset = 0
+                }
+            }
+
+        case .diff:
+            // A visible pill or an earlier diff grows in place; anything
+            // else fades the card in at its final size.
+            let size = Self.capsuleMetrics(for: new, context: nil).size
+            let growsInPlace: Bool = {
+                if case .diff = old { return true }
+                return old == .standby
+            }()
+            if growsInPlace {
+                withAnimation(VeloraMotion.spring) {
+                    width = size.width
+                    height = size.height
+                }
+            } else {
+                resetInstant(width: size.width, height: size.height)
                 withAnimation(VeloraMotion.spring) {
                     opacity = 1
                     scale = 1
