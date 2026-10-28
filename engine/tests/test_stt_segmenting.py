@@ -827,7 +827,8 @@ def test_non_prompt_empty_decode_on_noise_does_not_invent_words(whisper):
     }
     backend, fake = whisper([no_speech, "invented words"])
     backend.initial_prompt = "Glossary: project.md."
-    feed_seconds(backend, 2.5, chunk=loud(0.005))
+    # Loud enough to reach the model: quiet stationary noise is room tone now.
+    feed_seconds(backend, 2.5, chunk=loud(0.05))
 
     assert backend.finalize() == ""
     assert len(fake.calls) == 1
@@ -836,7 +837,8 @@ def test_non_prompt_empty_decode_on_noise_does_not_invent_words(whisper):
 def test_prompt_hallucination_on_stationary_noise_does_not_retry(whisper):
     backend, fake = whisper([PROMPT_HALLUCINATION, "invented words"])
     backend.initial_prompt = "Glossary: project.md."
-    feed_seconds(backend, 2.5, chunk=loud(0.02))
+    # Loud enough to reach the model: quiet stationary noise is room tone now.
+    feed_seconds(backend, 2.5, chunk=loud(0.05))
 
     assert backend.finalize() == ""
     assert len(fake.calls) == 1
@@ -1049,6 +1051,74 @@ def test_speechless_tail_is_never_decoded(whisper):
     assert text == "segment one segment two"
     assert backend.final_tail == ""
     assert len(fake.calls) == 2  # the tail decode never ran
+
+
+# ---- room tone (2026-10-28) ---------------------------------------------------
+# Both speech gates compare a span with the session's own level, so a take of
+# nothing but room tone sets that level itself. Archived take 604 was a steady
+# room at 0.0024 RMS with 0.005 bumps, and it reached Whisper as "Thank you.".
+# Over 1,108 archived takes with words, quiet speech rose at least 14.3 dB
+# above the take's noise floor; no-speech takes that reached Whisper rose
+# 8.9 dB at most.
+
+
+def room(seconds: float, rms: float, seed: int = 7) -> np.ndarray:
+    """Deterministic stationary noise at a given RMS."""
+    noise = np.random.default_rng(seed).standard_normal(int(seconds * SAMPLE_RATE))
+    return (rms * noise).astype(np.float32)
+
+
+def bursts(seconds: float, peak_rms: float, floor_rms: float) -> np.ndarray:
+    """Syllable-rate (4 Hz) voiced bursts over a room floor."""
+    t = np.arange(int(seconds * SAMPLE_RATE), dtype=np.float32) / SAMPLE_RATE
+    envelope = np.square(np.sin(2 * np.pi * 4 * t))
+    voiced = np.sqrt(2) * peak_rms * envelope * np.sin(2 * np.pi * 180 * t)
+    return (voiced + room(seconds, floor_rms, seed=11)).astype(np.float32)
+
+
+def dictate(backend, take: np.ndarray) -> str:
+    """Feed a take in the app's 100 ms chunks, then stop."""
+    for start in range(0, len(take), CHUNK):
+        backend.feed_chunk(take[start:start + CHUNK])
+    return backend.finalize()
+
+
+def test_room_tone_take_makes_no_model_call(whisper):
+    # The take-604 shape: a quiet room whose bumps rise ~7 dB over its floor.
+    backend, fake = whisper(["Thank you."])
+    take = np.concatenate((room(1.0, 0.0024), room(1.2, 0.0055, seed=8), room(0.8, 0.0024, seed=9)))
+
+    assert dictate(backend, take) == ""
+    assert fake.calls == []
+
+
+def test_room_tone_after_capture_warmup_makes_no_model_call(whisper):
+    # Capture warm-up writes zeros first. They are digital silence, not room,
+    # and must not pin the noise floor at zero.
+    backend, fake = whisper(["Thank you."])
+    warmup = np.zeros(int(0.6 * SAMPLE_RATE), dtype=np.float32)
+    take = np.concatenate((warmup, room(1.0, 0.0024), room(1.2, 0.0055, seed=8), room(0.8, 0.0024, seed=9)))
+
+    assert dictate(backend, take) == ""
+    assert fake.calls == []
+
+
+def test_quiet_speech_over_quiet_room_still_decodes(whisper):
+    # The take-1047 shape: a quiet speaker (0.0066) rising ~17 dB over the room.
+    backend, fake = whisper(["quiet but real words"])
+    take = np.concatenate((room(0.5, 0.0009), bursts(3.0, 0.0066, 0.0009), room(0.5, 0.0009, seed=3)))
+
+    assert dictate(backend, take) == "quiet but real words"
+    assert len(fake.calls) == 1
+
+
+def test_speech_over_a_loud_room_still_decodes(whisper):
+    # A cafe: speech only ~8 dB over a loud floor. Loud spans are exempt.
+    backend, fake = whisper(["order for Sushil"])
+    take = np.concatenate((room(0.5, 0.03), bursts(3.0, 0.08, 0.03), room(0.5, 0.03, seed=3)))
+
+    assert dictate(backend, take) == "order for Sushil"
+    assert len(fake.calls) == 1
 
 
 def test_speech_bearing_tail_still_decodes(whisper):
