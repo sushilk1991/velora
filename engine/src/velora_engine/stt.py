@@ -894,6 +894,55 @@ def _reaches_speech_level(audio: np.ndarray, speech_level: float) -> bool:
     )
 
 
+# A quiet span must also rise clearly above the recording's noise floor (its
+# 5th-percentile 20 ms frame). The gates above compare a span with the
+# session's own level, so a take of nothing but room tone sets that level
+# itself and passes them: archived take 604, a steady room at 0.0024 RMS with
+# 0.005 bumps, reached Whisper as "Thank you." (2026-10-28). Replaying all
+# 1,108 archived takes with words, 15 had a quiet span this rule judged, and
+# the lowest rose 14.3 dB above its floor; the no-speech takes that reached
+# Whisper rose 8.9 dB at most. 11 dB sits between the two. A sustained peak
+# at or above about -30 dBFS is exempt, so speech over a loud room (a café)
+# is never judged by this rule.
+_ROOM_TONE_RISE_DB = 11.0
+_ROOM_TONE_RISE = 10 ** (_ROOM_TONE_RISE_DB / 20)
+_ROOM_TONE_MAX_RMS = 0.03
+# Frames below -80 dBFS are digital silence (the capture warm-up writes
+# zeros), not room. No archived room measured below 0.0009 RMS, 20 dB above
+# this. Counting the zeros would pin the floor at 0 and switch the rule off
+# for every take that starts with them.
+_DIGITAL_SILENCE_RMS = 1e-4
+
+
+def _is_room_tone(audio: np.ndarray, noise_floor: float) -> bool:
+    """True when a quiet span never rises clearly above its room.
+
+        loudest sustained 0.2 s ──┬─ ≥ 0.03 RMS ─────────────► not judged (loud)
+                                  ├─ < floor × 3.5 (11 dB) ───► room tone
+                                  └─ otherwise ───────────────► speech evidence
+
+    Example: a fan at 0.0024 RMS with 0.0055 bumps rises 7 dB, so it is room
+    tone; a quiet speaker at 0.0066 over a 0.0009 room rises 17 dB. A floor of
+    zero (a recording with no room at all) never marks a span as room tone.
+    """
+    frame_count = len(audio) // _SPEECH_FRAME_SAMPLES
+    evidence_frames = max(
+        1, _MIN_SPAN_SPEECH_SAMPLES // _SPEECH_FRAME_SAMPLES
+    )
+    if frame_count < evidence_frames:
+        return False
+
+    framed = np.asarray(
+        audio[: frame_count * _SPEECH_FRAME_SAMPLES], dtype=np.float32
+    ).reshape(frame_count, _SPEECH_FRAME_SAMPLES)
+    rms = np.sqrt(np.mean(np.square(framed, dtype=np.float64), axis=1))
+    sustained_peak = float(np.partition(rms, -evidence_frames)[-evidence_frames])
+    if sustained_peak >= _ROOM_TONE_MAX_RMS:
+        return False
+
+    return sustained_peak < _ROOM_TONE_RISE * noise_floor
+
+
 # The final ~0.3s of a recording is mechanically suspect: it holds the sound
 # of the stop keypress itself, a loud transient that passes every energy gate
 # and that Whisper happily decodes as "Thank you." (field bug, 2026-08-04).
@@ -1209,6 +1258,7 @@ class WhisperBackend:
         self._speech_rms = np.empty(0, dtype=np.float64)
         self._speech_rms_chunks = 0
         self._speech_p90 = 0.0
+        self._speech_p5 = 0.0  # the recording's noise floor
         # Samples of tracker-flagged speech since the last decode point. A
         # span only counts as speech-bearing past a sustained run — a single
         # 100 ms room-tone blip over the adaptive threshold used to arm the
@@ -1315,7 +1365,18 @@ class WhisperBackend:
         if len(rms_parts) > 1:
             self._speech_rms = np.concatenate(rms_parts)
             self._speech_p90 = float(np.percentile(self._speech_rms, 90))
+            room = self._speech_rms[self._speech_rms > _DIGITAL_SILENCE_RMS]
+            self._speech_p5 = float(np.percentile(room, 5)) if room.size else 0.0
         return max(self._silence.speech_level, self._speech_p90)
+
+    def _noise_floor(self) -> float:
+        """The recording's room level: its 5th-percentile 20 ms frame RMS,
+        digital silence excluded.
+
+        Keyed to the whole buffered recording, not the span, so a segment cut
+        between pauses still sees the room it was recorded in."""
+        self._speech_reference()  # brings the frame RMS up to date
+        return self._speech_p5
 
     def _transcribe(
         self,
@@ -1384,6 +1445,18 @@ class WhisperBackend:
             # skip the model and its optional prompt-free recovery entirely.
             log.info(
                 "whisper guard: skipped decode of a speechless span (%.1fs audio)",
+                len(audio) / SAMPLE_RATE,
+            )
+            return ""
+
+        if _is_room_tone(integrity_audio, self._noise_floor()):
+            # Room tone passes the two gates above because it sets the
+            # session level they compare against. Whisper turns it into
+            # "Thank you." with confident metadata, so skip the model. The
+            # event keeps the speechless-span wording bench tooling counts.
+            log.info(
+                "whisper guard: skipped decode of a speechless span "
+                "(room tone, %.1fs audio)",
                 len(audio) / SAMPLE_RATE,
             )
             return ""
@@ -1702,6 +1775,7 @@ class WhisperBackend:
         self._speech_rms = np.empty(0, dtype=np.float64)
         self._speech_rms_chunks = 0
         self._speech_p90 = 0.0
+        self._speech_p5 = 0.0  # the recording's noise floor
         self._segment_decode_failed = False
         self._span_speech_samples = 0
         self._session_had_speech = False
