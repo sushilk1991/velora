@@ -186,3 +186,93 @@ async def test_a_turn_that_already_ran_long_still_takes_the_skill(
 
     assert event["steps"][-1] == {"do": "play_first_video"}
     assert eng.cleanup.calls == []
+
+
+# ---- which commands open one web page --------------------------------------
+# The 2026-10-28 live audit: with Chrome in front, the planner typed the site
+# or query into the address bar. The foreground host has no window identity,
+# so the validator refused every attempt until the turn budget ran out.
+
+GOOGLE = "https://www.google.com/search"
+
+
+@pytest.mark.parametrize(("transcript", "url"), [
+    ("Open github.com in Chrome", "https://github.com"),
+    ("open github.com", "https://github.com"),
+    ("Go to news.ycombinator.com", "https://news.ycombinator.com"),
+    ("Please open bbc.co.uk in Safari.", "https://bbc.co.uk"),
+    ("Visit GitHub.com/sushilk1991/velora", "https://github.com/sushilk1991/velora"),
+    ("Open YouTube", "https://www.youtube.com"),
+    ("open youtube in google chrome", "https://www.youtube.com"),
+    ("Search Google for on-device speech recognition",
+     f"{GOOGLE}?q=on-device+speech+recognition"),
+    ("Can you search Google for weather in Pune?", f"{GOOGLE}?q=weather+in+Pune"),
+    ("search for biryani recipes on Google", f"{GOOGLE}?q=biryani+recipes"),
+    ("Look up Velora dictation on Google please", f"{GOOGLE}?q=Velora+dictation"),
+])
+def test_a_web_page_command_yields_its_url(transcript, url):
+    assert action_skills.web_page_url(transcript) == url
+
+
+@pytest.mark.parametrize("transcript", [
+    # A bare name may be an app ("Open GitHub" is GitHub Desktop).
+    "Open GitHub",
+    "Open Google",
+    # A file name is not a site.
+    "open readme.md",
+    "Open notes.txt in TextEdit",
+    # Compound commands are the controller's.
+    "Open github.com and star the repo",
+    "open github.com, then message Priya",
+    "Search Google for flights and book the cheapest",
+    # A reference to the screen is not a query.
+    "Search Google for it",
+    "search for this on Google",
+    # Other sites' searches, and anything after the browser.
+    "Search Slack for the invoice",
+    "open github.com in a new tab",
+    "Open YouTube and play lofi",
+])
+def test_anything_else_is_not_a_web_page(transcript):
+    assert action_skills.web_page_url(transcript) is None
+
+
+def test_the_skill_opens_the_page_in_one_turn():
+    session = session_for("Open github.com in Chrome", "Google Chrome")
+
+    reply = action_skills.reply_for(session)
+    accepted = session.accept_reply(json.dumps(reply))
+
+    assert accepted == {"steps": [
+        {"do": "open_url", "url": "https://github.com"},
+    ], "done": True}
+    assert session.sends is False
+
+
+def test_a_google_search_passes_the_url_data_fence():
+    session = session_for(
+        "Search Google for on-device speech recognition", "Google Chrome")
+
+    accepted = session.accept_reply(json.dumps(action_skills.reply_for(session)))
+
+    assert accepted["steps"] == [{
+        "do": "open_url",
+        "url": f"{GOOGLE}?q=on-device+speech+recognition",
+    }]
+
+
+async def test_a_web_page_command_needs_no_model(engine):
+    eng, sock = engine
+    eng.cleanup = DecidingPlanner()
+    client = await connect(sock)
+    await client.recv_event("ready")
+    await send_start(client, transcript="Open YouTube",
+                     context={"frontmost_app": "Google Chrome",
+                              "running_apps": ["Google Chrome", "Orca"]})
+
+    event = await client.recv_event("action_turn")
+
+    assert event["steps"] == [{"do": "open_url", "url": "https://www.youtube.com"}]
+    assert event["done"] is True
+    assert eng.cleanup.calls == []
+    assert eng.cleanup.decided == []
