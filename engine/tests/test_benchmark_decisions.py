@@ -18,16 +18,48 @@ from velora_engine.decisions import validate_questions  # noqa: E402
 # Items as scored on 2026-09-28 and 2026-10-27. Editing them breaks comparison
 # with every recorded result: update this only together with a new baseline.
 ITEMS_SHA256 = "83d82793855d371f5f2ac9b4c83097c8d035c6412b0c25a77173f80f73fba095"
+# Revision 2, first scored 2026-10-28.
+ITEMS_V2_SHA256 = "ceebd33c781071fe004a82fae7d44f68a1202f9b611f147bacce6839ed4f1197"
+
+
+def _digest(items) -> str:
+    canonical = json.dumps(
+        [{**item, "question": item["question"].to_dict()} for item in items],
+        ensure_ascii=False, sort_keys=True)
+    return hashlib.sha256(canonical.encode()).hexdigest()
 
 
 def test_items_match_the_recorded_baseline_set():
     items = build_items()
-    canonical = json.dumps(
-        [{**item, "question": item["question"].to_dict()} for item in items],
-        ensure_ascii=False, sort_keys=True)
 
-    assert hashlib.sha256(canonical.encode()).hexdigest() == ITEMS_SHA256
+    assert _digest(items) == ITEMS_SHA256
     assert [sum(item["cat"] == cat for item in items) for cat in CATEGORIES] == [26, 8, 8, 9, 6, 5]
+    assert _digest(build_items(2)) == ITEMS_V2_SHA256
+
+
+def test_revision_two_selects_only_the_open_conversation_row():
+    """The chat list and the conversation pane must agree on which chat is
+    open; revision 1 kept Priya selected under Shivangi's open chat."""
+    for item in build_items(2):
+        state = item["state"]
+        if "[41] parent=40" not in state:
+            continue
+        header = state.split('[41] parent=40 AXButton label="', 1)[1].split('"', 1)[0]
+        selected = [line.split('label="', 1)[1].split(",")[0]
+                    for line in state.splitlines() if "state=selected" in line
+                    and "collection_member=true" in line]
+        assert selected in ([header], []), item["id"]
+
+
+def test_revision_two_keeps_every_question_and_gold():
+    """Only the selection moves. Pick options quote whole element lines, so
+    a row's option text gains or loses `state=selected` with it."""
+    def shape(item):
+        question = item["question"]
+        return (item["id"], item["gold"], question.instructions,
+                [key for key, _ in question.options])
+
+    assert [shape(i) for i in build_items(1)] == [shape(i) for i in build_items(2)]
 
 
 def test_every_item_is_a_question_the_engine_would_ask():
@@ -73,3 +105,4 @@ def test_summary_counts_hits_per_category():
     assert summary["by_category"]["sent_ok"] == "0/0"
     assert summary["misses"] == ["route-2"]
     assert summary["min_label_mass"] == 0.5
+    assert summary["accuracy_ci95"] == (0.208, 0.939)

@@ -196,6 +196,9 @@ CASES = (
         "need to buy apples. Third is I need to buy eggs. Basically a dozen of eggs.",
         bundle_id="com.sublimetext.4",
         app_name="Sublime Text",
+        # Sublime Text resolves to Code mode, whose postprocess strips a
+        # trailing period (shell safety), so no output can end with ".".
+        ending="",
         required=("buy books", "buy apples", "buy eggs", "dozen of eggs"),
         numbered_items=3,
         required_intro="three items",
@@ -206,6 +209,7 @@ CASES = (
         "apples, and fourth is one dozen of eggs.",
         bundle_id="com.sublimetext.4",
         app_name="Sublime Text",
+        ending="",  # Code mode: see implicit_counted_todo_list
         required=("books", "three apples", "one dozen of eggs"),
         numbered_items=3,
         required_intro="three items",

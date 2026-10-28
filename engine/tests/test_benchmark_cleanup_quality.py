@@ -208,3 +208,17 @@ def test_candidate_rejects_any_absolute_quality_failure():
         for failure in verdict["failures"]
     )
     assert "new_quality_failures:new_failure" in verdict["failures"]
+
+
+def test_no_code_mode_case_requires_a_trailing_period():
+    """Code mode's postprocess strips a trailing period (shell safety), so a
+    case in a Code-mode app that demands one fails every model."""
+    from scripts.benchmark_cleanup_quality import CASES
+    from velora_engine.formatting import CATEGORY_BY_BUNDLE
+
+    code_cases = [case for case in CASES
+                  if CATEGORY_BY_BUNDLE.get(case.bundle_id) == "code"
+                  and case.explicit_mode is None]
+
+    assert code_cases
+    assert [case.name for case in code_cases if case.ending.endswith(".")] == []
