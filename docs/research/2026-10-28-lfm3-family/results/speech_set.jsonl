@@ -1,0 +1,171 @@
+{"id": "take36", "kind": "real_empty", "label": "unknown", "seconds": 1.89, "peak_lsb": 967, "loudest_frame_rms": 0.01266, "p90_frame_rms": 0.01052, "gate_decodes": true, "take": 36}
+{"id": "take110", "kind": "real_empty", "label": "unknown", "seconds": 3.57, "peak_lsb": 188, "loudest_frame_rms": 0.0022, "p90_frame_rms": 0.00179, "gate_decodes": false, "take": 110}
+{"id": "take111", "kind": "real_empty", "label": "unknown", "seconds": 3.77, "peak_lsb": 221, "loudest_frame_rms": 0.00229, "p90_frame_rms": 0.00173, "gate_decodes": false, "take": 111}
+{"id": "take112", "kind": "real_empty", "label": "unknown", "seconds": 4.02, "peak_lsb": 868, "loudest_frame_rms": 0.01578, "p90_frame_rms": 0.01549, "gate_decodes": true, "take": 112}
+{"id": "take113", "kind": "real_empty", "label": "unknown", "seconds": 3.91, "peak_lsb": 865, "loudest_frame_rms": 0.01571, "p90_frame_rms": 0.01547, "gate_decodes": true, "take": 113}
+{"id": "take114", "kind": "real_empty", "label": "unknown", "seconds": 4.02, "peak_lsb": 808, "loudest_frame_rms": 0.01113, "p90_frame_rms": 0.00197, "gate_decodes": false, "take": 114}
+{"id": "take115", "kind": "real_empty", "label": "unknown", "seconds": 4.04, "peak_lsb": 206, "loudest_frame_rms": 0.0028, "p90_frame_rms": 0.00199, "gate_decodes": false, "take": 115}
+{"id": "take259", "kind": "real_silence", "label": "no", "seconds": 6.26, "peak_lsb": 0, "loudest_frame_rms": 0.0, "p90_frame_rms": 0.0, "gate_decodes": false, "take": 259}
+{"id": "take275", "kind": "real_fabricated", "label": "no", "seconds": 0.36, "peak_lsb": 843, "loudest_frame_rms": 0.011, "p90_frame_rms": 0.00818, "gate_decodes": false, "take": 275}
+{"id": "take315", "kind": "real_empty", "label": "unknown", "seconds": 0.79, "peak_lsb": 450, "loudest_frame_rms": 0.00533, "p90_frame_rms": 0.00477, "gate_decodes": false, "take": 315}
+{"id": "take385", "kind": "real_silence", "label": "no", "seconds": 6.13, "peak_lsb": 0, "loudest_frame_rms": 0.0, "p90_frame_rms": 0.0, "gate_decodes": false, "take": 385}
+{"id": "take389", "kind": "real_silence", "label": "no", "seconds": 2.45, "peak_lsb": 0, "loudest_frame_rms": 0.0, "p90_frame_rms": 0.0, "gate_decodes": false, "take": 389}
+{"id": "take403", "kind": "real_silence", "label": "no", "seconds": 3.78, "peak_lsb": 0, "loudest_frame_rms": 0.0, "p90_frame_rms": 0.0, "gate_decodes": false, "take": 403}
+{"id": "take440", "kind": "real_empty", "label": "unknown", "seconds": 2.44, "peak_lsb": 598, "loudest_frame_rms": 0.0043, "p90_frame_rms": 0.00104, "gate_decodes": false, "take": 440}
+{"id": "take469", "kind": "real_silence", "label": "no", "seconds": 12.93, "peak_lsb": 0, "loudest_frame_rms": 0.0, "p90_frame_rms": 0.0, "gate_decodes": false, "take": 469}
+{"id": "take470", "kind": "real_silence", "label": "no", "seconds": 18.09, "peak_lsb": 0, "loudest_frame_rms": 0.0, "p90_frame_rms": 0.0, "gate_decodes": false, "take": 470}
+{"id": "take471", "kind": "real_silence", "label": "no", "seconds": 6.99, "peak_lsb": 0, "loudest_frame_rms": 0.0, "p90_frame_rms": 0.0, "gate_decodes": false, "take": 471}
+{"id": "take530", "kind": "real_empty", "label": "unknown", "seconds": 9.78, "peak_lsb": 1950, "loudest_frame_rms": 0.02196, "p90_frame_rms": 0.00109, "gate_decodes": false, "take": 530}
+{"id": "take588", "kind": "real_empty", "label": "unknown", "seconds": 14.16, "peak_lsb": 208, "loudest_frame_rms": 0.0021, "p90_frame_rms": 0.0, "gate_decodes": false, "take": 588}
+{"id": "take604", "kind": "real_fabricated", "label": "no", "seconds": 9.45, "peak_lsb": 569, "loudest_frame_rms": 0.00834, "p90_frame_rms": 0.00321, "gate_decodes": true, "take": 604}
+{"id": "take659", "kind": "real_silence", "label": "no", "seconds": 5.47, "peak_lsb": 0, "loudest_frame_rms": 0.0, "p90_frame_rms": 0.0, "gate_decodes": false, "take": 659}
+{"id": "take706", "kind": "real_silence", "label": "no", "seconds": 4.96, "peak_lsb": 0, "loudest_frame_rms": 0.0, "p90_frame_rms": 0.0, "gate_decodes": false, "take": 706}
+{"id": "take866", "kind": "real_empty", "label": "unknown", "seconds": 5.81, "peak_lsb": 409, "loudest_frame_rms": 0.0051, "p90_frame_rms": 0.00145, "gate_decodes": false, "take": 866}
+{"id": "take924", "kind": "real_silence", "label": "no", "seconds": 6.62, "peak_lsb": 0, "loudest_frame_rms": 0.0, "p90_frame_rms": 0.0, "gate_decodes": false, "take": 924}
+{"id": "take925", "kind": "real_silence", "label": "no", "seconds": 2.1, "peak_lsb": 0, "loudest_frame_rms": 0.0, "p90_frame_rms": 0.0, "gate_decodes": false, "take": 925}
+{"id": "take1016", "kind": "real_empty", "label": "unknown", "seconds": 9.76, "peak_lsb": 494, "loudest_frame_rms": 0.00188, "p90_frame_rms": 0.0, "gate_decodes": false, "take": 1016}
+{"id": "take1055", "kind": "real_empty", "label": "unknown", "seconds": 0.43, "peak_lsb": 162, "loudest_frame_rms": 0.00143, "p90_frame_rms": 0.00127, "gate_decodes": false, "take": 1055}
+{"id": "take1063", "kind": "real_speech", "label": "yes", "seconds": 6.64, "peak_lsb": 24729, "loudest_frame_rms": 0.31511, "p90_frame_rms": 0.11071, "gate_decodes": true, "take": 1063}
+{"id": "take1108", "kind": "real_speech", "label": "yes", "seconds": 11.5, "peak_lsb": 25024, "loudest_frame_rms": 0.30288, "p90_frame_rms": 0.09567, "gate_decodes": true, "take": 1108}
+{"id": "take107", "kind": "real_speech", "label": "yes", "seconds": 3.55, "peak_lsb": 4684, "loudest_frame_rms": 0.07665, "p90_frame_rms": 0.05064, "gate_decodes": true, "take": 107}
+{"id": "take1101", "kind": "real_speech", "label": "yes", "seconds": 8.71, "peak_lsb": 19529, "loudest_frame_rms": 0.18019, "p90_frame_rms": 0.07376, "gate_decodes": true, "take": 1101}
+{"id": "take337", "kind": "real_speech", "label": "yes", "seconds": 11.08, "peak_lsb": 11861, "loudest_frame_rms": 0.17486, "p90_frame_rms": 0.06198, "gate_decodes": true, "take": 337}
+{"id": "take94", "kind": "real_speech", "label": "yes", "seconds": 11.96, "peak_lsb": 5473, "loudest_frame_rms": 0.087, "p90_frame_rms": 0.04392, "gate_decodes": true, "take": 94}
+{"id": "take941", "kind": "real_speech", "label": "yes", "seconds": 7.64, "peak_lsb": 26473, "loudest_frame_rms": 0.30206, "p90_frame_rms": 0.15245, "gate_decodes": true, "take": 941}
+{"id": "take1039", "kind": "real_speech", "label": "yes", "seconds": 7.67, "peak_lsb": 30295, "loudest_frame_rms": 0.38857, "p90_frame_rms": 0.17523, "gate_decodes": true, "take": 1039}
+{"id": "take267", "kind": "real_speech", "label": "yes", "seconds": 5.25, "peak_lsb": 8378, "loudest_frame_rms": 0.11927, "p90_frame_rms": 0.06249, "gate_decodes": true, "take": 267}
+{"id": "take422", "kind": "real_speech", "label": "yes", "seconds": 12.6, "peak_lsb": 27640, "loudest_frame_rms": 0.38714, "p90_frame_rms": 0.20806, "gate_decodes": true, "take": 422}
+{"id": "take17", "kind": "real_speech", "label": "yes", "seconds": 4.1, "peak_lsb": 7132, "loudest_frame_rms": 0.06161, "p90_frame_rms": 0.03362, "gate_decodes": true, "take": 17}
+{"id": "take877", "kind": "real_speech", "label": "yes", "seconds": 10.45, "peak_lsb": 23783, "loudest_frame_rms": 0.2576, "p90_frame_rms": 0.11074, "gate_decodes": true, "take": 877}
+{"id": "take368", "kind": "real_speech", "label": "yes", "seconds": 6.46, "peak_lsb": 10061, "loudest_frame_rms": 0.15728, "p90_frame_rms": 0.08128, "gate_decodes": true, "take": 368}
+{"id": "take1128", "kind": "real_speech", "label": "yes", "seconds": 7.52, "peak_lsb": 14469, "loudest_frame_rms": 0.1078, "p90_frame_rms": 0.04935, "gate_decodes": true, "take": 1128}
+{"id": "take341", "kind": "real_speech", "label": "yes", "seconds": 5.19, "peak_lsb": 9935, "loudest_frame_rms": 0.15461, "p90_frame_rms": 0.09523, "gate_decodes": true, "take": 341}
+{"id": "take1109", "kind": "real_speech", "label": "yes", "seconds": 14.36, "peak_lsb": 21299, "loudest_frame_rms": 0.20743, "p90_frame_rms": 0.0818, "gate_decodes": true, "take": 1109}
+{"id": "take80", "kind": "real_speech", "label": "yes", "seconds": 3.49, "peak_lsb": 14463, "loudest_frame_rms": 0.2331, "p90_frame_rms": 0.05977, "gate_decodes": true, "take": 80}
+{"id": "take12", "kind": "real_speech", "label": "yes", "seconds": 14.39, "peak_lsb": 6952, "loudest_frame_rms": 0.08159, "p90_frame_rms": 0.03399, "gate_decodes": true, "take": 12}
+{"id": "take747", "kind": "real_speech", "label": "yes", "seconds": 13.35, "peak_lsb": 27175, "loudest_frame_rms": 0.31996, "p90_frame_rms": 0.17744, "gate_decodes": true, "take": 747}
+{"id": "take632", "kind": "real_speech", "label": "yes", "seconds": 11.04, "peak_lsb": 25288, "loudest_frame_rms": 0.37242, "p90_frame_rms": 0.14844, "gate_decodes": true, "take": 632}
+{"id": "take333", "kind": "real_speech", "label": "yes", "seconds": 7.52, "peak_lsb": 12080, "loudest_frame_rms": 0.18671, "p90_frame_rms": 0.07126, "gate_decodes": true, "take": 333}
+{"id": "take340", "kind": "real_speech", "label": "yes", "seconds": 11.75, "peak_lsb": 13924, "loudest_frame_rms": 0.21089, "p90_frame_rms": 0.10468, "gate_decodes": true, "take": 340}
+{"id": "take880", "kind": "real_speech", "label": "yes", "seconds": 10.15, "peak_lsb": 23427, "loudest_frame_rms": 0.1501, "p90_frame_rms": 0.08813, "gate_decodes": true, "take": 880}
+{"id": "take181", "kind": "real_speech", "label": "yes", "seconds": 10.53, "peak_lsb": 12627, "loudest_frame_rms": 0.17725, "p90_frame_rms": 0.07123, "gate_decodes": true, "take": 181}
+{"id": "tone1150", "kind": "room_tone", "label": "no", "seconds": 3.0, "peak_lsb": 273, "loudest_frame_rms": 0.00159, "p90_frame_rms": 0.00149, "gate_decodes": false, "source": 1150}
+{"id": "quiet1150_0.002", "kind": "quiet_speech", "label": "yes", "seconds": 8.06, "peak_lsb": 502, "loudest_frame_rms": 0.00722, "p90_frame_rms": 0.002, "gate_decodes": false, "source": 1150, "target_p90": 0.002}
+{"id": "quiet1150_0.004", "kind": "quiet_speech", "label": "yes", "seconds": 8.06, "peak_lsb": 1003, "loudest_frame_rms": 0.01444, "p90_frame_rms": 0.004, "gate_decodes": true, "source": 1150, "target_p90": 0.004}
+{"id": "quiet1150_0.008", "kind": "quiet_speech", "label": "yes", "seconds": 8.06, "peak_lsb": 2006, "loudest_frame_rms": 0.02888, "p90_frame_rms": 0.008, "gate_decodes": true, "source": 1150, "target_p90": 0.008}
+{"id": "quiet1150_0.016", "kind": "quiet_speech", "label": "yes", "seconds": 8.06, "peak_lsb": 4012, "loudest_frame_rms": 0.05776, "p90_frame_rms": 0.016, "gate_decodes": true, "source": 1150, "target_p90": 0.016}
+{"id": "tone336", "kind": "room_tone", "label": "no", "seconds": 3.0, "peak_lsb": 696, "loudest_frame_rms": 0.00627, "p90_frame_rms": 0.00602, "gate_decodes": true, "source": 336}
+{"id": "quiet336_0.002", "kind": "quiet_speech", "label": "yes", "seconds": 7.5, "peak_lsb": 367, "loudest_frame_rms": 0.00567, "p90_frame_rms": 0.002, "gate_decodes": false, "source": 336, "target_p90": 0.002}
+{"id": "quiet336_0.004", "kind": "quiet_speech", "label": "yes", "seconds": 7.5, "peak_lsb": 734, "loudest_frame_rms": 0.01135, "p90_frame_rms": 0.004, "gate_decodes": true, "source": 336, "target_p90": 0.004}
+{"id": "quiet336_0.008", "kind": "quiet_speech", "label": "yes", "seconds": 7.5, "peak_lsb": 1468, "loudest_frame_rms": 0.02269, "p90_frame_rms": 0.008, "gate_decodes": true, "source": 336, "target_p90": 0.008}
+{"id": "quiet336_0.016", "kind": "quiet_speech", "label": "yes", "seconds": 7.5, "peak_lsb": 2937, "loudest_frame_rms": 0.04539, "p90_frame_rms": 0.016, "gate_decodes": true, "source": 336, "target_p90": 0.016}
+{"id": "tone175", "kind": "room_tone", "label": "no", "seconds": 3.0, "peak_lsb": 1560, "loudest_frame_rms": 0.01862, "p90_frame_rms": 0.0158, "gate_decodes": true, "source": 175}
+{"id": "quiet175_0.002", "kind": "quiet_speech", "label": "yes", "seconds": 10.5, "peak_lsb": 247, "loudest_frame_rms": 0.00419, "p90_frame_rms": 0.002, "gate_decodes": false, "source": 175, "target_p90": 0.002}
+{"id": "quiet175_0.004", "kind": "quiet_speech", "label": "yes", "seconds": 10.5, "peak_lsb": 494, "loudest_frame_rms": 0.00839, "p90_frame_rms": 0.004, "gate_decodes": true, "source": 175, "target_p90": 0.004}
+{"id": "quiet175_0.008", "kind": "quiet_speech", "label": "yes", "seconds": 10.5, "peak_lsb": 988, "loudest_frame_rms": 0.01677, "p90_frame_rms": 0.008, "gate_decodes": true, "source": 175, "target_p90": 0.008}
+{"id": "quiet175_0.016", "kind": "quiet_speech", "label": "yes", "seconds": 10.5, "peak_lsb": 1977, "loudest_frame_rms": 0.03355, "p90_frame_rms": 0.016, "gate_decodes": true, "source": 175, "target_p90": 0.016}
+{"id": "tone328", "kind": "room_tone", "label": "no", "seconds": 3.0, "peak_lsb": 994, "loudest_frame_rms": 0.01077, "p90_frame_rms": 0.00988, "gate_decodes": true, "source": 328}
+{"id": "quiet328_0.002", "kind": "quiet_speech", "label": "yes", "seconds": 4.73, "peak_lsb": 327, "loudest_frame_rms": 0.00498, "p90_frame_rms": 0.002, "gate_decodes": false, "source": 328, "target_p90": 0.002}
+{"id": "quiet328_0.004", "kind": "quiet_speech", "label": "yes", "seconds": 4.73, "peak_lsb": 655, "loudest_frame_rms": 0.00996, "p90_frame_rms": 0.004, "gate_decodes": true, "source": 328, "target_p90": 0.004}
+{"id": "quiet328_0.008", "kind": "quiet_speech", "label": "yes", "seconds": 4.73, "peak_lsb": 1311, "loudest_frame_rms": 0.01992, "p90_frame_rms": 0.008, "gate_decodes": true, "source": 328, "target_p90": 0.008}
+{"id": "quiet328_0.016", "kind": "quiet_speech", "label": "yes", "seconds": 4.73, "peak_lsb": 2623, "loudest_frame_rms": 0.03985, "p90_frame_rms": 0.016, "gate_decodes": true, "source": 328, "target_p90": 0.016}
+{"id": "tone915", "kind": "room_tone", "label": "no", "seconds": 3.0, "peak_lsb": 1041, "loudest_frame_rms": 0.00574, "p90_frame_rms": 0.00467, "gate_decodes": true, "source": 915}
+{"id": "quiet915_0.002", "kind": "quiet_speech", "label": "yes", "seconds": 12.39, "peak_lsb": 459, "loudest_frame_rms": 0.00651, "p90_frame_rms": 0.002, "gate_decodes": false, "source": 915, "target_p90": 0.002}
+{"id": "quiet915_0.004", "kind": "quiet_speech", "label": "yes", "seconds": 12.39, "peak_lsb": 918, "loudest_frame_rms": 0.01302, "p90_frame_rms": 0.004, "gate_decodes": true, "source": 915, "target_p90": 0.004}
+{"id": "quiet915_0.008", "kind": "quiet_speech", "label": "yes", "seconds": 12.39, "peak_lsb": 1835, "loudest_frame_rms": 0.02604, "p90_frame_rms": 0.008, "gate_decodes": true, "source": 915, "target_p90": 0.008}
+{"id": "quiet915_0.016", "kind": "quiet_speech", "label": "yes", "seconds": 12.39, "peak_lsb": 3670, "loudest_frame_rms": 0.05207, "p90_frame_rms": 0.016, "gate_decodes": true, "source": 915, "target_p90": 0.016}
+{"id": "tone127", "kind": "room_tone", "label": "no", "seconds": 3.0, "peak_lsb": 769, "loudest_frame_rms": 0.00691, "p90_frame_rms": 0.00657, "gate_decodes": true, "source": 127}
+{"id": "quiet127_0.002", "kind": "quiet_speech", "label": "yes", "seconds": 14.52, "peak_lsb": 360, "loudest_frame_rms": 0.00566, "p90_frame_rms": 0.002, "gate_decodes": false, "source": 127, "target_p90": 0.002}
+{"id": "quiet127_0.004", "kind": "quiet_speech", "label": "yes", "seconds": 14.52, "peak_lsb": 721, "loudest_frame_rms": 0.01133, "p90_frame_rms": 0.004, "gate_decodes": true, "source": 127, "target_p90": 0.004}
+{"id": "quiet127_0.008", "kind": "quiet_speech", "label": "yes", "seconds": 14.52, "peak_lsb": 1443, "loudest_frame_rms": 0.02265, "p90_frame_rms": 0.008, "gate_decodes": true, "source": 127, "target_p90": 0.008}
+{"id": "quiet127_0.016", "kind": "quiet_speech", "label": "yes", "seconds": 14.52, "peak_lsb": 2886, "loudest_frame_rms": 0.0453, "p90_frame_rms": 0.016, "gate_decodes": true, "source": 127, "target_p90": 0.016}
+{"id": "tone1037", "kind": "room_tone", "label": "no", "seconds": 3.0, "peak_lsb": 500, "loudest_frame_rms": 0.00389, "p90_frame_rms": 0.00326, "gate_decodes": false, "source": 1037}
+{"id": "quiet1037_0.002", "kind": "quiet_speech", "label": "yes", "seconds": 9.25, "peak_lsb": 364, "loudest_frame_rms": 0.00442, "p90_frame_rms": 0.002, "gate_decodes": false, "source": 1037, "target_p90": 0.002}
+{"id": "quiet1037_0.004", "kind": "quiet_speech", "label": "yes", "seconds": 9.25, "peak_lsb": 728, "loudest_frame_rms": 0.00884, "p90_frame_rms": 0.004, "gate_decodes": true, "source": 1037, "target_p90": 0.004}
+{"id": "quiet1037_0.008", "kind": "quiet_speech", "label": "yes", "seconds": 9.25, "peak_lsb": 1456, "loudest_frame_rms": 0.01768, "p90_frame_rms": 0.008, "gate_decodes": true, "source": 1037, "target_p90": 0.008}
+{"id": "quiet1037_0.016", "kind": "quiet_speech", "label": "yes", "seconds": 9.25, "peak_lsb": 2913, "loudest_frame_rms": 0.03535, "p90_frame_rms": 0.016, "gate_decodes": true, "source": 1037, "target_p90": 0.016}
+{"id": "tone625", "kind": "room_tone", "label": "no", "seconds": 3.0, "peak_lsb": 315, "loudest_frame_rms": 0.00167, "p90_frame_rms": 0.00162, "gate_decodes": false, "source": 625}
+{"id": "quiet625_0.002", "kind": "quiet_speech", "label": "yes", "seconds": 9.09, "peak_lsb": 560, "loudest_frame_rms": 0.00477, "p90_frame_rms": 0.002, "gate_decodes": false, "source": 625, "target_p90": 0.002}
+{"id": "quiet625_0.004", "kind": "quiet_speech", "label": "yes", "seconds": 9.09, "peak_lsb": 1120, "loudest_frame_rms": 0.00953, "p90_frame_rms": 0.004, "gate_decodes": true, "source": 625, "target_p90": 0.004}
+{"id": "quiet625_0.008", "kind": "quiet_speech", "label": "yes", "seconds": 9.09, "peak_lsb": 2239, "loudest_frame_rms": 0.01906, "p90_frame_rms": 0.008, "gate_decodes": true, "source": 625, "target_p90": 0.008}
+{"id": "quiet625_0.016", "kind": "quiet_speech", "label": "yes", "seconds": 9.09, "peak_lsb": 4477, "loudest_frame_rms": 0.03813, "p90_frame_rms": 0.016, "gate_decodes": true, "source": 625, "target_p90": 0.016}
+{"id": "tone282", "kind": "room_tone", "label": "no", "seconds": 3.0, "peak_lsb": 1439, "loudest_frame_rms": 0.00932, "p90_frame_rms": 0.00882, "gate_decodes": true, "source": 282}
+{"id": "quiet282_0.002", "kind": "quiet_speech", "label": "yes", "seconds": 6.84, "peak_lsb": 341, "loudest_frame_rms": 0.003, "p90_frame_rms": 0.002, "gate_decodes": false, "source": 282, "target_p90": 0.002}
+{"id": "quiet282_0.004", "kind": "quiet_speech", "label": "yes", "seconds": 6.84, "peak_lsb": 683, "loudest_frame_rms": 0.006, "p90_frame_rms": 0.004, "gate_decodes": true, "source": 282, "target_p90": 0.004}
+{"id": "quiet282_0.008", "kind": "quiet_speech", "label": "yes", "seconds": 6.84, "peak_lsb": 1366, "loudest_frame_rms": 0.012, "p90_frame_rms": 0.008, "gate_decodes": true, "source": 282, "target_p90": 0.008}
+{"id": "quiet282_0.016", "kind": "quiet_speech", "label": "yes", "seconds": 6.84, "peak_lsb": 2732, "loudest_frame_rms": 0.024, "p90_frame_rms": 0.016, "gate_decodes": true, "source": 282, "target_p90": 0.016}
+{"id": "tone734", "kind": "room_tone", "label": "no", "seconds": 3.0, "peak_lsb": 873, "loudest_frame_rms": 0.00633, "p90_frame_rms": 0.00593, "gate_decodes": true, "source": 734}
+{"id": "quiet734_0.002", "kind": "quiet_speech", "label": "yes", "seconds": 10.9, "peak_lsb": 276, "loudest_frame_rms": 0.00579, "p90_frame_rms": 0.002, "gate_decodes": false, "source": 734, "target_p90": 0.002}
+{"id": "quiet734_0.004", "kind": "quiet_speech", "label": "yes", "seconds": 10.9, "peak_lsb": 552, "loudest_frame_rms": 0.01158, "p90_frame_rms": 0.004, "gate_decodes": true, "source": 734, "target_p90": 0.004}
+{"id": "quiet734_0.008", "kind": "quiet_speech", "label": "yes", "seconds": 10.9, "peak_lsb": 1104, "loudest_frame_rms": 0.02316, "p90_frame_rms": 0.008, "gate_decodes": true, "source": 734, "target_p90": 0.008}
+{"id": "quiet734_0.016", "kind": "quiet_speech", "label": "yes", "seconds": 10.9, "peak_lsb": 2208, "loudest_frame_rms": 0.04632, "p90_frame_rms": 0.016, "gate_decodes": true, "source": 734, "target_p90": 0.016}
+{"id": "tone309", "kind": "room_tone", "label": "no", "seconds": 3.0, "peak_lsb": 2167, "loudest_frame_rms": 0.0192, "p90_frame_rms": 0.01791, "gate_decodes": true, "source": 309}
+{"id": "quiet309_0.002", "kind": "quiet_speech", "label": "yes", "seconds": 5.19, "peak_lsb": 228, "loudest_frame_rms": 0.00399, "p90_frame_rms": 0.002, "gate_decodes": false, "source": 309, "target_p90": 0.002}
+{"id": "quiet309_0.004", "kind": "quiet_speech", "label": "yes", "seconds": 5.19, "peak_lsb": 457, "loudest_frame_rms": 0.00798, "p90_frame_rms": 0.004, "gate_decodes": true, "source": 309, "target_p90": 0.004}
+{"id": "quiet309_0.008", "kind": "quiet_speech", "label": "yes", "seconds": 5.19, "peak_lsb": 914, "loudest_frame_rms": 0.01596, "p90_frame_rms": 0.008, "gate_decodes": true, "source": 309, "target_p90": 0.008}
+{"id": "quiet309_0.016", "kind": "quiet_speech", "label": "yes", "seconds": 5.19, "peak_lsb": 1829, "loudest_frame_rms": 0.03192, "p90_frame_rms": 0.016, "gate_decodes": true, "source": 309, "target_p90": 0.016}
+{"id": "tone384", "kind": "room_tone", "label": "no", "seconds": 3.0, "peak_lsb": 515, "loudest_frame_rms": 0.00324, "p90_frame_rms": 0.00305, "gate_decodes": false, "source": 384}
+{"id": "quiet384_0.002", "kind": "quiet_speech", "label": "yes", "seconds": 8.65, "peak_lsb": 561, "loudest_frame_rms": 0.00541, "p90_frame_rms": 0.002, "gate_decodes": false, "source": 384, "target_p90": 0.002}
+{"id": "quiet384_0.004", "kind": "quiet_speech", "label": "yes", "seconds": 8.65, "peak_lsb": 1122, "loudest_frame_rms": 0.01081, "p90_frame_rms": 0.004, "gate_decodes": true, "source": 384, "target_p90": 0.004}
+{"id": "quiet384_0.008", "kind": "quiet_speech", "label": "yes", "seconds": 8.65, "peak_lsb": 2244, "loudest_frame_rms": 0.02162, "p90_frame_rms": 0.008, "gate_decodes": true, "source": 384, "target_p90": 0.008}
+{"id": "quiet384_0.016", "kind": "quiet_speech", "label": "yes", "seconds": 8.65, "peak_lsb": 4487, "loudest_frame_rms": 0.04325, "p90_frame_rms": 0.016, "gate_decodes": true, "source": 384, "target_p90": 0.016}
+{"id": "tone933", "kind": "room_tone", "label": "no", "seconds": 3.0, "peak_lsb": 901, "loudest_frame_rms": 0.00513, "p90_frame_rms": 0.00468, "gate_decodes": true, "source": 933}
+{"id": "quiet933_0.002", "kind": "quiet_speech", "label": "yes", "seconds": 9.06, "peak_lsb": 328, "loudest_frame_rms": 0.00456, "p90_frame_rms": 0.002, "gate_decodes": false, "source": 933, "target_p90": 0.002}
+{"id": "quiet933_0.004", "kind": "quiet_speech", "label": "yes", "seconds": 9.06, "peak_lsb": 656, "loudest_frame_rms": 0.00912, "p90_frame_rms": 0.004, "gate_decodes": true, "source": 933, "target_p90": 0.004}
+{"id": "quiet933_0.008", "kind": "quiet_speech", "label": "yes", "seconds": 9.06, "peak_lsb": 1312, "loudest_frame_rms": 0.01824, "p90_frame_rms": 0.008, "gate_decodes": true, "source": 933, "target_p90": 0.008}
+{"id": "quiet933_0.016", "kind": "quiet_speech", "label": "yes", "seconds": 9.06, "peak_lsb": 2623, "loudest_frame_rms": 0.03647, "p90_frame_rms": 0.016, "gate_decodes": true, "source": 933, "target_p90": 0.016}
+{"id": "tone304", "kind": "room_tone", "label": "no", "seconds": 3.0, "peak_lsb": 2623, "loudest_frame_rms": 0.01502, "p90_frame_rms": 0.01238, "gate_decodes": true, "source": 304}
+{"id": "quiet304_0.002", "kind": "quiet_speech", "label": "yes", "seconds": 8.03, "peak_lsb": 196, "loudest_frame_rms": 0.00344, "p90_frame_rms": 0.002, "gate_decodes": false, "source": 304, "target_p90": 0.002}
+{"id": "quiet304_0.004", "kind": "quiet_speech", "label": "yes", "seconds": 8.03, "peak_lsb": 392, "loudest_frame_rms": 0.00688, "p90_frame_rms": 0.004, "gate_decodes": true, "source": 304, "target_p90": 0.004}
+{"id": "quiet304_0.008", "kind": "quiet_speech", "label": "yes", "seconds": 8.03, "peak_lsb": 785, "loudest_frame_rms": 0.01376, "p90_frame_rms": 0.008, "gate_decodes": true, "source": 304, "target_p90": 0.008}
+{"id": "quiet304_0.016", "kind": "quiet_speech", "label": "yes", "seconds": 8.03, "peak_lsb": 1571, "loudest_frame_rms": 0.02752, "p90_frame_rms": 0.016, "gate_decodes": true, "source": 304, "target_p90": 0.016}
+{"id": "tone370", "kind": "room_tone", "label": "no", "seconds": 3.0, "peak_lsb": 985, "loudest_frame_rms": 0.00864, "p90_frame_rms": 0.00728, "gate_decodes": true, "source": 370}
+{"id": "quiet370_0.002", "kind": "quiet_speech", "label": "yes", "seconds": 11.99, "peak_lsb": 335, "loudest_frame_rms": 0.00481, "p90_frame_rms": 0.002, "gate_decodes": false, "source": 370, "target_p90": 0.002}
+{"id": "quiet370_0.004", "kind": "quiet_speech", "label": "yes", "seconds": 11.99, "peak_lsb": 671, "loudest_frame_rms": 0.00962, "p90_frame_rms": 0.004, "gate_decodes": true, "source": 370, "target_p90": 0.004}
+{"id": "quiet370_0.008", "kind": "quiet_speech", "label": "yes", "seconds": 11.99, "peak_lsb": 1343, "loudest_frame_rms": 0.01923, "p90_frame_rms": 0.008, "gate_decodes": true, "source": 370, "target_p90": 0.008}
+{"id": "quiet370_0.016", "kind": "quiet_speech", "label": "yes", "seconds": 11.99, "peak_lsb": 2686, "loudest_frame_rms": 0.03847, "p90_frame_rms": 0.016, "gate_decodes": true, "source": 370, "target_p90": 0.016}
+{"id": "tone505", "kind": "room_tone", "label": "no", "seconds": 3.0, "peak_lsb": 690, "loudest_frame_rms": 0.00479, "p90_frame_rms": 0.00357, "gate_decodes": false, "source": 505}
+{"id": "quiet505_0.002", "kind": "quiet_speech", "label": "yes", "seconds": 10.77, "peak_lsb": 345, "loudest_frame_rms": 0.00381, "p90_frame_rms": 0.002, "gate_decodes": false, "source": 505, "target_p90": 0.002}
+{"id": "quiet505_0.004", "kind": "quiet_speech", "label": "yes", "seconds": 10.77, "peak_lsb": 689, "loudest_frame_rms": 0.00762, "p90_frame_rms": 0.004, "gate_decodes": true, "source": 505, "target_p90": 0.004}
+{"id": "quiet505_0.008", "kind": "quiet_speech", "label": "yes", "seconds": 10.77, "peak_lsb": 1378, "loudest_frame_rms": 0.01523, "p90_frame_rms": 0.008, "gate_decodes": true, "source": 505, "target_p90": 0.008}
+{"id": "quiet505_0.016", "kind": "quiet_speech", "label": "yes", "seconds": 10.77, "peak_lsb": 2755, "loudest_frame_rms": 0.03046, "p90_frame_rms": 0.016, "gate_decodes": true, "source": 505, "target_p90": 0.016}
+{"id": "tone727", "kind": "room_tone", "label": "no", "seconds": 3.0, "peak_lsb": 720, "loudest_frame_rms": 0.00512, "p90_frame_rms": 0.00473, "gate_decodes": true, "source": 727}
+{"id": "quiet727_0.002", "kind": "quiet_speech", "label": "yes", "seconds": 12.18, "peak_lsb": 295, "loudest_frame_rms": 0.00449, "p90_frame_rms": 0.002, "gate_decodes": false, "source": 727, "target_p90": 0.002}
+{"id": "quiet727_0.004", "kind": "quiet_speech", "label": "yes", "seconds": 12.18, "peak_lsb": 590, "loudest_frame_rms": 0.00898, "p90_frame_rms": 0.004, "gate_decodes": true, "source": 727, "target_p90": 0.004}
+{"id": "quiet727_0.008", "kind": "quiet_speech", "label": "yes", "seconds": 12.18, "peak_lsb": 1179, "loudest_frame_rms": 0.01797, "p90_frame_rms": 0.008, "gate_decodes": true, "source": 727, "target_p90": 0.008}
+{"id": "quiet727_0.016", "kind": "quiet_speech", "label": "yes", "seconds": 12.18, "peak_lsb": 2358, "loudest_frame_rms": 0.03594, "p90_frame_rms": 0.016, "gate_decodes": true, "source": 727, "target_p90": 0.016}
+{"id": "tone772", "kind": "room_tone", "label": "no", "seconds": 3.0, "peak_lsb": 973, "loudest_frame_rms": 0.00554, "p90_frame_rms": 0.00505, "gate_decodes": true, "source": 772}
+{"id": "quiet772_0.002", "kind": "quiet_speech", "label": "yes", "seconds": 13.32, "peak_lsb": 330, "loudest_frame_rms": 0.00391, "p90_frame_rms": 0.002, "gate_decodes": false, "source": 772, "target_p90": 0.002}
+{"id": "quiet772_0.004", "kind": "quiet_speech", "label": "yes", "seconds": 13.32, "peak_lsb": 659, "loudest_frame_rms": 0.00782, "p90_frame_rms": 0.004, "gate_decodes": true, "source": 772, "target_p90": 0.004}
+{"id": "quiet772_0.008", "kind": "quiet_speech", "label": "yes", "seconds": 13.32, "peak_lsb": 1317, "loudest_frame_rms": 0.01564, "p90_frame_rms": 0.008, "gate_decodes": true, "source": 772, "target_p90": 0.008}
+{"id": "quiet772_0.016", "kind": "quiet_speech", "label": "yes", "seconds": 13.32, "peak_lsb": 2633, "loudest_frame_rms": 0.03129, "p90_frame_rms": 0.016, "gate_decodes": true, "source": 772, "target_p90": 0.016}
+{"id": "tone525", "kind": "room_tone", "label": "no", "seconds": 3.0, "peak_lsb": 847, "loudest_frame_rms": 0.00486, "p90_frame_rms": 0.00379, "gate_decodes": false, "source": 525}
+{"id": "quiet525_0.002", "kind": "quiet_speech", "label": "yes", "seconds": 11.48, "peak_lsb": 316, "loudest_frame_rms": 0.00388, "p90_frame_rms": 0.002, "gate_decodes": false, "source": 525, "target_p90": 0.002}
+{"id": "quiet525_0.004", "kind": "quiet_speech", "label": "yes", "seconds": 11.48, "peak_lsb": 631, "loudest_frame_rms": 0.00775, "p90_frame_rms": 0.004, "gate_decodes": true, "source": 525, "target_p90": 0.004}
+{"id": "quiet525_0.008", "kind": "quiet_speech", "label": "yes", "seconds": 11.48, "peak_lsb": 1262, "loudest_frame_rms": 0.01551, "p90_frame_rms": 0.008, "gate_decodes": true, "source": 525, "target_p90": 0.008}
+{"id": "quiet525_0.016", "kind": "quiet_speech", "label": "yes", "seconds": 11.48, "peak_lsb": 2523, "loudest_frame_rms": 0.03101, "p90_frame_rms": 0.016, "gate_decodes": true, "source": 525, "target_p90": 0.016}
+{"id": "tone661", "kind": "room_tone", "label": "no", "seconds": 3.0, "peak_lsb": 544, "loudest_frame_rms": 0.00347, "p90_frame_rms": 0.00307, "gate_decodes": false, "source": 661}
+{"id": "quiet661_0.002", "kind": "quiet_speech", "label": "yes", "seconds": 14.76, "peak_lsb": 729, "loudest_frame_rms": 0.00652, "p90_frame_rms": 0.002, "gate_decodes": true, "source": 661, "target_p90": 0.002}
+{"id": "quiet661_0.004", "kind": "quiet_speech", "label": "yes", "seconds": 14.76, "peak_lsb": 1457, "loudest_frame_rms": 0.01303, "p90_frame_rms": 0.004, "gate_decodes": true, "source": 661, "target_p90": 0.004}
+{"id": "quiet661_0.008", "kind": "quiet_speech", "label": "yes", "seconds": 14.76, "peak_lsb": 2913, "loudest_frame_rms": 0.02606, "p90_frame_rms": 0.008, "gate_decodes": true, "source": 661, "target_p90": 0.008}
+{"id": "quiet661_0.016", "kind": "quiet_speech", "label": "yes", "seconds": 14.76, "peak_lsb": 5825, "loudest_frame_rms": 0.05213, "p90_frame_rms": 0.016, "gate_decodes": true, "source": 661, "target_p90": 0.016}
+{"id": "tone291", "kind": "room_tone", "label": "no", "seconds": 3.0, "peak_lsb": 1528, "loudest_frame_rms": 0.0123, "p90_frame_rms": 0.0097, "gate_decodes": true, "source": 291}
+{"id": "quiet291_0.002", "kind": "quiet_speech", "label": "yes", "seconds": 8.97, "peak_lsb": 220, "loudest_frame_rms": 0.00392, "p90_frame_rms": 0.002, "gate_decodes": false, "source": 291, "target_p90": 0.002}
+{"id": "quiet291_0.004", "kind": "quiet_speech", "label": "yes", "seconds": 8.97, "peak_lsb": 440, "loudest_frame_rms": 0.00785, "p90_frame_rms": 0.004, "gate_decodes": true, "source": 291, "target_p90": 0.004}
+{"id": "quiet291_0.008", "kind": "quiet_speech", "label": "yes", "seconds": 8.97, "peak_lsb": 881, "loudest_frame_rms": 0.01569, "p90_frame_rms": 0.008, "gate_decodes": true, "source": 291, "target_p90": 0.008}
+{"id": "quiet291_0.016", "kind": "quiet_speech", "label": "yes", "seconds": 8.97, "peak_lsb": 1762, "loudest_frame_rms": 0.03139, "p90_frame_rms": 0.016, "gate_decodes": true, "source": 291, "target_p90": 0.016}
+{"id": "tone366", "kind": "room_tone", "label": "no", "seconds": 3.0, "peak_lsb": 579, "loudest_frame_rms": 0.00495, "p90_frame_rms": 0.00466, "gate_decodes": true, "source": 366}
+{"id": "quiet366_0.002", "kind": "quiet_speech", "label": "yes", "seconds": 10.21, "peak_lsb": 378, "loudest_frame_rms": 0.00681, "p90_frame_rms": 0.002, "gate_decodes": false, "source": 366, "target_p90": 0.002}
+{"id": "quiet366_0.004", "kind": "quiet_speech", "label": "yes", "seconds": 10.21, "peak_lsb": 756, "loudest_frame_rms": 0.01362, "p90_frame_rms": 0.004, "gate_decodes": true, "source": 366, "target_p90": 0.004}
+{"id": "quiet366_0.008", "kind": "quiet_speech", "label": "yes", "seconds": 10.21, "peak_lsb": 1513, "loudest_frame_rms": 0.02725, "p90_frame_rms": 0.008, "gate_decodes": true, "source": 366, "target_p90": 0.008}
+{"id": "quiet366_0.016", "kind": "quiet_speech", "label": "yes", "seconds": 10.21, "peak_lsb": 3027, "loudest_frame_rms": 0.0545, "p90_frame_rms": 0.016, "gate_decodes": true, "source": 366, "target_p90": 0.016}
+{"id": "tone605", "kind": "room_tone", "label": "no", "seconds": 3.0, "peak_lsb": 1035, "loudest_frame_rms": 0.00649, "p90_frame_rms": 0.00579, "gate_decodes": true, "source": 605}
+{"id": "quiet605_0.002", "kind": "quiet_speech", "label": "yes", "seconds": 7.3, "peak_lsb": 271, "loudest_frame_rms": 0.00281, "p90_frame_rms": 0.002, "gate_decodes": false, "source": 605, "target_p90": 0.002}
+{"id": "quiet605_0.004", "kind": "quiet_speech", "label": "yes", "seconds": 7.3, "peak_lsb": 542, "loudest_frame_rms": 0.00561, "p90_frame_rms": 0.004, "gate_decodes": true, "source": 605, "target_p90": 0.004}
+{"id": "quiet605_0.008", "kind": "quiet_speech", "label": "yes", "seconds": 7.3, "peak_lsb": 1083, "loudest_frame_rms": 0.01122, "p90_frame_rms": 0.008, "gate_decodes": true, "source": 605, "target_p90": 0.008}
+{"id": "quiet605_0.016", "kind": "quiet_speech", "label": "yes", "seconds": 7.3, "peak_lsb": 2166, "loudest_frame_rms": 0.02245, "p90_frame_rms": 0.016, "gate_decodes": true, "source": 605, "target_p90": 0.016}
+{"id": "tone193", "kind": "room_tone", "label": "no", "seconds": 3.0, "peak_lsb": 2694, "loudest_frame_rms": 0.02144, "p90_frame_rms": 0.01992, "gate_decodes": true, "source": 193}
+{"id": "quiet193_0.002", "kind": "quiet_speech", "label": "yes", "seconds": 10.96, "peak_lsb": 673, "loudest_frame_rms": 0.01198, "p90_frame_rms": 0.002, "gate_decodes": false, "source": 193, "target_p90": 0.002}
+{"id": "quiet193_0.004", "kind": "quiet_speech", "label": "yes", "seconds": 10.96, "peak_lsb": 1346, "loudest_frame_rms": 0.02395, "p90_frame_rms": 0.004, "gate_decodes": true, "source": 193, "target_p90": 0.004}
+{"id": "quiet193_0.008", "kind": "quiet_speech", "label": "yes", "seconds": 10.96, "peak_lsb": 2692, "loudest_frame_rms": 0.04791, "p90_frame_rms": 0.008, "gate_decodes": true, "source": 193, "target_p90": 0.008}
+{"id": "quiet193_0.016", "kind": "quiet_speech", "label": "yes", "seconds": 10.96, "peak_lsb": 5383, "loudest_frame_rms": 0.09582, "p90_frame_rms": 0.016, "gate_decodes": true, "source": 193, "target_p90": 0.016}

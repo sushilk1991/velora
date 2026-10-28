@@ -1,0 +1,32 @@
+{"id": "modal1_open", "q": "modal", "gold": true, "app": "WhatsApp", "p_yes": 0.9946654434112245, "tokens": 948, "ms": 1118.8, "load1": 694.13, "mlx_active": 2216144910}
+{"id": "modal1_closed", "q": "modal", "gold": false, "app": "WhatsApp", "p_yes": 0.0060616915550297, "tokens": 948, "ms": 1730.0, "load1": 688.03, "mlx_active": 2216144910}
+{"id": "modal2_open", "q": "modal", "gold": true, "app": "Slack", "p_yes": 0.9925518286651355, "tokens": 948, "ms": 1533.7, "load1": 688.03, "mlx_active": 2216144910}
+{"id": "modal2_closed", "q": "modal", "gold": false, "app": "Slack", "p_yes": 0.005428355082597256, "tokens": 948, "ms": 1414.9, "load1": 688.03, "mlx_active": 2216144910}
+{"id": "modal3_open", "q": "modal", "gold": true, "app": "Mail", "p_yes": 0.9922658119175973, "tokens": 948, "ms": 1376.1, "load1": 688.03, "mlx_active": 2216144910}
+{"id": "modal3_closed", "q": "modal", "gold": false, "app": "Mail", "p_yes": 0.004047198267660253, "tokens": 948, "ms": 1290.8, "load1": 672.98, "mlx_active": 2216144910}
+{"id": "modal4_open", "q": "modal", "gold": true, "app": "Notes", "p_yes": 0.9957599978772977, "tokens": 948, "ms": 1293.4, "load1": 672.98, "mlx_active": 2216144910}
+{"id": "modal4_closed", "q": "modal", "gold": false, "app": "Notes", "p_yes": 0.004694233720729106, "tokens": 948, "ms": 1272.2, "load1": 672.98, "mlx_active": 2216144910}
+{"id": "modal5_open", "q": "modal", "gold": true, "app": "WhatsApp", "p_yes": 0.9906368743327946, "tokens": 948, "ms": 1297.9, "load1": 672.98, "mlx_active": 2216144910}
+{"id": "modal5_closed", "q": "modal", "gold": false, "app": "WhatsApp", "p_yes": 0.0060616915550297, "tokens": 948, "ms": 1317.4, "load1": 665.29, "mlx_active": 2216144910}
+{"id": "modal6_open", "q": "modal", "gold": true, "app": "Slack", "p_yes": 0.993092740079519, "tokens": 948, "ms": 1285.9, "load1": 665.29, "mlx_active": 2216144910}
+{"id": "modal6_closed", "q": "modal", "gold": false, "app": "Slack", "p_yes": 0.005428355082597256, "tokens": 948, "ms": 1247.4, "load1": 665.29, "mlx_active": 2216144910}
+{"id": "modal7_open", "q": "modal", "gold": true, "app": "Mail", "p_yes": 0.9943790992249143, "tokens": 948, "ms": 1328.7, "load1": 665.29, "mlx_active": 2216144910}
+{"id": "modal7_closed", "q": "modal", "gold": false, "app": "Mail", "p_yes": 0.004047198267660253, "tokens": 948, "ms": 1327.7, "load1": 661.18, "mlx_active": 2216144910}
+{"id": "modal8_open", "q": "modal", "gold": true, "app": "Notes", "p_yes": 0.9966110578039779, "tokens": 948, "ms": 1264.5, "load1": 661.18, "mlx_active": 2216144910}
+{"id": "modal8_closed", "q": "modal", "gold": false, "app": "Notes", "p_yes": 0.004694233720729106, "tokens": 948, "ms": 1270.2, "load1": 661.18, "mlx_active": 2216144910}
+{"id": "page1_loaded", "q": "loaded", "gold": true, "app": "YouTube — lofi hip hop", "p_yes": 0.9576857468325911, "tokens": 940, "ms": 1244.3, "load1": 661.18, "mlx_active": 2216144910}
+{"id": "page1_loading", "q": "loaded", "gold": false, "app": "YouTube — lofi hip hop", "p_yes": 0.03956298332122579, "tokens": 940, "ms": 1199.6, "load1": 651.8, "mlx_active": 2216144910}
+{"id": "page2_loaded", "q": "loaded", "gold": true, "app": "Google — on-device speech recognition", "p_yes": 0.9412956459953083, "tokens": 940, "ms": 1230.5, "load1": 651.8, "mlx_active": 2216144910}
+{"id": "page2_loading", "q": "loaded", "gold": false, "app": "Google — on-device speech recognition", "p_yes": 0.055558405693400086, "tokens": 940, "ms": 1300.1, "load1": 651.8, "mlx_active": 2216144910}
+{"id": "page3_loaded", "q": "loaded", "gold": true, "app": "GitHub — sushilk1991/velora", "p_yes": 0.9090075290028691, "tokens": 940, "ms": 1201.6, "load1": 651.8, "mlx_active": 2216144910}
+{"id": "page3_loading", "q": "loaded", "gold": false, "app": "GitHub — sushilk1991/velora", "p_yes": 0.02383876913697529, "tokens": 940, "ms": 1235.9, "load1": 616.5, "mlx_active": 2216144910}
+{"id": "page4_loaded", "q": "loaded", "gold": true, "app": "Linear — My Issues", "p_yes": 0.9776116500354712, "tokens": 940, "ms": 1239.6, "load1": 616.5, "mlx_active": 2216144910}
+{"id": "page4_loading", "q": "loaded", "gold": false, "app": "Linear — My Issues", "p_yes": 0.03636457435733411, "tokens": 940, "ms": 1205.5, "load1": 616.5, "mlx_active": 2216144910}
+{"id": "page5_loaded", "q": "loaded", "gold": true, "app": "YouTube — lofi hip hop", "p_yes": 0.9569698566557815, "tokens": 940, "ms": 1203.6, "load1": 616.5, "mlx_active": 2216144910}
+{"id": "page5_loading", "q": "loaded", "gold": false, "app": "YouTube — lofi hip hop", "p_yes": 0.03956298332122579, "tokens": 940, "ms": 1331.1, "load1": 585.95, "mlx_active": 2216144910}
+{"id": "page6_loaded", "q": "loaded", "gold": true, "app": "Google — on-device speech recognition", "p_yes": 0.9551291960325217, "tokens": 940, "ms": 1190.0, "load1": 585.95, "mlx_active": 2216144910}
+{"id": "page6_loading", "q": "loaded", "gold": false, "app": "Google — on-device speech recognition", "p_yes": 0.055558405693400086, "tokens": 940, "ms": 1141.1, "load1": 585.95, "mlx_active": 2216144910}
+{"id": "page7_loaded", "q": "loaded", "gold": true, "app": "GitHub — sushilk1991/velora", "p_yes": 0.9155494731325662, "tokens": 940, "ms": 1124.0, "load1": 585.95, "mlx_active": 2216144910}
+{"id": "page7_loading", "q": "loaded", "gold": false, "app": "GitHub — sushilk1991/velora", "p_yes": 0.02383876913697529, "tokens": 940, "ms": 1172.0, "load1": 549.92, "mlx_active": 2216144910}
+{"id": "page8_loaded", "q": "loaded", "gold": true, "app": "Linear — My Issues", "p_yes": 0.9747633865813992, "tokens": 940, "ms": 1131.7, "load1": 549.92, "mlx_active": 2216144910}
+{"id": "page8_loading", "q": "loaded", "gold": false, "app": "Linear — My Issues", "p_yes": 0.03636457435733411, "tokens": 940, "ms": 1156.9, "load1": 549.92, "mlx_active": 2216144910}
