@@ -435,6 +435,7 @@ extension Selftest {
         testBatchStateCarriesAcrossTurns()
         testSendGateHardening()
         testActionKeyVocabulary()
+        testActionKeyOffMainThread()
         testAppMatching()
         testActionExecutorHappyPath()
         testActionExecutorSafetyRails()
@@ -4521,6 +4522,33 @@ extension Selftest {
         for name in ActionKey.allNames {
             expect(ActionKey.keyCode(for: name) != nil, "'\(name)' maps to a keycode")
         }
+    }
+
+    /// The action runner decodes and executes plans on a background queue
+    /// (`ActionCoordinator.perform`), and the keyboard-layout read behind a
+    /// character key traps off the main thread on macOS 27: the 2026-10-28
+    /// live audit's "new note in Notes" planned ⌘N and killed Velora. The
+    /// waits spin the main run loop, never block it, so a main-thread hop
+    /// inside the key lookup can run.
+    private static func testActionKeyOffMainThread() {
+        let mainCode = ActionKey.keyCode(for: "n")
+        var backgroundCode: CGKeyCode?
+        var plan: ActionPlan?
+        var finished = false
+        DispatchQueue.global(qos: .userInitiated).async {
+            backgroundCode = ActionKey.keyCode(for: "n")
+            plan = decodePlan("""
+            {"sends":false,"steps":[{"do":"wait_frontmost","app":"Notes"},
+              {"do":"key","key":"n","mods":["cmd"]}]}
+            """)
+            DispatchQueue.main.async { finished = true }
+        }
+
+        expect(waitUntil(timeout: 5) { finished },
+               "a character key resolves off the main thread without hanging")
+        expect(backgroundCode != nil && backgroundCode == mainCode,
+               "a background lookup of N matches the main-thread key code")
+        expect(plan?.steps.count == 2, "a ⌘N plan decodes on the action queue")
     }
 
     private static func testAppMatching() {

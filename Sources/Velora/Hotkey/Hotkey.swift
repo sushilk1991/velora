@@ -195,7 +195,21 @@ extension Hotkey {
         80: "F19", 90: "F20",
     ]
 
+    /// The active layout's UCKeyTranslate data. Text Input Sources are
+    /// main-thread-only: macOS 27 traps a background read, and Action Mode
+    /// decodes and runs plans on a background queue (⌘N in a plan killed
+    /// Velora on 2026-10-28). Background callers hop to main, which is safe
+    /// because the main queue never waits on them (see
+    /// `SystemActionHost.onMain`).
     private static func currentKeyboardLayoutData() -> Data? {
+        if !Thread.isMainThread {
+            return DispatchQueue.main.sync(execute: currentKeyboardLayoutData)
+        }
+
+        // HIToolbox reaches its own main-queue assertion only on some
+        // input-source refreshes. Checking every read makes an off-main
+        // caller fail in selftest every time, not in the field now and then.
+        dispatchPrecondition(condition: .onQueue(.main))
         guard let source = TISCopyCurrentKeyboardLayoutInputSource()?.takeRetainedValue(),
               let rawLayoutData = TISGetInputSourceProperty(
                   source, kTISPropertyUnicodeKeyLayoutData)
