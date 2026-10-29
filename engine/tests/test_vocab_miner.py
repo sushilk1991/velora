@@ -88,6 +88,28 @@ def test_validate_term_banned_and_existing():
     assert validate_term("Velora", BATCH, banned=set(), existing={"velora"}) is False
 
 
+# Whisper's spelling of a term the user owns is that term misheard. Mined, it
+# went back into Whisper's prompt and kept the misspelling alive.
+NEAR_BATCH = "Valora on Super Whisper, then Whisperflow, Owen, Velora and Kubernetes"
+USER_SPELLINGS = ["Velora", "Superwhisper", "Wispr Flow", "Qwen"]
+
+
+@pytest.mark.parametrize(
+    "term,ok",
+    [
+        ("Valora", False),  # one edit from "Velora"
+        ("Super Whisper", False),  # same letters, different spacing
+        ("Whisperflow", False),  # two edits from "Wispr Flow" at 9+ letters
+        ("Owen", True),  # under 5 letters: one edit separates real names
+        ("Velora", True),  # the user's own spelling is not a variant of itself
+        ("Kubernetes", True),
+    ],
+)
+def test_validate_term_rejects_near_spellings_of_user_terms(term, ok):
+    assert validate_term(term, NEAR_BATCH, banned=set(), existing=set(),
+                         user_spellings=USER_SPELLINGS) is ok
+
+
 def test_clean_line_strips_markers():
     assert clean_line("- Velora") == "Velora"
     assert clean_line("3. Wispr Flow") == "Wispr Flow"
@@ -422,6 +444,26 @@ async def test_user_corrected_wrong_side_never_promotes(tmp_path):
     assert "Cloud Code" not in state["candidates"]
 
 
+async def test_dictionary_spellings_guard_mining(tmp_path):
+    # Dictionary entries live in config.json: a "heard as" side is a user
+    # correction like a learned one, and a near-spelling of a term the user
+    # wrote down is that term misheard. Unrelated terms still promote.
+    home = tmp_path / "vh"
+    home.mkdir(parents=True)
+    (home / "config.json").write_text(json.dumps({
+        "vocabulary": ["Velora"],
+        "replacements": {"cloud code": "Claude Code"},
+    }))
+    seed_history(home, ["Valora runs Cloud Code on Kubernetes",
+                        "Valora and Cloud Code moved to Kubernetes"])
+    miner = VocabMiner(home, make_generate(["Valora", "Cloud Code", "Kubernetes"]))
+    await miner.step()
+    state = read_state(home)
+    assert state["terms"] == ["Kubernetes"]
+    assert "Valora" not in state["candidates"]
+    assert "Cloud Code" not in state["candidates"]
+
+
 async def test_pending_corrected_wrong_side_never_promotes(tmp_path):
     home = tmp_path / "vh"
     home.mkdir(parents=True)
@@ -552,6 +594,21 @@ def test_auto_vocab_excludes_prompt_artifacts_and_user_corrected_wrongs(home):
     }))
     config = Config()
     assert config.auto_vocabulary == ["Velora"]
+
+
+def test_auto_vocab_excludes_misspellings_of_dictionary_terms(home):
+    # Terms mined before the guard existed must stop reaching Whisper too.
+    home.mkdir(parents=True, exist_ok=True)
+    (home / "config.json").write_text(json.dumps({
+        "vocabulary": ["Velora"],
+        "replacements": {"cloud code": "Claude Code"},
+    }))
+    (home / "auto_learned.json").write_text(json.dumps({
+        "version": 1,
+        "terms": ["Valora", "Cloud Code", "Kubernetes"],
+    }))
+    config = Config()
+    assert config.auto_vocabulary == ["Kubernetes"]
 
 
 # ---- server hooks ---------------------------------------------------------------
