@@ -23,8 +23,9 @@ import os
 import re
 import sqlite3
 import fcntl
+from functools import lru_cache
 from pathlib import Path
-from typing import Awaitable, Callable
+from typing import Awaitable, Callable, Iterable
 
 log = logging.getLogger("velora.vocab")
 
@@ -166,14 +167,83 @@ def clean_line(line: str) -> str:
     return line.strip().strip("\"'“”‘’").strip()
 
 
-def validate_term(term: str, batch_text: str, banned: set[str], existing: set[str]) -> bool:
+# A mined term this close to a spelling the user chose is that term misheard,
+# not a new one: "Valora" for "Velora", "Super Whisper" for "Superwhisper".
+# Whisper wrote the misspelling, cleanup kept it, the miner learned it from
+# the final text, and the glossary fed it back to Whisper. On the owner's 400
+# mined terms and candidates these bounds caught exactly the 4 known
+# misspellings and nothing else. Under 5 letters one edit separates real
+# names ("Qwen", "Owen"), so short terms are never judged.
+NEAR_SPELLING_MIN_CHARS = 5
+NEAR_SPELLING_LONG_CHARS = 9
+_SHORT_TERM_EDITS = 1
+_LONG_TERM_EDITS = 2
+# Each reload compares every mined term with every Dictionary spelling; keys
+# repeat across those pairs. Sized for the app's 2,000-entry Dictionary cap
+# plus MAX_TERMS mined terms.
+_SPELLING_KEY_CACHE = 4096
+
+
+@lru_cache(maxsize=_SPELLING_KEY_CACHE)
+def _spelling_key(term: str) -> str:
+    """Letters and digits only, lowercased: "Super Whisper" -> "superwhisper"."""
+    return re.sub(r"[^0-9a-z]", "", term.lower())
+
+
+def _within_edits(a: str, b: str, limit: int) -> bool:
+    """Levenshtein distance of a and b is at most `limit`.
+
+    Config reload checks every mined term against every Dictionary spelling
+    (up to 2,000), so this stops early: a length gap above the limit is
+    already too far, and so is a row whose best cell passed it.
+    """
+    if abs(len(a) - len(b)) > limit:
+        return False
+
+    previous = list(range(len(b) + 1))
+    for i, x in enumerate(a, 1):
+        current = [i]
+        for j, y in enumerate(b, 1):
+            current.append(min(previous[j] + 1, current[j - 1] + 1, previous[j - 1] + (x != y)))
+        if min(current) > limit:
+            return False
+        previous = current
+    return previous[-1] <= limit
+
+
+def is_near_spelling(term: str, spellings: Iterable[str]) -> bool:
+    """True when `term` is a variant of one of the user's `spellings`, not the
+    same term: "Valora" vs "Velora" is, "Velora" vs "Velora" and "Owen" vs
+    "Qwen" (too short to judge) are not."""
+    key = _spelling_key(term)
+    for spelling in spellings:
+        if term.lower() == spelling.lower():
+            continue
+        other = _spelling_key(spelling)
+        longest = max(len(key), len(other))
+        if longest < NEAR_SPELLING_MIN_CHARS:
+            continue
+        allowed = _LONG_TERM_EDITS if longest >= NEAR_SPELLING_LONG_CHARS else _SHORT_TERM_EDITS
+        if _within_edits(key, other, allowed):
+            return True
+    return False
+
+
+def validate_term(
+    term: str,
+    batch_text: str,
+    banned: set[str],
+    existing: set[str],
+    user_spellings: Iterable[str] = (),
+) -> bool:
     """Deterministic anti-hallucination gate for one LLM-nominated term.
 
     `banned`/`existing` are lowercase sets. A term must literally occur in the
     batch text (word-boundary, case-insensitive) — the direct test that the
     LLM didn't invent it — and must LOOK like a name: single all-lowercase
     dictionary-ish words are rejected (they'd poison the glossary), so a
-    single-word term needs a capital, digit, or dot/underscore/hyphen.
+    single-word term needs a capital, digit, or dot/underscore/hyphen. A
+    near-spelling of one of `user_spellings` is rejected as that term misheard.
     """
     if not term or len(term) > MAX_TERM_CHARS:
         return False
@@ -186,6 +256,8 @@ def validate_term(term: str, batch_text: str, banned: set[str], existing: set[st
     if low in banned or low in existing:
         return False
     if contains_prompt_artifact(term):
+        return False
+    if is_near_spelling(term, user_spellings):
         return False
     if any(w.lower() in _STOPWORDS for w in words) and len(words) == 1:
         return False
@@ -366,6 +438,32 @@ class VocabMiner:
                 wrong_sides.add(wrong.lower())
         return wrong_sides
 
+    def _dictionary(self) -> tuple[set[str], list[str]]:
+        """The user's own spellings, which mining must never contradict.
+
+        Returns (heard sides, spellings). A Dictionary replacement in
+        config.json ("heard as" -> "write as") is a correction like a learned
+        one, so its heard side is never learned. The spellings are every term
+        the user wrote down or corrected to, in config.json and learned.json:
+        a near-spelling of one is that term misheard.
+        """
+        heard: set[str] = set()
+        spellings: list[str] = []
+        for name in ("config.json", "learned.json"):
+            try:
+                data = json.loads((self.home / name).read_text())
+            except (FileNotFoundError, json.JSONDecodeError, OSError):
+                continue
+            if not isinstance(data, dict):
+                continue
+
+            spellings += [str(v) for v in data.get("vocabulary") or [] if str(v)]
+            for field in ("replacements", "soft_replacements"):
+                spellings += [str(v) for v in (data.get(field) or {}).values() if str(v)]
+            if name == "config.json":
+                heard.update(str(k).lower() for k in (data.get("replacements") or {}) if str(k))
+        return heard, spellings
+
     # ---- the mining step --------------------------------------------------
 
     async def step(self) -> bool:
@@ -414,6 +512,8 @@ class VocabMiner:
         terms: list[str] = [str(t) for t in state.get("terms", []) or []]
         banned_low = {str(b).lower() for b in state.get("banned", []) or []}
         banned_low.update(self._learned_wrong_sides())
+        heard_sides, user_spellings = self._dictionary()
+        banned_low.update(heard_sides)
         candidates: dict[str, dict] = {
             str(k): dict(v) for k, v in (state.get("candidates") or {}).items() if isinstance(v, dict)
         }
@@ -423,7 +523,7 @@ class VocabMiner:
         promoted = 0
         for line in raw_output.splitlines()[:MAX_LINES]:
             term = clean_line(line)
-            if not validate_term(term, batch_text, banned_low, existing_low):
+            if not validate_term(term, batch_text, banned_low, existing_low, user_spellings):
                 continue
             # Count DISTINCT history rows the term occurs in (dedup via the
             # rows list) — "seen in ≥2 dictations" is the promotion bar.
