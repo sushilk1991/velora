@@ -636,7 +636,7 @@ def test_fake_backend_default_mode_unchanged(monkeypatch):
 
 def test_build_glossary_prompt_orders_least_to_most_important():
     out = build_glossary_prompt(["User"], ["Learned"], ["Auto"], ["Entity"])
-    assert out == "Glossary: Auto, Learned, User, Entity."
+    assert out == "Auto, Learned, User, Entity."
 
 
 def test_build_glossary_prompt_empty_and_dedup():
@@ -644,14 +644,23 @@ def test_build_glossary_prompt_empty_and_dedup():
     assert build_glossary_prompt(["", "  "], [], [], []) is None
     # case-insensitive dedup keeps the most-important (later) spelling/slot
     out = build_glossary_prompt(["Velora"], [], ["velora"], [])
-    assert out == "Glossary: Velora."
+    assert out == "Velora."
+
+
+def test_build_glossary_prompt_holds_only_vocabulary_words():
+    # Whisper decodes prompt words into the transcript at window starts: a
+    # "Glossary: " header came back as "Glossary, we can start" in place of
+    # a spoken "So" (30 owner takes; 18 of 112 on replay, 0 without the
+    # header). Every word the prompt carries must be a vocabulary term.
+    out = build_glossary_prompt(["Velora"], ["Wispr Flow"], [], [])
+    assert out == "Wispr Flow, Velora."
 
 
 def test_build_glossary_prompt_cap_keeps_tail():
     user = [f"term{i}" for i in range(30)]
     out = build_glossary_prompt(user, [], [], ["Entity"], cap=5)
     # the cap keeps the LAST (most important) terms — entities above all
-    assert out == "Glossary: term26, term27, term28, term29, Entity."
+    assert out == "term26, term27, term28, term29, Entity."
 
 
 # ---- prompt-echo guard ---------------------------------------------------------
