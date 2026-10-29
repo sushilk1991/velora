@@ -238,6 +238,13 @@ def build_glossary_prompt(
     then on-screen entity names (what the user is looking at right now). Dedup
     is case-insensitive keeping the LAST (most important) occurrence, and the
     cap keeps the tail — well under whisper's 224-token prompt budget.
+
+    The prompt is the bare term list ("Wispr Flow, Velora."), no header word:
+    Whisper decodes prompt words into the transcript, and a "Glossary: "
+    header came back in place of a window's first spoken word ("So, we can
+    start" -> "Glossary, we can start"). An owner replay of 112 takes leaked
+    it 18 times with the header and never without it, with no measurable
+    wording change.
     """
     ordered: list[str] = []
     for source in (auto_vocab, learned_vocab, user_vocab, entity_names):
@@ -256,7 +263,7 @@ def build_glossary_prompt(
     terms = list(reversed(kept_rev))[-cap:]
     if not terms:
         return None
-    return "Glossary: " + ", ".join(terms) + "."
+    return ", ".join(terms) + "."
 
 
 _ECHO_WORD_RE = re.compile(r"\S+")
