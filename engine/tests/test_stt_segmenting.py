@@ -1049,6 +1049,57 @@ def test_batch_stop_click_does_not_become_transcript(whisper):
     assert len(fake.calls) == 0
 
 
+# Whisper reads 30 s per pass and pads a shorter remainder to a full window.
+# Over a 30.4 s take that ends in a pause, the remainder pass writes
+# "Thank you." stamped 30.0-60.0 s, past the end of the audio.
+PADDED_REMAINDER = {
+    "text": " we shipped it. Thank you.",
+    "segments": [
+        {"text": " we shipped it.", "start": 0.0, "end": 29.6,
+         "compression_ratio": 1.2, "avg_logprob": -0.3, "no_speech_prob": 0.0},
+        {"text": " Thank you.", "start": 30.0, "end": 60.0,
+         "compression_ratio": 0.6, "avg_logprob": -0.7, "no_speech_prob": 0.0},
+    ],
+}
+
+
+def test_padding_segment_over_a_pause_is_dropped(whisper):
+    backend, _ = whisper([PADDED_REMAINDER])
+    backend.segmenting_enabled = False
+    feed_seconds(backend, 30.0, chunk=speechy())
+    feed_seconds(backend, 0.4, chunk=quiet())
+
+    assert backend.finalize() == "we shipped it."
+
+
+def test_padding_segment_over_speech_is_kept(whisper):
+    backend, _ = whisper([PADDED_REMAINDER])
+    backend.segmenting_enabled = False
+    feed_seconds(backend, 31.0, chunk=speechy())
+
+    assert backend.finalize() == "we shipped it. Thank you."
+
+
+def test_quiet_last_segment_ending_past_the_audio_is_kept(whisper):
+    # Timestamps can overrun the audio a little on a normal last segment.
+    # Mostly inside the audio, it is speech even below speaking level.
+    overrun = {
+        "text": " we shipped it. and then we left",
+        "segments": [
+            {"text": " we shipped it.", "start": 0.0, "end": 18.0,
+             "compression_ratio": 1.2, "avg_logprob": -0.3, "no_speech_prob": 0.0},
+            {"text": " and then we left", "start": 18.0, "end": 20.5,
+             "compression_ratio": 1.1, "avg_logprob": -0.5, "no_speech_prob": 0.0},
+        ],
+    }
+    backend, _ = whisper([overrun])
+    backend.segmenting_enabled = False
+    feed_seconds(backend, 18.0, chunk=speechy())
+    feed_seconds(backend, 2.0, chunk=0.3 * speechy())
+
+    assert backend.finalize() == "we shipped it. and then we left"
+
+
 def test_speechless_tail_is_never_decoded(whisper):
     backend, fake = whisper(["segment one", "segment two", "Thank you."])
     feed_seconds(backend, HARD_SEGMENT_S)
