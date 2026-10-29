@@ -276,6 +276,10 @@ async def test_cleanup_process_round_trip_and_prefix() -> None:
         assert result.ms == 7
         assert 0 <= result.wall_ms < 1_000
         assert result.cache_hit is True
+        # Legacy worker payloads omit spans; the parent adds its own bounds.
+        assert result._latency_ns["parent_queue_ns"] >= 0
+        assert result._latency_ns["parent_socket_rtt_ns"] >= 0
+        assert result._work_counts == {}
 
         limited = await cleanup.cleanup(
             "__limits__", "system", max_input_tokens=16_384)
