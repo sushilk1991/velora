@@ -19,13 +19,18 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import hashlib
+import os
 import re
 import threading
 import time
 import unicodedata
 from concurrent.futures import ThreadPoolExecutor
 from collections.abc import Iterator
-from dataclasses import dataclass
+from contextvars import ContextVar
+from contextlib import contextmanager
+from functools import wraps
+from dataclasses import dataclass, field
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Any
@@ -366,6 +371,77 @@ def check_divergence(raw: str, output: str, allowed_terms: list[str] | None = No
     return None
 
 
+# Request-local diagnostics cross no threads: each worker call establishes its
+# own context. Nested spans are inclusive and must not be added to their parents.
+_TRACE_CLEANUP_ENV = "VELORA_TRACE_CLEANUP"
+_TRACE_CLEANUP = os.environ.get(_TRACE_CLEANUP_ENV) == "1"
+_latency_spans: ContextVar[dict[str, int] | None] = ContextVar("cleanup_latency", default=None)
+_work_counts: ContextVar[dict[str, int] | None] = ContextVar("cleanup_work", default=None)
+
+
+@contextmanager
+def _latency_span(name: str):
+    """Measure existing work without synchronizing MLX or retaining its arrays."""
+    spans = _latency_spans.get()
+    if spans is None:
+        yield
+        return
+
+    started = time.perf_counter_ns()
+    try:
+        yield
+    finally:
+        spans[name] = spans.get(name, 0) + time.perf_counter_ns() - started
+
+
+def _count_work(name: str, amount: int) -> None:
+    """Count actual copy-draft scoring separately from accepted output."""
+    counts = _work_counts.get()
+    if counts is not None:
+        counts[name] = counts.get(name, 0) + amount
+
+
+def _trace_span(name: str):
+    """Wrap exact prefill, including its existing completion synchronization."""
+    def decorate(function):
+        @wraps(function)
+        def traced(*args, **kwargs):
+            with _latency_span(name):
+                return function(*args, **kwargs)
+        return traced
+    return decorate
+
+
+def _trace_cleanup(function):
+    """Own one diagnostic scope; no transcript enters the numeric-only log.
+
+    worker_total_ns -> generation -> runtime_prefix_ns -> exact_prefill_ns
+    These spans overlap; report each duration without summing nested spans.
+    """
+    @wraps(function)
+    def traced(*args, **kwargs):
+        # Keep diagnostic allocations and logging out of ordinary dictation.
+        if not _TRACE_CLEANUP:
+            return function(*args, **kwargs)
+
+        spans: dict[str, int] = {}
+        counts: dict[str, int] = {}
+        span_token = _latency_spans.set(spans)
+        count_token = _work_counts.set(counts)
+        started = time.perf_counter_ns()
+        try:
+            result = function(*args, **kwargs)
+            spans["worker_total_ns"] = time.perf_counter_ns() - started
+            result._latency_ns = dict(spans)
+            result._work_counts = dict(counts)
+            log.info("cleanup spans_ns=%s work_counts=%s", spans, counts)
+            return result
+        finally:
+            _latency_spans.reset(span_token)
+            _work_counts.reset(count_token)
+    return traced
+
+
 @dataclass
 class CleanupResult:
     text: str
@@ -384,6 +460,9 @@ class CleanupResult:
     # Parent-observed submission-to-result wall time. The process proxy
     # overwrites this without changing the established `ms` inference metric.
     wall_ms: int = 0
+    _latency_ns: dict[str, int] = field(default_factory=dict)
+    _work_counts: dict[str, int] = field(default_factory=dict)
+    _greedy_sha256: str = ""
 
 
 @dataclass(frozen=True)
@@ -445,6 +524,7 @@ def _snapshot_prompt_cache(cache: list[Any]) -> list[tuple[type[Any], Any, Any]]
     ]
 
 
+@_trace_span("cache_restore_ns")
 def _restore_prompt_cache(
     snapshot: list[tuple[type[Any], Any, Any]],
 ) -> list[Any]:
@@ -687,6 +767,7 @@ class CleanupEngine:
             cancel_event,
         )
 
+    @_trace_span("exact_prefill_ns")
     def _prefill_into_cache_locked(
         self,
         cache: list[Any],
@@ -694,6 +775,7 @@ class CleanupEngine:
         cancel_event: threading.Event | None = None,
     ) -> list[Any]:
         """Append exact prompt tokens to ``cache`` without sampling output."""
+        _count_work("exact_prefill_input_tokens", len(tokens))
         import mlx.core as mx
         from mlx_lm.generate import generate_step
 
@@ -955,6 +1037,7 @@ class CleanupEngine:
         cache = _restore_prompt_cache(snapshot)
         mx.eval(self._model(mx.array(tokens[-1:])[None], cache=cache))
 
+    @_trace_span("runtime_prefix_ns")
     def _extend_runtime_prefix_locked(
         self,
         tokens: list[int],
@@ -1059,12 +1142,14 @@ class CleanupEngine:
         started = time.perf_counter()
         if cancel_event is not None and cancel_event.is_set():
             return result(status="cancelled")
-        tokens = self._prompt_tokens(system_prompt, user_text)
+        with _latency_span("prompt_tokenization_ns"):
+            tokens = self._prompt_tokens(system_prompt, user_text)
         if max_input_tokens is not None and len(tokens) > max_input_tokens:
             return result(status="context_limit", input_tokens=len(tokens))
-        cache, common, cache_hit = self._cache_for_tokens(
-            tokens, cache_scope=cache_scope
-        )
+        with _latency_span("cache_select_restore_ns"):
+            cache, common, cache_hit = self._cache_for_tokens(
+                tokens, cache_scope=cache_scope
+            )
         if prefix_candidates:
             try:
                 cache, common, extended = self._extend_runtime_prefix_locked(
@@ -1089,12 +1174,31 @@ class CleanupEngine:
         out_text: list[str] = []
         gen_tokens: list[int] = []
         first_token_at: float | None = None
+        first_token_ns: int | None = None
         status = "ok"
         sampler = make_sampler(temp=0.0)
 
-        def progress(_processed: int, _total: int) -> None:
-            # Cancel at existing prefill boundaries, before further GPU work.
-            # Batch sizes and uncancelled generation stay unchanged.
+        stream_started_ns: int | None = None
+        stream_prefilled_ns: int | None = None
+
+        def progress(processed: int, total: int) -> None:
+            # Existing synchronized callbacks delimit stock generation without
+            # adding a GPU wait: 0 -> prefill(total-1) -> first sampled token.
+            nonlocal stream_started_ns, stream_prefilled_ns
+            now_ns = time.perf_counter_ns()
+            if processed == 0:
+                stream_started_ns = now_ns
+                stream_prefilled_ns = now_ns
+            elif processed < total:
+                stream_prefilled_ns = now_ns
+            elif stream_started_ns is not None and stream_prefilled_ns is not None:
+                spans = _latency_spans.get()
+                if spans is not None:
+                    spans["stream_prefill_ns"] = stream_prefilled_ns - stream_started_ns
+                    spans["stream_first_forward_sync_ns"] = now_ns - stream_prefilled_ns
+                _count_work("stream_prefill_input_tokens", max(0, total - 1))
+
+            # Cancellation retains the same upstream batch boundaries.
             if cancel_event is not None and cancel_event.is_set():
                 raise _PrefixCancelled
 
@@ -1118,6 +1222,7 @@ class CleanupEngine:
                     break
                 if first_token_at is None:
                     first_token_at = now
+                    first_token_ns = time.perf_counter_ns()
                 out_text.append(resp.text)
                 if getattr(resp, "finish_reason", None) == "stop":
                     # stream_generate's closing step carries the EOS token. Its
@@ -1167,6 +1272,9 @@ class CleanupEngine:
             len(gen_tokens),
         )
         finished = time.perf_counter()
+        spans = _latency_spans.get()
+        if spans is not None and first_token_ns is not None:
+            spans["decode_ns"] = time.perf_counter_ns() - first_token_ns
         ttft_ms = int(((first_token_at or finished) - started) * 1000)
         decode_ms = int((finished - first_token_at) * 1000) if first_token_at else 0
         return result(
@@ -1233,9 +1341,19 @@ class CleanupEngine:
                     _copy_draft(suffix, output, cursor, limit) if limit > 0 else ([], cursor))
                 with mx.stream(generation_stream):
                     before = _snapshot_prompt_cache(cache) if draft else None
+                    # .tolist() already synchronizes this pass. Timing adds no
+                    # GPU work; replayed pending tokens count as model input.
+                    forward_started = time.perf_counter_ns()
                     logits = self._model(mx.array(pending + draft)[None], cache=cache)
                     # The last pending position predicts the first new token.
                     choices = mx.argmax(logits[0, len(pending) - 1:], axis=-1).tolist()
+                    spans = _latency_spans.get()
+                    if spans is not None and "first_forward_sync_ns" not in spans:
+                        spans["first_forward_sync_ns"] = time.perf_counter_ns() - forward_started
+                    _count_work("copy_draft_model_passes", 1)
+                    _count_work("copy_draft_model_input_tokens", len(pending) + len(draft))
+                    _count_work("draft_proposed_tokens", len(draft))
+                    _count_work("draft_verified_tokens", len(draft))
 
                     kept = 0
                     while (
@@ -1244,6 +1362,7 @@ class CleanupEngine:
                         and choices[kept] == draft[kept]
                     ):
                         kept += 1
+                    _count_work("draft_accepted_tokens", kept)
                     new = draft[:kept] + [choices[kept]]
                     if kept < len(draft):
                         cache = _restore_prompt_cache(before)
@@ -1260,6 +1379,7 @@ class CleanupEngine:
                     if len(output) >= max_tokens:
                         return
 
+    @_trace_cleanup
     def _run(
         self,
         raw: str,
@@ -1276,7 +1396,8 @@ class CleanupEngine:
     ) -> CleanupResult:
         t0 = time.perf_counter()
         with self._lock:
-            input_tokens = len(self._tokenizer.encode(raw))
+            with _latency_span("raw_tokenization_ns"):
+                input_tokens = len(self._tokenizer.encode(raw))
             # Romanization (check_ratio off) expands length, so give the
             # generator more headroom than the usual 1.8x cleanup budget.
             factor = OUTPUT_TOKEN_FACTOR if check_ratio else 3.0
@@ -1313,7 +1434,11 @@ class CleanupEngine:
             generated.mlx_peak_bytes,
             generated.mlx_cache_bytes,
         )
+        # Compare the generated bytes before guards can return the raw input.
+        # Only a digest crosses IPC; owner transcript text is never logged.
         metrics = {
+            "_greedy_sha256": hashlib.sha256(generated.text.encode()).hexdigest()
+                if _TRACE_CLEANUP else "",
             "ttft_ms": generated.ttft_ms,
             "decode_ms": generated.decode_ms,
             "prefix_tokens": generated.prefix_tokens,
@@ -1324,38 +1449,39 @@ class CleanupEngine:
             "mlx_peak_bytes": generated.mlx_peak_bytes,
             "mlx_cache_bytes": generated.mlx_cache_bytes,
         }
-        if generated.status == "cancelled":
-            log.info("cleanup cooperatively cancelled after %dms", ms)
-            return CleanupResult(raw, False, ms, "cancelled", **metrics)
-        if generated.status == "timeout":
-            log.warning("cleanup timeout after %dms — returning raw", ms)
-            return CleanupResult(raw, False, ms, "timeout", **metrics)
-        if generated.status == "length":
-            # Truncated at the token ceiling. Dictation cleanup would normally
-            # let the divergence guard decide, but a cut-off result is never
-            # trustworthy — return raw so nothing partial is delivered.
-            log.warning("cleanup hit token ceiling after %dms — returning raw", ms)
-            return CleanupResult(raw, False, ms, "length", **metrics)
-        if generated.status == "context_limit":
-            log.warning(
-                "cleanup input exceeded token ceiling input_tokens=%d max_input_tokens=%d",
-                generated.input_tokens,
-                max_input_tokens,
-            )
-            return CleanupResult(raw, False, ms, "context_limit", **metrics)
-        # Undo the control-token neutralization applied to the prompt so a
-        # preserved marker round-trips cleanly (before the guard compares).
-        text = restore_control_tokens(generated.text)
-        # The divergence guard is a length-ratio over-editing check; a script
-        # transliteration legitimately changes length, so skip it when romanizing.
-        if check_ratio:
-            reason = check_divergence(raw, text, allowed_terms)
-            if reason is not None:
-                log.warning("cleanup divergence guard tripped (%s) — returning raw", reason)
-                return CleanupResult(raw, False, ms, reason, **metrics)
-        elif not text.strip():
-            return CleanupResult(raw, False, ms, "empty_output", **metrics)
-        return CleanupResult(text.strip(), True, ms, **metrics)
+        with _latency_span("postprocess_ns"):
+            if generated.status == "cancelled":
+                log.info("cleanup cooperatively cancelled after %dms", ms)
+                return CleanupResult(raw, False, ms, "cancelled", **metrics)
+            if generated.status == "timeout":
+                log.warning("cleanup timeout after %dms — returning raw", ms)
+                return CleanupResult(raw, False, ms, "timeout", **metrics)
+            if generated.status == "length":
+                # Truncated at the token ceiling. Dictation cleanup would normally
+                # let the divergence guard decide, but a cut-off result is never
+                # trustworthy — return raw so nothing partial is delivered.
+                log.warning("cleanup hit token ceiling after %dms — returning raw", ms)
+                return CleanupResult(raw, False, ms, "length", **metrics)
+            if generated.status == "context_limit":
+                log.warning(
+                    "cleanup input exceeded token ceiling input_tokens=%d max_input_tokens=%d",
+                    generated.input_tokens,
+                    max_input_tokens,
+                )
+                return CleanupResult(raw, False, ms, "context_limit", **metrics)
+            # Undo the control-token neutralization applied to the prompt so a
+            # preserved marker round-trips cleanly (before the guard compares).
+            text = restore_control_tokens(generated.text)
+            # The divergence guard is a length-ratio over-editing check; a script
+            # transliteration legitimately changes length, so skip it when romanizing.
+            if check_ratio:
+                reason = check_divergence(raw, text, allowed_terms)
+                if reason is not None:
+                    log.warning("cleanup divergence guard tripped (%s) — returning raw", reason)
+                    return CleanupResult(raw, False, ms, reason, **metrics)
+            elif not text.strip():
+                return CleanupResult(raw, False, ms, "empty_output", **metrics)
+            return CleanupResult(text.strip(), True, ms, **metrics)
 
     async def cleanup(
         self,

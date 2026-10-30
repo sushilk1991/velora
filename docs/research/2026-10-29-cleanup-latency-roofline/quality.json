@@ -1,0 +1,123 @@
+{
+  "quality": {
+    "summaries": [
+      {
+        "arm": "8bit",
+        "cases": 27,
+        "failed_cases": [
+          "mismatched_ordinal_counted_list"
+        ],
+        "mlx_after_load": {
+          "active_bytes": 4605320714,
+          "peak_bytes": 5166602284,
+          "cache_bytes": 71192580
+        },
+        "mlx_inference": {
+          "active_bytes": 4744519178,
+          "peak_bytes": 5552309936,
+          "cache_bytes": 183583354
+        },
+        "footprint_after_load": {
+          "current_bytes": 5387260824,
+          "peak_bytes": 5939565464
+        },
+        "footprint_after_inference": {
+          "current_bytes": 5670245320,
+          "peak_bytes": 6370235336
+        }
+      },
+      {
+        "arm": "4bit",
+        "cases": 27,
+        "failed_cases": [
+          "mismatched_ordinal_counted_list"
+        ],
+        "mlx_after_load": {
+          "active_bytes": 2503319050,
+          "peak_bytes": 3210690662,
+          "cache_bytes": 65663492
+        },
+        "mlx_inference": {
+          "active_bytes": 2642517514,
+          "peak_bytes": 3563771614,
+          "cache_bytes": 189435118
+        },
+        "footprint_after_load": {
+          "current_bytes": 3271871968,
+          "peak_bytes": 3975171552
+        },
+        "footprint_after_inference": {
+          "current_bytes": 3555003944,
+          "peak_bytes": 4396092968
+        }
+      }
+    ],
+    "run_load": {
+      "load1_start": 5.59228515625,
+      "time_ns_start": 1793256269364287000
+    },
+    "status": {
+      "returncode": 1,
+      "load1_end": 4.5654296875,
+      "time_ns_end": 1793256324826753000
+    },
+    "timings_qualified": false
+  },
+  "decisions": {
+    "summaries": [
+      {
+        "arm": "8bit",
+        "correct": 56,
+        "items": 62,
+        "by_category": {
+          "route": "26/26",
+          "chat_pick": "6/8",
+          "is_nav": "8/8",
+          "header_ok": "8/9",
+          "sent_ok": "4/6",
+          "yt_first": "4/5"
+        },
+        "misses": [
+          "chat_pick-6",
+          "chat_pick-8",
+          "header_ok-4",
+          "sent_ok-1",
+          "sent_ok-5",
+          "yt_first-2"
+        ]
+      },
+      {
+        "arm": "4bit",
+        "correct": 55,
+        "items": 62,
+        "by_category": {
+          "route": "25/26",
+          "chat_pick": "6/8",
+          "is_nav": "8/8",
+          "header_ok": "8/9",
+          "sent_ok": "4/6",
+          "yt_first": "4/5"
+        },
+        "misses": [
+          "route-14",
+          "chat_pick-6",
+          "chat_pick-8",
+          "header_ok-9",
+          "sent_ok-1",
+          "sent_ok-5",
+          "yt_first-2"
+        ]
+      }
+    ],
+    "run_load": {
+      "load1_start": 4.5654296875,
+      "time_ns_start": 1793256324827089000
+    },
+    "status": {
+      "returncode": 0,
+      "load1_end": 7.78564453125,
+      "time_ns_end": 1793256476059471000
+    },
+    "timings_qualified": false
+  }
+}

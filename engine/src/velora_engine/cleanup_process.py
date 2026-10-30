@@ -538,6 +538,7 @@ class CleanupProcess:
             return CleanupResult(raw, False, 0, reason)
 
         call_started = time.perf_counter()
+        queue_started_ns = time.perf_counter_ns()
         admitted_generation = self._generation
         try:
             await asyncio.wait_for(
@@ -555,6 +556,8 @@ class CleanupProcess:
                 "timeout_queue",
                 wall_ms=elapsed,
             )
+
+        queue_ns = time.perf_counter_ns() - queue_started_ns
 
         if not self.loaded or self._generation != admitted_generation:
             self._operation_lock.release()
@@ -595,6 +598,8 @@ class CleanupProcess:
             }
             async with self._write_lock:
                 writer.write(encode_cleanup_ipc_message(message))
+                # Begin after submission; include drain and the response future.
+                socket_started_ns = time.perf_counter_ns()
                 await writer.drain()
             if cancel_event is not None:
                 cancel_task = asyncio.create_task(
@@ -608,9 +613,21 @@ class CleanupProcess:
                     + WORKER_RESPONSE_GRACE_S
                 ),
             )
+            socket_rtt_ns = time.perf_counter_ns() - socket_started_ns
             if not response.get("ok"):
                 raise RuntimeError(str(response.get("error") or "cleanup failed"))
             payload = dict(response["result"])
+            # Older workers omit diagnostics; merge rather than replace child
+            # spans so IPC remains compatible with their result payloads.
+            spans = dict(payload.get("_latency_ns") or {})
+            spans["parent_queue_ns"] = queue_ns
+            spans["parent_socket_rtt_ns"] = socket_rtt_ns
+            payload["_latency_ns"] = spans
+            if "worker_total_ns" in spans:
+                log.info("cleanup ipc spans_ns=%s", {
+                    "parent_queue_ns": queue_ns,
+                    "parent_socket_rtt_ns": socket_rtt_ns,
+                })
             payload["wall_ms"] = int((time.perf_counter() - call_started) * 1000)
             result = CleanupResult(**payload)
             if result.reason in {"timeout_hard", "timeout_queue", "llm_unhealthy"}:

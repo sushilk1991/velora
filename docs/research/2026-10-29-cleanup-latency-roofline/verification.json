@@ -1,0 +1,32 @@
+{
+  "make_test": {
+    "exit": 0,
+    "swift_checks": 3751,
+    "pytest_passed": 1774,
+    "site_checks": true,
+    "signing_config_tests": true,
+    "publish_release_checks": true
+  },
+  "source_sha256": {
+    "Sources/Velora/EngineClient/EngineClient.swift": "728b742f41a4f3d8cb1eb1f89715649cc73ff6094d421aa56d82fbb28b23fc5d",
+    "engine/src/velora_engine/cleanup.py": "fbe705b1539f71daacc22872265fd433d0bbaee44347fd9164bdec90b82ec847",
+    "engine/src/velora_engine/cleanup_process.py": "eb5b7c78fe46b7138fdf8bc4022aa6d98fd4637478159734db3fa56051ab5d4c",
+    "engine/tests/test_cleanup_latency.py": "750c623d27f82e5ab7643b429fc2832dfac82bb5b0181034abd8664943773b08",
+    "engine/tests/test_cleanup_process.py": "df8724826d6f9b043ff475e8021082fd48b254b7838811418ab0af384328a661"
+  },
+  "app_restart": {
+    "app_path": "/Applications/Velora.app",
+    "control_cli": ".build/debug/Velora --cli status --json",
+    "exit": 0,
+    "app_running": true,
+    "engine_ready": true,
+    "access_enabled": true,
+    "secondary_instance_stopped": true
+  },
+  "not_verified": [
+    "native microphone-to-insertion trace",
+    "idle watts",
+    "instrumentation overhead isolation",
+    "multi-day real-use latency"
+  ]
+}
