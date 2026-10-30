@@ -1,34 +1,36 @@
-# Cleanup latency investigation — 2026-10-29
+# Progress
 
-## Done
+## Cleanup latency and model studies (2026-10-29/30)
 
-- Branch `perf/cleanup-latency-roofline-20261029`; main unchanged at
-  `79de9dba6d245f71758af2859df60f047da62dc7`.
-- Evaluated six levers in isolated scratch environments. No new worktrees.
-- Added opt-in numeric spans, Swift signposts and read-only replay/copy probes.
-- Wrote the research report, portable review and sanitized numeric evidence.
-- No speed lever passes; keep MLX and the shipped models.
+### Done
 
-## Verified
+- Latency study (#32): no speed lever passes; keep MLX, the shipped models
+  and mlx 0.31.2. Report: `docs/research/2026-10-29-cleanup-latency-roofline.md`.
+  Opt-in tracing: `VELORA_TRACE_CLEANUP=1` logs numeric engine spans; the
+  app emits `StopToFinal` signposts (subsystem `com.velora`, category
+  `Latency`). Neither logs transcript text.
+- Model study: keep Qwen3.5-4B-MLX-8bit for cleanup and Action Mode, and
+  Qwen3.5-2B-MLX-4bit for the Compact tier. 14 existing alternatives and a
+  public-only LoRA fail the frozen bar on owner gold and EdAcc accents.
+  Report: `docs/research/2026-10-29-cleanup-model-decision.md`.
 
-- Copy bandwidth 277.4 GB/s; 556 replay records retain load and hashes.
-- Primed worker Metal trace: 94 ms extra after idle, inside prefill/wait.
-  Historical 963 ms TTFT remains partly unattributed.
-- 4-bit cleanup stays 1/27 failures; decisions fall 56/62 to 55/62.
-  Prepared-prefix llama.cpp is 130% slower. No production model/dependency change.
-- Final `make test`: 3,751 Swift checks, 1,774 pytest tests, site/signing/release
-  checks all pass. Traced versus original greedy/final bytes match on 32 replays.
-- `/Applications/Velora.app` restarted. Control API confirms app running,
-  engine ready and access enabled. Benchmark workers/servers stopped.
+### Verified
 
-## Next
+- Both studies pass `make test` and CI on their PRs. #32 passed on its
+  third CI run; the first two each timed out in a different test
+  (`test_long_dictation.py::test_cancel_wedge_deletes`,
+  `test_server_downloads.py::test_cleanup_source_removed[recovery]`).
+  Both pass locally; treat them as CI timing flakes to fix.
+- No owner transcript text is in either report or its data files.
 
-Review the research PR. Do not push main or merge.
+### Next
 
-Native microphone-to-insertion tracing, privileged idle-watt measurement,
-instrumentation-overhead isolation, and multi-day engine.log confirmation
-remain unverified. Detailed Python tracing defaults off. The installed CLI
-symlink misdispatches; its accidentally started extra instance was stopped.
-That separate CLI issue was not changed.
-
-Scratch: `/tmp/velora-latency-20261029`. No owner transcript text in the repo.
+- A list-bypass content guard (fall back to the gate text when cleanup
+  drops an aligned content word) passed offline: 4B harms 91→83/303 on
+  owner takes and 164→86/593 on EdAcc, term fixes unchanged. The owner
+  deferred building it on 2026-10-30. Do not build it unprompted. Before
+  any dogfood it needs native latency/RAM checks.
+- Correction capture observes 1.2% of takes. Fix its coverage before using
+  edit rate as a dogfood metric.
+- Unverified: native mic-to-insertion latency under low load, 8 GB Mac
+  tiers, broad accent coverage (Common Voice access is gated).
