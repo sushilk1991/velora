@@ -508,7 +508,7 @@ class Config:
         extracted from dictation history (vocab_miner.py owns the writes; the
         app deletes terms by moving them to `banned`). Banned terms are dropped
         here too so a mid-cycle app deletion takes effect on the next reload."""
-        from .vocab_miner import contains_prompt_artifact
+        from .vocab_miner import contains_prompt_artifact, is_near_spelling
 
         self._auto_vocab = []
         path = self.home / "auto_learned.json"
@@ -525,11 +525,20 @@ class Config:
             excluded.update(str(k).lower() for k in self._learned_replacements)
             excluded.update(str(k).lower() for k in self._learned_soft)
             excluded.update(self._learned_pending_wrong)
+            # Dictionary replacements are the same kind of evidence, and a
+            # near-spelling of a term the user owns is that term misheard
+            # ("Valora" beside "Velora"), mined before the miner checked.
+            manual = {str(k): str(v) for k, v in (self.data.get("replacements") or {}).items()}
+            excluded.update(k.lower() for k in manual)
+            spellings = [str(v) for v in self.data.get("vocabulary") or []]
+            spellings += self._learned_vocab + list(manual.values())
+            spellings += list(self._learned_replacements.values()) + list(self._learned_soft.values())
             self._auto_vocab = [
                 str(t)
                 for t in data.get("terms", []) or []
                 if str(t).lower() not in excluded
                 and not contains_prompt_artifact(str(t))
+                and not is_near_spelling(str(t), spellings)
             ]
         except Exception as exc:  # noqa: BLE001 — never let a bad file kill reload
             log.warning("auto_learned.json unreadable (%s); ignoring", exc)

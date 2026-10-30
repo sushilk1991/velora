@@ -636,7 +636,7 @@ def test_fake_backend_default_mode_unchanged(monkeypatch):
 
 def test_build_glossary_prompt_orders_least_to_most_important():
     out = build_glossary_prompt(["User"], ["Learned"], ["Auto"], ["Entity"])
-    assert out == "Glossary: Auto, Learned, User, Entity."
+    assert out == "Auto, Learned, User, Entity."
 
 
 def test_build_glossary_prompt_empty_and_dedup():
@@ -644,14 +644,23 @@ def test_build_glossary_prompt_empty_and_dedup():
     assert build_glossary_prompt(["", "  "], [], [], []) is None
     # case-insensitive dedup keeps the most-important (later) spelling/slot
     out = build_glossary_prompt(["Velora"], [], ["velora"], [])
-    assert out == "Glossary: Velora."
+    assert out == "Velora."
+
+
+def test_build_glossary_prompt_holds_only_vocabulary_words():
+    # Whisper decodes prompt words into the transcript at window starts: a
+    # "Glossary: " header came back as "Glossary, we can start" in place of
+    # a spoken "So" (30 owner takes; 18 of 112 on replay, 0 without the
+    # header). Every word the prompt carries must be a vocabulary term.
+    out = build_glossary_prompt(["Velora"], ["Wispr Flow"], [], [])
+    assert out == "Wispr Flow, Velora."
 
 
 def test_build_glossary_prompt_cap_keeps_tail():
     user = [f"term{i}" for i in range(30)]
     out = build_glossary_prompt(user, [], [], ["Entity"], cap=5)
     # the cap keeps the LAST (most important) terms — entities above all
-    assert out == "Glossary: term26, term27, term28, term29, Entity."
+    assert out == "term26, term27, term28, term29, Entity."
 
 
 # ---- prompt-echo guard ---------------------------------------------------------
@@ -1038,6 +1047,57 @@ def test_batch_stop_click_does_not_become_transcript(whisper):
 
     assert transcribe_clip(backend, pcm) == ""
     assert len(fake.calls) == 0
+
+
+# Whisper reads 30 s per pass and pads a shorter remainder to a full window.
+# Over a 30.4 s take that ends in a pause, the remainder pass writes
+# "Thank you." stamped 30.0-60.0 s, past the end of the audio.
+PADDED_REMAINDER = {
+    "text": " we shipped it. Thank you.",
+    "segments": [
+        {"text": " we shipped it.", "start": 0.0, "end": 29.6,
+         "compression_ratio": 1.2, "avg_logprob": -0.3, "no_speech_prob": 0.0},
+        {"text": " Thank you.", "start": 30.0, "end": 60.0,
+         "compression_ratio": 0.6, "avg_logprob": -0.7, "no_speech_prob": 0.0},
+    ],
+}
+
+
+def test_padding_segment_over_a_pause_is_dropped(whisper):
+    backend, _ = whisper([PADDED_REMAINDER])
+    backend.segmenting_enabled = False
+    feed_seconds(backend, 30.0, chunk=speechy())
+    feed_seconds(backend, 0.4, chunk=quiet())
+
+    assert backend.finalize() == "we shipped it."
+
+
+def test_padding_segment_over_speech_is_kept(whisper):
+    backend, _ = whisper([PADDED_REMAINDER])
+    backend.segmenting_enabled = False
+    feed_seconds(backend, 31.0, chunk=speechy())
+
+    assert backend.finalize() == "we shipped it. Thank you."
+
+
+def test_quiet_last_segment_ending_past_the_audio_is_kept(whisper):
+    # Timestamps can overrun the audio a little on a normal last segment.
+    # Mostly inside the audio, it is speech even below speaking level.
+    overrun = {
+        "text": " we shipped it. and then we left",
+        "segments": [
+            {"text": " we shipped it.", "start": 0.0, "end": 18.0,
+             "compression_ratio": 1.2, "avg_logprob": -0.3, "no_speech_prob": 0.0},
+            {"text": " and then we left", "start": 18.0, "end": 20.5,
+             "compression_ratio": 1.1, "avg_logprob": -0.5, "no_speech_prob": 0.0},
+        ],
+    }
+    backend, _ = whisper([overrun])
+    backend.segmenting_enabled = False
+    feed_seconds(backend, 18.0, chunk=speechy())
+    feed_seconds(backend, 2.0, chunk=0.3 * speechy())
+
+    assert backend.finalize() == "we shipped it. and then we left"
 
 
 def test_speechless_tail_is_never_decoded(whisper):

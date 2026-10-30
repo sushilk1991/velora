@@ -238,6 +238,13 @@ def build_glossary_prompt(
     then on-screen entity names (what the user is looking at right now). Dedup
     is case-insensitive keeping the LAST (most important) occurrence, and the
     cap keeps the tail — well under whisper's 224-token prompt budget.
+
+    The prompt is the bare term list ("Wispr Flow, Velora."), no header word:
+    Whisper decodes prompt words into the transcript, and a "Glossary: "
+    header came back in place of a window's first spoken word ("So, we can
+    start" -> "Glossary, we can start"). An owner replay of 112 takes leaked
+    it 18 times with the header and never without it, with no measurable
+    wording change.
     """
     ordered: list[str] = []
     for source in (auto_vocab, learned_vocab, user_vocab, entity_names):
@@ -256,7 +263,7 @@ def build_glossary_prompt(
     terms = list(reversed(kept_rev))[-cap:]
     if not terms:
         return None
-    return "Glossary: " + ", ".join(terms) + "."
+    return ", ".join(terms) + "."
 
 
 _ECHO_WORD_RE = re.compile(r"\S+")
@@ -1051,6 +1058,57 @@ def guard_whisper_result(result: dict[str, Any]) -> str:
     return _trim_repeated_tail(text)
 
 
+def _drop_padding_segments(
+    result: dict[str, Any],
+    duration_s: float,
+    evidence: np.ndarray,
+    speech_level: float,
+) -> dict[str, Any]:
+    """Remove segments Whisper decoded from its own padding, not from speech.
+
+    `duration_s` is the length of the audio Whisper decoded; `evidence` is
+    that audio, minus the stop-key tail when the caller ignores it.
+
+    Whisper reads at most 30 s per pass and pads a shorter remainder to a
+    full window. When the remainder is only the pause before the stop key,
+    that pass writes "Thank you." stamped past the end of the audio:
+
+        audio   |=========== speech ===========|.pause.|   30.4 s
+        pass 1  [0 s ───────────────────────── 30 s]
+        pass 2                                 [30 s ── remainder + padding ── 60 s]
+                                                └ "Thank you." with no speech under it
+
+    Owner takes of 30.0-30.5 s did this 9 times; word timestamps put the
+    phrase at 0.00-0.03x speaking level. Only a segment whose span lies
+    mostly past the audio is judged: there it ran about 29.5 s past and had
+    at most 0.5 s of audio under it, while a normal last segment overruns by
+    under a second (one held 3 quiet real words at 0.38x speaking level). A
+    judged segment is kept when the audio under it reaches speaking level,
+    so a word really spoken in the remainder stays.
+    """
+    segments = result.get("segments")
+    if not segments:
+        return result
+
+    kept = []
+    for seg in segments:
+        start, end = seg.get("start"), seg.get("end")
+        if start is None or end is None or end - duration_s <= duration_s - start:
+            kept.append(seg)  # mostly real audio, not padding
+            continue
+        if _reaches_speech_level(evidence[int(start * SAMPLE_RATE):], speech_level):
+            kept.append(seg)
+            continue
+        # Log lengths only — never transcript text (privacy: engine.log is plaintext).
+        log.info("whisper guard: dropped segment decoded over padding (%.2fs of audio, %d chars)",
+                 max(0.0, duration_s - start), len((seg.get("text") or "").strip()))
+
+    # The aggregate text must agree, or guard_whisper_result's no-segment
+    # fallback would restore the dropped words.
+    text = "".join(seg.get("text") or "" for seg in kept)
+    return {**result, "segments": kept, "text": text}
+
+
 def whisper_language(language: str | None) -> str | None:
     """Map config `language` to mlx-whisper's arg: "auto"/empty → None (autodetect)."""
     if not language:
@@ -1461,7 +1519,10 @@ class WhisperBackend:
             )
             return ""
 
-        result = self._transcribe(audio, prompt)
+        duration_s = len(audio) / SAMPLE_RATE
+        speech_level = self._speech_reference()
+        result = _drop_padding_segments(
+            self._transcribe(audio, prompt), duration_s, integrity_audio, speech_level)
         guarded_text = guard_whisper_result(result)
         # Every segment/preview needs the leading-header guard, but applying the
         # trailing-list guard independently at every seam creates many chances
@@ -1506,9 +1567,9 @@ class WhisperBackend:
             # could turn background noise into invented words.
             log.warning("glossary-biased whisper decode rejected/empty — retrying without prompt")
             try:
-                text = guard_whisper_result(
-                    self._transcribe(audio, None, temperature=0.0)
-                )
+                text = guard_whisper_result(_drop_padding_segments(
+                    self._transcribe(audio, None, temperature=0.0),
+                    duration_s, integrity_audio, speech_level))
             except Exception:  # noqa: BLE001 — optional recovery must not fail the session
                 log.exception("prompt-free whisper recovery decode failed")
         return text

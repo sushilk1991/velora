@@ -1031,7 +1031,7 @@ async def test_glossary_initial_prompt_set_from_start_entities(engine, monkeypat
         if eng.session is not None:
             break
         await asyncio.sleep(0.01)
-    assert eng.stt.initial_prompt == "Glossary: Velora, Priya Sharma."
+    assert eng.stt.initial_prompt == "Velora, Priya Sharma."
     await client.send_json({"cmd": "cancel", "session": "g1"})
     await client.recv_event("cancelled")
 
