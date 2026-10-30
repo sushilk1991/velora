@@ -1,0 +1,46 @@
+{
+  "source_base": "79de9dba6d245f71758af2859df60f047da62dc7",
+  "baseline": {
+    "python": "3.12.14",
+    "mlx": "0.31.2",
+    "mlx_lm": "0.31.3",
+    "transformers": "5.3.0"
+  },
+  "core_upgrade": {
+    "mlx": "0.32.4",
+    "mlx_lm": "0.31.3",
+    "transformers": "5.3.0"
+  },
+  "full_upgrade": {
+    "mlx": "0.32.4",
+    "mlx_lm": "0.32.2",
+    "transformers": "5.21.0"
+  },
+  "models": {
+    "4B-8bit": {
+      "revision": "5319bbbe4f1cbe6c0b3c80f4f7de4f0338c3906d",
+      "sha256": "87c362fdb36bdee8e32ff5961bdceca58d26c2d9b00738543cc0e17e985b46ce"
+    },
+    "4B-4bit": {
+      "revision": "32f3e8ecf65426fc3306969496342d504bfa13f3",
+      "sha256": "5fb9acd0246866381cf8c5c354c6db1019f6498eec4ccb4f5edcc71ffeacb2db"
+    },
+    "2B-4bit": {
+      "revision": "93760be4f1f69842a46bc13dbdc0f19e291392a3"
+    }
+  },
+  "llamacpp": {
+    "commit": "8642541b255bfb5dc39cd351a178be09013a55d6",
+    "model_revision": "4168f45a16a1290d65a4ec0fa312ae917a4c15d6",
+    "gguf_bytes": 4622131168,
+    "gguf_sha256": "5c74c0ede371924357dff0cb6ba145bd67208b9b2389ded681adfff3f7608db7"
+  },
+  "adapter_sha256": {
+    "keepwarm": "fcdd3734359119ec8c56eab30ebf9199fa5745308ce12927e853ff079d5798f8",
+    "cache_restore": "d4eb18ce5e4c3d81fd2814c51a6be4bc19de09baa24fdd74514d216bee568051",
+    "full_upgrade": "db5ed13b9e307ec608ab8f6c7a147a72cb4c594d6a05e87db9255f882e8a95f4",
+    "llamacpp": "4bfb61fe4b28224393768c8d9964d898add3fcfa797f96c9fc1d762fa05f04e3",
+    "llamacpp_prepared": "61f124f498f95c375f3b8fd8a01e964228599fde21b7f261e349a7249cdfa37e",
+    "parity": "e129f05b1cfa3333096dc6d9547e1e754edf885cd873a24abbc293d8e0196b5e"
+  }
+}

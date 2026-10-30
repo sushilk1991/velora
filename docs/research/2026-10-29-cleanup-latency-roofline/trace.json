@@ -1,0 +1,215 @@
+{
+  "initial": {
+    "xctrace_record_exit": 0,
+    "export_verified": true,
+    "native_dictation": false,
+    "records": [
+      {
+        "idle_s": 10.0,
+        "ms": 476,
+        "ttft_ms": 242,
+        "decode_ms": 231,
+        "load1": 4.57421875,
+        "load1_end": 4.44775390625,
+        "prefix_tokens": 2546,
+        "input_tokens": 2597,
+        "output_tokens": 37,
+        "input_sha256": "c63c7fa2c95871d39e02bd6ff73703a840b7af79e7269426bbb7b26342a1b2fc",
+        "prompt_sha256": "769f7b9acdab3d4fb756212efda499b925028b97001605f1508dec782ac3c527",
+        "output_sha256": "c63c7fa2c95871d39e02bd6ff73703a840b7af79e7269426bbb7b26342a1b2fc",
+        "_greedy_sha256": "c63c7fa2c95871d39e02bd6ff73703a840b7af79e7269426bbb7b26342a1b2fc",
+        "_latency_ns": {
+          "raw_tokenization_ns": 472167,
+          "prompt_tokenization_ns": 6942042,
+          "cache_restore_ns": 89917,
+          "cache_select_restore_ns": 148209,
+          "runtime_prefix_ns": 13234417,
+          "exact_prefill_ns": 202785792,
+          "first_forward_sync_ns": 15643083,
+          "decode_ns": 231838917,
+          "postprocess_ns": 189667,
+          "worker_total_ns": 476730333,
+          "parent_queue_ns": 25250,
+          "parent_socket_rtt_ns": 477964625
+        },
+        "_work_counts": {
+          "exact_prefill_input_tokens": 50,
+          "copy_draft_model_passes": 14,
+          "copy_draft_model_input_tokens": 38,
+          "draft_proposed_tokens": 24,
+          "draft_verified_tokens": 24,
+          "draft_accepted_tokens": 24
+        }
+      },
+      {
+        "idle_s": 0.0,
+        "ms": 333,
+        "ttft_ms": 103,
+        "decode_ms": 229,
+        "load1": 4.44775390625,
+        "load1_end": 4.44775390625,
+        "prefix_tokens": 2546,
+        "input_tokens": 2597,
+        "output_tokens": 37,
+        "input_sha256": "c63c7fa2c95871d39e02bd6ff73703a840b7af79e7269426bbb7b26342a1b2fc",
+        "prompt_sha256": "769f7b9acdab3d4fb756212efda499b925028b97001605f1508dec782ac3c527",
+        "output_sha256": "c63c7fa2c95871d39e02bd6ff73703a840b7af79e7269426bbb7b26342a1b2fc",
+        "_greedy_sha256": "c63c7fa2c95871d39e02bd6ff73703a840b7af79e7269426bbb7b26342a1b2fc",
+        "_latency_ns": {
+          "raw_tokenization_ns": 127833,
+          "prompt_tokenization_ns": 2276042,
+          "cache_restore_ns": 31375,
+          "cache_select_restore_ns": 58417,
+          "runtime_prefix_ns": 3941084,
+          "exact_prefill_ns": 79530042,
+          "first_forward_sync_ns": 15903208,
+          "decode_ns": 229875208,
+          "postprocess_ns": 109042,
+          "worker_total_ns": 333532167,
+          "parent_queue_ns": 6708,
+          "parent_socket_rtt_ns": 334043834
+        },
+        "_work_counts": {
+          "exact_prefill_input_tokens": 50,
+          "copy_draft_model_passes": 14,
+          "copy_draft_model_input_tokens": 38,
+          "draft_proposed_tokens": 24,
+          "draft_verified_tokens": 24,
+          "draft_accepted_tokens": 24
+        }
+      }
+    ]
+  },
+  "primed": {
+    "xctrace_record_exit": 0,
+    "export_verified": true,
+    "native_dictation": false,
+    "records": [
+      {
+        "trace_stage": "prime",
+        "idle_s": 0.0,
+        "ms": 335,
+        "ttft_ms": 102,
+        "decode_ms": 231,
+        "load1": 4.37890625,
+        "load1_end": 4.37890625,
+        "prefix_tokens": 2546,
+        "input_tokens": 2597,
+        "output_tokens": 37,
+        "input_sha256": "c63c7fa2c95871d39e02bd6ff73703a840b7af79e7269426bbb7b26342a1b2fc",
+        "prompt_sha256": "769f7b9acdab3d4fb756212efda499b925028b97001605f1508dec782ac3c527",
+        "output_sha256": "c63c7fa2c95871d39e02bd6ff73703a840b7af79e7269426bbb7b26342a1b2fc",
+        "_greedy_sha256": "c63c7fa2c95871d39e02bd6ff73703a840b7af79e7269426bbb7b26342a1b2fc",
+        "_latency_ns": {
+          "raw_tokenization_ns": 147625,
+          "prompt_tokenization_ns": 2282125,
+          "cache_restore_ns": 25542,
+          "cache_select_restore_ns": 51000,
+          "runtime_prefix_ns": 4148042,
+          "exact_prefill_ns": 79459291,
+          "first_forward_sync_ns": 15546750,
+          "decode_ns": 231706750,
+          "postprocess_ns": 157500,
+          "worker_total_ns": 335361958,
+          "parent_queue_ns": 6750,
+          "parent_socket_rtt_ns": 335884667
+        },
+        "_work_counts": {
+          "exact_prefill_input_tokens": 50,
+          "copy_draft_model_passes": 14,
+          "copy_draft_model_input_tokens": 38,
+          "draft_proposed_tokens": 24,
+          "draft_verified_tokens": 24,
+          "draft_accepted_tokens": 24
+        }
+      },
+      {
+        "trace_stage": "cold",
+        "idle_s": 10.0,
+        "ms": 431,
+        "ttft_ms": 196,
+        "decode_ms": 234,
+        "load1": 4.72021484375,
+        "load1_end": 4.72021484375,
+        "prefix_tokens": 2546,
+        "input_tokens": 2597,
+        "output_tokens": 37,
+        "input_sha256": "c63c7fa2c95871d39e02bd6ff73703a840b7af79e7269426bbb7b26342a1b2fc",
+        "prompt_sha256": "769f7b9acdab3d4fb756212efda499b925028b97001605f1508dec782ac3c527",
+        "output_sha256": "c63c7fa2c95871d39e02bd6ff73703a840b7af79e7269426bbb7b26342a1b2fc",
+        "_greedy_sha256": "c63c7fa2c95871d39e02bd6ff73703a840b7af79e7269426bbb7b26342a1b2fc",
+        "_latency_ns": {
+          "raw_tokenization_ns": 273167,
+          "prompt_tokenization_ns": 2684541,
+          "cache_restore_ns": 57959,
+          "cache_select_restore_ns": 89792,
+          "runtime_prefix_ns": 4240209,
+          "exact_prefill_ns": 171780584,
+          "first_forward_sync_ns": 16340541,
+          "decode_ns": 234298375,
+          "postprocess_ns": 120125,
+          "worker_total_ns": 431694458,
+          "parent_queue_ns": 35542,
+          "parent_socket_rtt_ns": 432562583
+        },
+        "_work_counts": {
+          "exact_prefill_input_tokens": 50,
+          "copy_draft_model_passes": 14,
+          "copy_draft_model_input_tokens": 38,
+          "draft_proposed_tokens": 24,
+          "draft_verified_tokens": 24,
+          "draft_accepted_tokens": 24
+        }
+      },
+      {
+        "trace_stage": "warm",
+        "idle_s": 0.0,
+        "ms": 337,
+        "ttft_ms": 102,
+        "decode_ms": 235,
+        "load1": 4.72021484375,
+        "load1_end": 4.72021484375,
+        "prefix_tokens": 2546,
+        "input_tokens": 2597,
+        "output_tokens": 37,
+        "input_sha256": "c63c7fa2c95871d39e02bd6ff73703a840b7af79e7269426bbb7b26342a1b2fc",
+        "prompt_sha256": "769f7b9acdab3d4fb756212efda499b925028b97001605f1508dec782ac3c527",
+        "output_sha256": "c63c7fa2c95871d39e02bd6ff73703a840b7af79e7269426bbb7b26342a1b2fc",
+        "_greedy_sha256": "c63c7fa2c95871d39e02bd6ff73703a840b7af79e7269426bbb7b26342a1b2fc",
+        "_latency_ns": {
+          "raw_tokenization_ns": 120375,
+          "prompt_tokenization_ns": 2318333,
+          "cache_restore_ns": 28625,
+          "cache_select_restore_ns": 53958,
+          "runtime_prefix_ns": 4181500,
+          "exact_prefill_ns": 77621750,
+          "first_forward_sync_ns": 16977708,
+          "decode_ns": 235055792,
+          "postprocess_ns": 103375,
+          "worker_total_ns": 338055208,
+          "parent_queue_ns": 7292,
+          "parent_socket_rtt_ns": 338595166
+        },
+        "_work_counts": {
+          "exact_prefill_input_tokens": 50,
+          "copy_draft_model_passes": 14,
+          "copy_draft_model_input_tokens": 38,
+          "draft_proposed_tokens": 24,
+          "draft_verified_tokens": 24,
+          "draft_accepted_tokens": 24
+        }
+      }
+    ],
+    "gpu_observations": {
+      "first_worker_interval_after_idle_cpu_to_gpu_ms": 68.663875,
+      "cold_warm_burst_cpu_to_gpu_max_ms": 108.538417,
+      "cold_warm_burst_worker_gpu_rows": 774,
+      "definition": "Metal CPU-to-GPU latency includes encoding/dispatch/queueing. It does not isolate hardware wake."
+    }
+  },
+  "failed_all_process": {
+    "record_exit": 1,
+    "export_verified": false,
+    "used_for_conclusion": false
+  }
+}

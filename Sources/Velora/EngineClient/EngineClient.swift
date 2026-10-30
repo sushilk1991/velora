@@ -1,4 +1,5 @@
 import Foundation
+import os.signpost
 
 /// Delegate for engine socket lifecycle and events. All callbacks are
 /// delivered on the main queue.
@@ -22,6 +23,10 @@ final class EngineClient {
     }
 
     weak var delegate: EngineClientDelegate?
+
+    // Stop submission -> final frame receipt spans the native socket path.
+    private static let latencyLog = OSLog(subsystem: "com.velora", category: "Latency")
+    private var stopSignposts: [String: OSSignpostID] = [:]
 
     private var fd: Int32 = -1
     private let stateLock = NSLock()
@@ -94,8 +99,14 @@ final class EngineClient {
         let closedGeneration = generation
         terminalGeneration = notify && sock >= 0 ? closedGeneration : nil
         fd = -1
+        let abandonedSignposts = Array(stopSignposts.values)
+        stopSignposts.removeAll()
         generation += 1  // invalidate any running read loop
         stateLock.unlock()
+        // Close interrupted intervals so reconnects cannot leave trace state.
+        for identifier in abandonedSignposts {
+            os_signpost(.end, log: Self.latencyLog, name: "StopToFinal", signpostID: identifier)
+        }
         guard sock >= 0 else { return }
         // shutdown before close: unblocks a read() parked in the read loop so
         // the stale loop exits promptly instead of lingering on a recycled fd.
@@ -135,6 +146,13 @@ final class EngineClient {
         // The ordered write receipt exposes backlog after the capture drain.
         let stoppedSession = object["cmd"] as? String == "stop"
             ? object["session"] as? String : nil
+        if let stoppedSession {
+            let identifier = OSSignpostID(log: Self.latencyLog)
+            stateLock.lock()
+            stopSignposts[stoppedSession] = identifier
+            stateLock.unlock()
+            os_signpost(.begin, log: Self.latencyLog, name: "StopToFinal", signpostID: identifier)
+        }
         send(type: .json, payload: data, stopReceipt: stoppedSession.map {
             ($0, ProcessInfo.processInfo.systemUptime)
         })
@@ -180,6 +198,8 @@ final class EngineClient {
                 return
             }
             if let stopReceipt {
+                // Mark actual socket completion separately from queue submission.
+                os_signpost(.event, log: Self.latencyLog, name: "StopWritten")
                 let uptime = ProcessInfo.processInfo.systemUptime
                 let sendMs = Int(max(0, uptime - stopReceipt.queuedAt) * 1_000)
                 veloraLog("Velora: stop-path session=\(stopReceipt.session) stage=stop-written send_ms=\(sendMs) uptime_ms=\(Int(uptime * 1_000))")
@@ -233,6 +253,16 @@ final class EngineClient {
                 else {
                     NSLog("Velora: undecodable JSON frame from engine (%d bytes)", payload.count)
                     continue
+                }
+                // End at receipt, before main-queue delivery, without logging text.
+                if object["event"] as? String == "final",
+                   let session = object["session"] as? String {
+                    stateLock.lock()
+                    let identifier = stopSignposts.removeValue(forKey: session)
+                    stateLock.unlock()
+                    if let identifier {
+                        os_signpost(.end, log: Self.latencyLog, name: "StopToFinal", signpostID: identifier)
+                    }
                 }
                 let event = EngineEvent.parse(object)
                 DispatchQueue.main.async { [weak self] in

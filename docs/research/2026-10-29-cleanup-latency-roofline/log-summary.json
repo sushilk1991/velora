@@ -1,0 +1,136 @@
+{
+  "all_lines": {
+    "n": 4240,
+    "prepared_hit_pct": 76.179,
+    "metrics": {
+      "total_ms": {
+        "count": 4240,
+        "p50": 1573.5,
+        "p90": 4600.6,
+        "max": 36988
+      },
+      "ttft_ms": {
+        "count": 4240,
+        "p50": 944.0,
+        "p90": 3508.6,
+        "max": 35616
+      },
+      "decode_ms": {
+        "count": 4240,
+        "p50": 603.0,
+        "p90": 1323.3,
+        "max": 14542
+      },
+      "prefix_tokens": {
+        "count": 4240,
+        "p50": 2632.0,
+        "p90": 3045.0,
+        "max": 5497
+      },
+      "input_tokens": {
+        "count": 2423,
+        "p50": 3019.0,
+        "p90": 3314.0,
+        "max": 12931
+      },
+      "output_tokens": {
+        "count": 4240,
+        "p50": 42.0,
+        "p90": 82.0,
+        "max": 830
+      }
+    },
+    "uncached_tokens_p50": 154.0,
+    "decode_effective_tps_p50": 65.554
+  },
+  "complete_lines": {
+    "n": 2423,
+    "prepared_hit_pct": 77.548,
+    "metrics": {
+      "total_ms": {
+        "count": 2423,
+        "p50": 1665.0,
+        "p90": 5053.0,
+        "max": 36988
+      },
+      "ttft_ms": {
+        "count": 2423,
+        "p50": 1024.0,
+        "p90": 4042.8,
+        "max": 35616
+      },
+      "decode_ms": {
+        "count": 2423,
+        "p50": 589.0,
+        "p90": 1284.8,
+        "max": 9652
+      },
+      "prefix_tokens": {
+        "count": 2423,
+        "p50": 2927.0,
+        "p90": 3106.0,
+        "max": 3121
+      },
+      "input_tokens": {
+        "count": 2423,
+        "p50": 3019.0,
+        "p90": 3314.0,
+        "max": 12931
+      },
+      "output_tokens": {
+        "count": 2423,
+        "p50": 42.0,
+        "p90": 79.0,
+        "max": 371
+      }
+    },
+    "uncached_tokens_p50": 154.0,
+    "decode_effective_tps_p50": 65.651
+  },
+  "complete_at_least_20": {
+    "n": 1961,
+    "prepared_hit_pct": 88.016,
+    "metrics": {
+      "total_ms": {
+        "count": 1961,
+        "p50": 1744.0,
+        "p90": 5520.0,
+        "max": 36988
+      },
+      "ttft_ms": {
+        "count": 1961,
+        "p50": 963.0,
+        "p90": 4305.0,
+        "max": 35616
+      },
+      "decode_ms": {
+        "count": 1961,
+        "p50": 706.0,
+        "p90": 1391.0,
+        "max": 9652
+      },
+      "prefix_tokens": {
+        "count": 1961,
+        "p50": 2929.0,
+        "p90": 3109.0,
+        "max": 3121
+      },
+      "input_tokens": {
+        "count": 1961,
+        "p50": 3036.0,
+        "p90": 3588.0,
+        "max": 12931
+      },
+      "output_tokens": {
+        "count": 1961,
+        "p50": 52.0,
+        "p90": 83.0,
+        "max": 371
+      }
+    },
+    "uncached_tokens_p50": 150.0,
+    "decode_effective_tps_p50": 66.315
+  },
+  "legacy_without_input_tokens": 1817,
+  "definition": "Interpolated quantiles; effective TPS=(output_tokens-1)*1000/decode_ms; copy-draft acceptance unavailable in old logs."
+}

@@ -16,7 +16,11 @@
 
 ### Verified
 
-- Both studies pass `make test` and CI on their PRs.
+- Both studies pass `make test` and CI on their PRs. #32 passed on its
+  third CI run; the first two each timed out in a different test
+  (`test_long_dictation.py::test_cancel_wedge_deletes`,
+  `test_server_downloads.py::test_cleanup_source_removed[recovery]`).
+  Both pass locally; treat them as CI timing flakes to fix.
 - No owner transcript text is in either report or its data files.
 
 ### Next
