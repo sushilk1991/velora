@@ -17,8 +17,8 @@ Dogfood it behind a setting after native latency/RAM validation. Current
 over raw passthrough. Nothing is installed or enabled by this study.
 
 Executed 29–30 October 2026. Base: `ded87d0`, Velora 0.29.7. Local branch:
-`study/cleanup-model-decision`. No push, merge, PR, app restart, Dictionary
-change, or write to `~/.velora` is authorized. This base already includes
+`study/cleanup-model-decision`. The study made no app restart, Dictionary
+change, or write to `~/.velora`. This base already includes
 the Whisper prompt, padding-segment, and miner guards from #33–#35.
 
 ## Frozen replacement bar
