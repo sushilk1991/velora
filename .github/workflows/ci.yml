@@ -36,3 +36,11 @@ jobs:
         uses: actions/checkout@v6
       - name: Build the release configuration without the self-test harness
         run: swift build -c release -Xswiftc -DVELORA_DISTRIBUTION
+      - name: Check the stripped executable the way verify-dmg.sh does
+        shell: zsh {0}
+        run: |
+          set -euo pipefail
+          cp .build/release/Velora "$RUNNER_TEMP/Velora"
+          strip -x "$RUNNER_TEMP/Velora"
+          source scripts/signing-config.sh
+          validate_distribution_executable "$RUNNER_TEMP/Velora"

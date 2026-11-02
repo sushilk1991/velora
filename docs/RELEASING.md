@@ -149,6 +149,9 @@ on `main`.
   below that version, run `uv lock`, and confirm
   `engine/tests/test_lock_wheels.py` passes. A download error is the
   network; re-run.
+- **`distribution executable is not stripped` / `contains the self-test
+  harness`** — the DMG was not built by this `make-dmg.sh` (for example, by a
+  checkout from before the strip step). Rebuild it with a new version.
 - **Release exists with a different asset** — that version already shipped
   with different bytes. Never replace it: bump the version and release again.
 - **Tap pushed before the GitHub release** (broken `brew install`) — run

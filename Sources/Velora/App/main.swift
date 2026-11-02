@@ -10,7 +10,7 @@ import AppKit
 #if VELORA_DISTRIBUTION
 func exitHarnessUnavailable(_ flag: String) -> Never {
     FileHandle.standardError.write(Data(
-        "Velora: \(flag) is not in distribution builds; run it from .build/release/Velora or a make-app.sh build/Velora.app\n".utf8))
+        "Velora: \(flag) is not in distribution builds; rebuild without VELORA_DISTRIBUTION (swift build, or ./scripts/make-app.sh release none) and run that\n".utf8))
     exit(EX_USAGE)
 }
 #endif

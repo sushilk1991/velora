@@ -48,6 +48,17 @@ mkdir -p "$STAGING"
 cp -R "$APP" "$STAGING/"
 ln -s /Applications "$STAGING/Applications"
 
+# The shipped executable is stripped: a user's crash report carries only
+# addresses and this build's UUID, and this archive is what names them. Take
+# it now, beside the staged copy, so a rebuild during notarization cannot
+# swap in another build's symbols.
+STAGED_UUID="$(dwarfdump --uuid "$STAGING/Velora.app/Contents/MacOS/Velora" | awk '{print $2}')"
+if [[ -z "$STAGED_UUID" || "$(dwarfdump --uuid "$DSYM" | awk '{print $2}')" != "$STAGED_UUID" ]]; then
+  echo "ERROR: $DSYM does not match the staged executable ($STAGED_UUID)" >&2
+  exit 1
+fi
+ditto -c -k --keepParent "$DSYM" "$PENDING_DSYM_ZIP"
+
 hdiutil create -volname Velora -srcfolder "$STAGING" -ov -format UDZO "$PENDING_DMG"
 
 IDENTITY="${DEVELOPER_ID_APPLICATION:-$(
@@ -84,12 +95,10 @@ xcrun stapler staple "$PENDING_DMG"
 xcrun stapler validate "$PENDING_DMG"
 ./scripts/verify-dmg.sh "$PENDING_DMG"
 
-# The shipped executable is stripped: a user's crash report carries only
-# addresses and this build's UUID, and this archive is what names them.
-ditto -c -k --keepParent "$DSYM" "$PENDING_DSYM_ZIP"
-
-mv "$PENDING_DSYM_ZIP" "$DSYM_ZIP"
+# The DMG goes first: once it exists the version is spent, so the pending
+# symbols are kept for a manual rename rather than cleaned up.
 mv "$PENDING_DMG" "$DMG"
 PUBLISHED=1
+mv "$PENDING_DSYM_ZIP" "$DSYM_ZIP"
 echo "OK: $DMG"
 echo "OK: $DSYM_ZIP (keep it with the release; see docs/RELEASING.md)"

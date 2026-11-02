@@ -236,11 +236,16 @@ grep -Fq 'validate_distribution_executable "$SHIPPED_BIN"' scripts/make-app.sh
 grep -Fq 'cp "$SHIPPED_BIN" "$APP/Contents/MacOS/Velora"' scripts/make-app.sh
 grep -Fq 'validate_distribution_executable "$APP/Contents/MacOS/Velora"' scripts/verify-dmg.sh
 grep -Fq 'ditto -c -k --keepParent "$DSYM" "$PENDING_DSYM_ZIP"' scripts/make-dmg.sh
-for source in Sources/Velora/Selftest/*.swift; do
-  first_condition="$(grep -m 1 '^#if ' "$source" || true)"
-  if [[ "$first_condition" != *'!VELORA_DISTRIBUTION'* \
-      || "$(tail -n 1 "$source")" != '#endif' ]]; then
-    echo "FAIL: $source must sit inside #if !VELORA_DISTRIBUTION ... #endif" >&2
+# Each harness file is one block: the guard is its first line of code, and
+# its only column-0 #if/#endif pair closes on the last line.
+for source in Sources/Velora/Selftest/**/*.swift; do
+  first_code="$(grep -v -m 1 -E '^[[:space:]]*(//.*)?$' "$source" || true)"
+  if [[ "$first_code" != '#if !VELORA_DISTRIBUTION' \
+      && "$first_code" != '#if DEBUG && !VELORA_DISTRIBUTION' ]] \
+      || [[ "$(grep -c '^#if' "$source")" != 1 ]] \
+      || [[ "$(grep -c '^#endif' "$source")" != 1 ]] \
+      || [[ "$(tail -n 1 "$source")" != '#endif' ]]; then
+    echo "FAIL: $source must sit inside one #if !VELORA_DISTRIBUTION ... #endif" >&2
     exit 1
   fi
 done

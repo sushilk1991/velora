@@ -110,7 +110,9 @@ DSYM="build/Velora.app.dSYM"
 # matches a crash report to this dSYM, are untouched. The SwiftPM product
 # stays unstripped for .build/$CONFIG/Velora runs.
 mkdir -p build
-rm -rf "$DSYM"
+# Drop the previous app with its dSYM so a failed build never leaves one
+# paired with the other's symbols.
+rm -rf "$APP" "$DSYM"
 dsymutil "$BIN" -o "$DSYM"
 cp "$BIN" "$SHIPPED_BIN"
 strip -x "$SHIPPED_BIN"
@@ -118,6 +120,13 @@ DSYM_UUID="$(dwarfdump --uuid "$DSYM" | awk '{print $2}')"
 SHIPPED_UUID="$(dwarfdump --uuid "$SHIPPED_BIN" | awk '{print $2}')"
 if [[ -z "$SHIPPED_UUID" || "$DSYM_UUID" != "$SHIPPED_UUID" ]]; then
   echo "ERROR: $DSYM ($DSYM_UUID) does not match the shipped executable ($SHIPPED_UUID)" >&2
+  exit 1
+fi
+# A dSYM without debug info still has the right UUID; resolving _main to its
+# source file proves dsymutil found the object files' DWARF.
+MAIN_ADDRESS="$(nm "$BIN" | awk '$3 == "_main" { print "0x" $1 }')"
+if [[ "$(atos -o "$DSYM" -arch arm64 -l 0x100000000 "$MAIN_ADDRESS")" != *'(main.swift:'* ]]; then
+  echo "ERROR: $DSYM has no debug info for _main; check dsymutil's output above" >&2
   exit 1
 fi
 if [[ "${VELORA_DISTRIBUTION:-0}" == "1" ]]; then

@@ -22,7 +22,9 @@ The self-test harness (`Sources/Velora/Selftest`: `--selftest`,
 `--action-probe`, the snapshot flags) exists in checkout builds only:
 `.build/*/Velora` and a local `./scripts/make-app.sh` bundle, which is where
 permission-gated self-tests run. The DMG build compiles it out
-(`VELORA_DISTRIBUTION`) and strips the executable, so the shipped binary is
+(`VELORA_DISTRIBUTION`; `make-dmg.sh` leaves `.build/release` and
+`build/Velora.app` that way until the next local build) and strips the
+executable, so the shipped binary is
 not the one `--selftest` ran. It is built from the same sources with the same
 release flags, minus the harness, and `verify-dmg.sh` checks the shipped
 bytes with CLI, MCP, and engine-bootstrap smoke tests.
