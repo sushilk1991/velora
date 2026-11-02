@@ -98,12 +98,19 @@ on `main`.
    Next to it, `build/Velora-X.Y.Z.dSYM.zip` holds the symbols of that DMG's
    executable, which ships stripped. **Keep it private:** never attach it to
    the GitHub release or the tap (its DWARF carries the builder's paths);
-   `publish-release.sh` uploads only the DMG. Archive it outside `build/`
-   (`make clean` deletes `build/`). A user's crash report shows only
-   addresses and the binary's UUID, and only this dSYM turns them into
-   function names and lines: unzip it, then run
-   `atos -o Velora.app.dSYM -arch arm64 -l <load address> <address>…` with the
-   `Velora` image's load address and frame addresses from the report.
+   `publish-release.sh` uploads only the DMG. Archive it, because
+   `make clean` deletes `build/`:
+
+   ```sh
+   mkdir -p ~/Library/Developer/Velora/dSYMs
+   cp -n build/Velora-X.Y.Z.dSYM.zip ~/Library/Developer/Velora/dSYMs/
+   ```
+
+   A user's crash report shows only addresses and the binary's UUID, and
+   only this dSYM turns them into function names and lines. Unzip it, then
+   run `atos -o Velora.app.dSYM -arch arm64 -l <load address> <address>…`
+   with the `Velora` image's load address and frame addresses from the
+   report.
 
    `make-app.sh` stamps `Resources/Info.plist` at build time with VERSION and
    a `CFBundleVersion` of `git rev-list --count HEAD`. The stamp left in the

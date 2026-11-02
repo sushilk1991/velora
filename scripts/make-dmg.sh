@@ -103,4 +103,4 @@ mv "$PENDING_DMG" "$DMG"
 PUBLISHED=1
 mv "$PENDING_DSYM_ZIP" "$DSYM_ZIP"
 echo "OK: $DMG"
-echo "OK: $DSYM_ZIP (private: archive it, never publish it; see docs/RELEASING.md)"
+echo "OK: $DSYM_ZIP (private: archive it in ~/Library/Developer/Velora/dSYMs, never publish it)"
