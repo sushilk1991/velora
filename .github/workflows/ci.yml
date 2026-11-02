@@ -25,3 +25,22 @@ jobs:
           fi
       - name: Run project tests
         run: make test
+
+  distribution-build:
+    # The DMG compiles Sources/Velora/Selftest out (VELORA_DISTRIBUTION; see
+    # scripts/make-app.sh). Build that configuration here so production code
+    # that reaches into the harness fails on the PR, not in make-dmg.sh.
+    runs-on: macos-latest
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v6
+      - name: Build the release configuration without the self-test harness
+        run: swift build -c release -Xswiftc -DVELORA_DISTRIBUTION
+      - name: Check the stripped executable the way verify-dmg.sh does
+        shell: zsh {0}
+        run: |
+          set -euo pipefail
+          cp .build/release/Velora "$RUNNER_TEMP/Velora"
+          strip -x "$RUNNER_TEMP/Velora"
+          source scripts/signing-config.sh
+          validate_distribution_executable "$RUNNER_TEMP/Velora"

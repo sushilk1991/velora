@@ -205,6 +205,52 @@ grep -Fq '"$CLI" mcp' scripts/verify-dmg.sh
 grep -Fq 'if [[ "${VELORA_DISTRIBUTION:-0}" != "1" ]]; then' scripts/make-app.sh
 grep -Fq "Print :VeloraEngineDir" scripts/verify-dmg.sh
 
+# The DMG's executable: stripped, symbols kept in a matching dSYM, and built
+# with the self-test harness compiled out.
+cat > "$TMP_DIR/fixture.c" <<'C'
+static int helper(void) { return 0; }
+int main(void) { return helper(); }
+C
+cat > "$TMP_DIR/harness-fixture.c" <<'C'
+const char *harness = "Selftest";
+int main(void) { return harness[0] == 'S' ? 0 : 1; }
+C
+cc -O0 -o "$TMP_DIR/unstripped" "$TMP_DIR/fixture.c"
+cc -O0 -o "$TMP_DIR/harness" "$TMP_DIR/harness-fixture.c"
+cp "$TMP_DIR/unstripped" "$TMP_DIR/stripped"
+strip -x "$TMP_DIR/stripped" "$TMP_DIR/harness"
+expect_failure "unstripped distribution executable" \
+  validate_distribution_executable "$TMP_DIR/unstripped"
+grep -q 'not stripped' "$TMP_DIR/failure.log"
+expect_failure "distribution executable with the self-test harness" \
+  validate_distribution_executable "$TMP_DIR/harness"
+grep -q 'self-test harness' "$TMP_DIR/failure.log"
+expect_failure "unreadable distribution executable" \
+  validate_distribution_executable "$TMP_DIR/fixture.c"
+grep -q 'cannot read the symbol table' "$TMP_DIR/failure.log"
+validate_distribution_executable "$TMP_DIR/stripped"
+grep -Fq 'SWIFT_BUILD_ARGS+=(-Xswiftc -DVELORA_DISTRIBUTION)' scripts/make-app.sh
+grep -Fq 'strip -x "$SHIPPED_BIN"' scripts/make-app.sh
+grep -Fq 'dsymutil "$BIN" -o "$DSYM"' scripts/make-app.sh
+grep -Fq 'validate_distribution_executable "$SHIPPED_BIN"' scripts/make-app.sh
+grep -Fq 'cp "$SHIPPED_BIN" "$APP/Contents/MacOS/Velora"' scripts/make-app.sh
+grep -Fq 'validate_distribution_executable "$APP/Contents/MacOS/Velora"' scripts/verify-dmg.sh
+grep -Fq 'ditto -c -k --keepParent "$DSYM" "$PENDING_DSYM_ZIP"' scripts/make-dmg.sh
+# Each harness file is one block: the guard is its first line of code, its
+# only column-0 #if/#endif pair closes on the last line, with no #else.
+for source in Sources/Velora/Selftest/**/*.swift; do
+  first_code="$(grep -v -m 1 -E '^[[:space:]]*(//.*)?$' "$source" || true)"
+  if [[ "$first_code" != '#if !VELORA_DISTRIBUTION' \
+      && "$first_code" != '#if DEBUG && !VELORA_DISTRIBUTION' ]] \
+      || [[ "$(grep -c '^#if' "$source")" != 1 ]] \
+      || [[ "$(grep -c '^#endif' "$source")" != 1 ]] \
+      || grep -qE '^#(else|elseif)' "$source" \
+      || [[ "$(tail -n 1 "$source")" != '#endif' ]]; then
+    echo "FAIL: $source must sit inside one #if !VELORA_DISTRIBUTION ... #endif" >&2
+    exit 1
+  fi
+done
+
 VERSION_HASH="$(shasum VERSION Resources/Info.plist)"
 if env -u VELORA_PROVISIONING_PROFILE VELORA_DISTRIBUTION=1 \
   ./scripts/make-app.sh release none >"$TMP_DIR/missing-profile.log" 2>&1; then

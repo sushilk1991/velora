@@ -15,6 +15,9 @@
 #   Distribution bundles never expose a builder-local path and use only their
 #   bundled engine (or an explicit VELORA_ENGINE_DIR runtime override).
 # - UI sounds (start/stop/error.caf) generated if missing and copied in
+# - The bundled executable is stripped; its symbols stay in build/Velora.app.dSYM
+#   for symbolicating crash reports. Distribution builds also compile out the
+#   self-test harness (Sources/Velora/Selftest).
 # - Development builds require a stable signing identity so TCC grants survive
 #   rebuilds. make-dmg.sh sets
 #   VELORA_DISTRIBUTION=1, which requires a Developer ID Application identity
@@ -86,17 +89,57 @@ echo "Building Velora $VERSION (build $BUILD_NUM)"
 # freshly stamped plist; touching a source file is insufficient under whole-
 # module optimization because SwiftPM can still reuse the old linked product.
 rm -f ".build/$CONFIG/Velora"
-swift build -c "$CONFIG"
+SWIFT_BUILD_ARGS=(-c "$CONFIG")
+if [[ "${VELORA_DISTRIBUTION:-0}" == "1" ]]; then
+  # The DMG leaves out the test harness (Sources/Velora/Selftest sits behind
+  # #if !VELORA_DISTRIBUTION). Local bundles keep it, so permission-gated
+  # runs of build/Velora.app --selftest still work.
+  SWIFT_BUILD_ARGS+=(-Xswiftc -DVELORA_DISTRIBUTION)
+fi
+swift build "${SWIFT_BUILD_ARGS[@]}"
 
 BIN=".build/$CONFIG/Velora"
+SHIPPED_BIN=".build/$CONFIG/Velora-stripped"
 APP="build/Velora.app"
+DSYM="build/Velora.app.dSYM"
+
+# Ship a stripped executable and keep its symbols in a dSYM beside the bundle
+# (make-dmg.sh archives it next to the DMG) so crash reports stay
+# symbolicatable. -x drops only local symbols and the debug map: the Swift and
+# Objective-C metadata sections, the export trie (_main), and LC_UUID, which
+# matches a crash report to this dSYM, are untouched. The SwiftPM product
+# stays unstripped for .build/$CONFIG/Velora runs.
+mkdir -p build
+# Drop the previous app with its dSYM so a failed build never leaves one
+# paired with the other's symbols.
+rm -rf "$APP" "$DSYM"
+dsymutil "$BIN" -o "$DSYM"
+cp "$BIN" "$SHIPPED_BIN"
+strip -x "$SHIPPED_BIN"
+DSYM_UUID="$(dwarfdump --uuid "$DSYM" | awk '{print $2}')"
+SHIPPED_UUID="$(dwarfdump --uuid "$SHIPPED_BIN" | awk '{print $2}')"
+if [[ -z "$SHIPPED_UUID" || "$DSYM_UUID" != "$SHIPPED_UUID" ]]; then
+  echo "ERROR: $DSYM ($DSYM_UUID) does not match the shipped executable ($SHIPPED_UUID)" >&2
+  exit 1
+fi
+# A dSYM without debug info still has the right UUID; resolving _main to its
+# source file proves dsymutil found the object files' DWARF.
+MAIN_ADDRESS="$(nm "$BIN" | awk '$3 == "_main" { print "0x" $1 }')"
+if [[ "$(atos -o "$DSYM" -arch arm64 -l 0x100000000 "$MAIN_ADDRESS")" != *'(main.swift:'* ]]; then
+  echo "ERROR: $DSYM has no debug info for _main; check dsymutil's output above" >&2
+  exit 1
+fi
+if [[ "${VELORA_DISTRIBUTION:-0}" == "1" ]]; then
+  validate_distribution_executable "$SHIPPED_BIN"
+fi
 
 # Exercise the headless path that reads the binary's embedded plist. The outer
 # bundle can have the right version while CLI/MCP still reports stale metadata,
-# so fail the build before signing if the two diverge.
+# so fail the build before signing if the two diverge. This runs the stripped
+# bytes that ship.
 MCP_CHECK_ROOT=".build/$CONFIG/mcp-version-check"
 mkdir -p "$MCP_CHECK_ROOT/Resources/bin"
-ln -sf "$(pwd)/$BIN" "$MCP_CHECK_ROOT/Resources/bin/velora"
+ln -sf "$(pwd)/$SHIPPED_BIN" "$MCP_CHECK_ROOT/Resources/bin/velora"
 MCP_METADATA="$(printf '%s\n' \
   '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{}}' \
   | "$MCP_CHECK_ROOT/Resources/bin/velora" mcp)"
@@ -114,7 +157,7 @@ fi
 rm -rf "$APP"
 mkdir -p "$APP/Contents/MacOS" "$APP/Contents/Resources"
 
-cp "$BIN" "$APP/Contents/MacOS/Velora"
+cp "$SHIPPED_BIN" "$APP/Contents/MacOS/Velora"
 cp Resources/Info.plist "$APP/Contents/Info.plist"
 cp Resources/start.caf Resources/stop.caf Resources/error.caf "$APP/Contents/Resources/"
 cp Resources/AppIcon.icns "$APP/Contents/Resources/"  # CFBundleIconFile = AppIcon
@@ -204,4 +247,4 @@ if [[ "${VELORA_DISTRIBUTION:-0}" == "1" ]]; then
   validate_signing_plists "$SIGNED_ENTITLEMENTS" "$PROFILE_PLIST" "$APP/Contents/Info.plist"
   validate_signed_app_team "$APP"
 fi
-echo "OK: $APP (v$VERSION, build $BUILD_NUM)"
+echo "OK: $APP (v$VERSION, build $BUILD_NUM); symbols in $DSYM"

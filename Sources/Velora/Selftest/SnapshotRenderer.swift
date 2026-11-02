@@ -1,4 +1,4 @@
-#if DEBUG
+#if DEBUG && !VELORA_DISTRIBUTION
 import AppKit
 import SwiftUI
 

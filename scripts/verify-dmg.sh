@@ -72,6 +72,9 @@ fi
 security cms -D -i "$EMBEDDED_PROFILE" > "$PROFILE_PLIST" 2>/dev/null
 validate_signing_plists "$ENTITLEMENTS_FILE" "$PROFILE_PLIST" "$APP/Contents/Info.plist"
 
+echo "Verifying the executable is stripped and has no self-test harness..."
+validate_distribution_executable "$APP/Contents/MacOS/Velora"
+
 echo "Verifying bundled offline runtime and command surfaces..."
 UV="$APP/Contents/Resources/bin/uv"
 CLI="$APP/Contents/Resources/bin/velora"

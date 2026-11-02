@@ -1,7 +1,8 @@
 #!/bin/zsh
 # Builds a distributable DMG: Developer ID-signed, hardened Velora.app inside
 # a signed, notarized, and stapled compressed UDZO image.
-# Output: build/Velora-<CFBundleShortVersionString>.dmg
+# Output: build/Velora-<CFBundleShortVersionString>.dmg, plus
+# build/Velora-<version>.dSYM.zip with the symbols of its stripped executable.
 set -euo pipefail
 cd "$(dirname "$0")/.."
 
@@ -24,23 +25,41 @@ APP="build/Velora.app"
 VERSION="$(/usr/libexec/PlistBuddy -c 'Print :CFBundleShortVersionString' "$APP/Contents/Info.plist")"
 DMG="build/Velora-$VERSION.dmg"
 PENDING_DMG="build/.Velora-$VERSION.pending.dmg"
+DSYM="build/Velora.app.dSYM"
+DSYM_ZIP="build/Velora-$VERSION.dSYM.zip"
+PENDING_DSYM_ZIP="build/.Velora-$VERSION.dSYM.pending.zip"
 STAGING="build/dmg-staging"
+# Refuse before any cleanup can run: a published DMG may sit beside the
+# pending symbols an interrupted run left for a manual rename.
+for artifact in "$DMG" "$DSYM_ZIP"; do
+  if [[ -e "$artifact" ]]; then
+    echo "ERROR: refusing to overwrite existing release artifact $artifact" >&2
+    exit 1
+  fi
+done
 PUBLISHED=0
 cleanup() {
   rm -rf "$STAGING"
-  [[ "$PUBLISHED" == "1" ]] || rm -f "$PENDING_DMG"
+  [[ "$PUBLISHED" == "1" ]] || rm -f "$PENDING_DMG" "$PENDING_DSYM_ZIP"
 }
 trap cleanup EXIT
 
 rm -rf "$STAGING"
-rm -f "$PENDING_DMG"
-if [[ -e "$DMG" ]]; then
-  echo "ERROR: refusing to overwrite existing release artifact $DMG" >&2
-  exit 1
-fi
+rm -f "$PENDING_DMG" "$PENDING_DSYM_ZIP"
 mkdir -p "$STAGING"
 cp -R "$APP" "$STAGING/"
 ln -s /Applications "$STAGING/Applications"
+
+# The shipped executable is stripped: a user's crash report carries only
+# addresses and this build's UUID, and this archive is what names them. Take
+# it now, beside the staged copy, so a rebuild during notarization cannot
+# swap in another build's symbols.
+STAGED_UUID="$(dwarfdump --uuid "$STAGING/Velora.app/Contents/MacOS/Velora" | awk '{print $2}')"
+if [[ -z "$STAGED_UUID" || "$(dwarfdump --uuid "$DSYM" | awk '{print $2}')" != "$STAGED_UUID" ]]; then
+  echo "ERROR: $DSYM does not match the staged executable ($STAGED_UUID)" >&2
+  exit 1
+fi
+ditto -c -k --keepParent "$DSYM" "$PENDING_DSYM_ZIP"
 
 hdiutil create -volname Velora -srcfolder "$STAGING" -ov -format UDZO "$PENDING_DMG"
 
@@ -78,6 +97,10 @@ xcrun stapler staple "$PENDING_DMG"
 xcrun stapler validate "$PENDING_DMG"
 ./scripts/verify-dmg.sh "$PENDING_DMG"
 
+# The DMG goes first: once it exists the version is spent, so the pending
+# symbols are kept for a manual rename rather than cleaned up.
 mv "$PENDING_DMG" "$DMG"
 PUBLISHED=1
+mv "$PENDING_DSYM_ZIP" "$DSYM_ZIP"
 echo "OK: $DMG"
+echo "OK: $DSYM_ZIP (keep it with the release; see docs/RELEASING.md)"

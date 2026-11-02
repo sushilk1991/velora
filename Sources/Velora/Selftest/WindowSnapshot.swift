@@ -1,3 +1,6 @@
+// Test harness: compiled out of the DMG build (VELORA_DISTRIBUTION; see
+// main.swift). Production code must not reference anything in Selftest/.
+#if !VELORA_DISTRIBUTION
 import AppKit
 import SwiftUI
 
@@ -22,7 +25,7 @@ import SwiftUI
 /// caller-set variables cannot point the fixtures at the live stores.
 ///
 /// The scratch-home gate (`enterScratchHome` and its helpers) compiles in
-/// every build: `--selftest` runs behind it in debug and release.
+/// every build but the DMG: `--selftest` runs behind it in debug and release.
 enum WindowSnapshot {
     private static let homeKey = "VELORA_WINDOW_SNAPSHOT_HOME"
     private static let homePrefix = "velora-window-snapshot-"
@@ -473,3 +476,4 @@ enum WindowSnapshot {
     }
     #endif
 }
+#endif

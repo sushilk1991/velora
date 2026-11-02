@@ -1,3 +1,6 @@
+// Test harness: compiled out of the DMG build (VELORA_DISTRIBUTION; see
+// main.swift). Production code must not reference anything in Selftest/.
+#if !VELORA_DISTRIBUTION
 import AppKit
 import ApplicationServices
 import CoreAudio
@@ -8544,3 +8547,4 @@ extension Selftest {
                "a cold inactive launch still needs an exact routed window")
     }
 }
+#endif
