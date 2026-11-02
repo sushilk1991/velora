@@ -201,7 +201,6 @@ _TOGGLE_TARGET_STATES = frozenset(("on", "off"))
 
 MAX_MENU_PATH_COMPONENTS = 5
 MAX_MENU_COMPONENT_CHARS = 80
-MAX_MENU_ITEMS = 600
 MAX_MENU_TOP_ITEMS = 30
 # Menu paths shown to the planner per turn: only those matching the command.
 MAX_PROMPT_MENU_ITEMS = 16
@@ -435,8 +434,7 @@ class ActionContext:
             frontmost_window=str(data.get("frontmost_window") or ""),
             running_apps=[str(a) for a in apps if isinstance(a, (str, int))],
             known_apps=[
-                str(a) for a in known_apps[:_MAX_KNOWN_APPS]
-                if isinstance(a, (str, int))
+                str(a) for a in known_apps if isinstance(a, (str, int))
             ],
             selection=str(data.get("selection") or ""),
             screen_names=[
@@ -451,7 +449,6 @@ class ActionContext:
 # ---------------------------------------------------------------- prompt
 
 _MAX_APPS = 40
-_MAX_KNOWN_APPS = 500
 _MAX_TITLE_CHARS = 160
 _MAX_SELECTION_CHARS = 400
 _MAX_SCREEN_NAMES = 40
@@ -639,8 +636,10 @@ def _normalize_menu_bar(raw: object) -> dict:
             top.append(component)
     items: list[dict] = []
     raw_items = raw.get("items")
-    for item in (raw_items if isinstance(raw_items, list) else [])[
-            :MAX_MENU_ITEMS]:
+    # No item count: Swift's 0.5 s walk bounds it, and only matching paths
+    # reach the prompt (MAX_PROMPT_MENU_ITEMS). A 600 clip made a big app's
+    # later menus unreachable.
+    for item in raw_items if isinstance(raw_items, list) else []:
         path = item.get("path") if isinstance(item, dict) else None
         if (not isinstance(path, list) or not path
                 or len(path) > MAX_MENU_PATH_COMPONENTS):
@@ -652,9 +651,7 @@ def _normalize_menu_bar(raw: object) -> dict:
     if not top and not items:
         return {}
     return {
-        "complete": raw.get("complete") is True
-        and len(raw_items if isinstance(raw_items, list) else [])
-        <= MAX_MENU_ITEMS,
+        "complete": raw.get("complete") is True,
         "top": top,
         "items": items,
     }
@@ -2144,6 +2141,215 @@ def turn_is_explicit_toggle(parsed: dict, session: "ActionSession") -> bool:
             and command_requests_toggle(session.transcript, target))
 
 
+def _requested_toggle_state(command: str) -> str | None:
+    """The on/off state the command explicitly asks for, or None."""
+    asked = [state for state in sorted(_TOGGLE_TARGET_STATES)
+             if command_requests_toggle(command, state)]
+    return asked[0] if len(asked) == 1 else None
+
+
+def _toggle_target(command: str) -> str:
+    """What an explicit on/off command toggles, in comparison form, or "".
+
+    Only the toggle phrase is removed: "<verb> on|off X", "<verb> X on|off",
+    or "enable|disable X", with a leading "the" and a "please" at either
+    end. Every other word stays, in any script, so "turn on Find My" is
+    `findmy` (never a "Find" switch), "turn on Switch Control" keeps
+    "switch", and "turn on Wi-Fi 以外" is not `wifi`. Other phrasings give
+    "" and keep the ordinary verifier path.
+    """
+    words = [word.lower() for word in
+             re.findall(r"[^\W_]+", fold_accents(command), flags=re.UNICODE)]
+    while words and words[0] == "please":
+        words = words[1:]
+    while words and words[-1] == "please":
+        words = words[:-1]
+    if len(words) < 2:
+        return ""
+    intent = frozenset().union(*_TOGGLE_INTENT_WORDS.values())
+    if words[0] in intent:
+        rest = words[1:]
+    elif words[0] in _TOGGLE_VERB_WORDS and words[1] in _TOGGLE_TARGET_STATES:
+        rest = words[2:]
+    elif (words[0] in _TOGGLE_VERB_WORDS
+          and words[-1] in _TOGGLE_TARGET_STATES):
+        rest = words[1:-1]
+    else:
+        return ""
+    if rest and rest[0] == "the":
+        rest = rest[1:]
+    return normalized_term("".join(rest))
+
+
+def _named_switches(snapshot: dict, command: str) -> list[dict]:
+    """On-screen switches whose whole label is what the command toggles.
+
+    Exact, not app_name_matches: a visible "Wi-Fi" switch must not stand in
+    for "turn on wifi calling". A command with more words than the label
+    finds no switch and keeps the ordinary verifier path.
+    """
+    target = _toggle_target(command)
+    if not target:
+        return []
+    return [
+        item for item in snapshot.get("elements") or []
+        if item.get("toggle") in TOGGLE_STATES
+        and normalized_term(str(item.get("label") or "")) == target
+    ]
+
+
+_SYSTEM_SETTINGS_BUNDLE = "com.apple.systempreferences"
+
+
+def turn_opens_named_setting(parsed: dict, session: "ActionSession") -> bool:
+    """Whether a self-evident collection press in System Settings opens the
+    page of the switch an explicit toggle command names, while that switch
+    is not on screen.
+
+    "turn on Wi-Fi" in System Settings starts on another pane; pressing the
+    sidebar's Wi-Fi item is how the switch is reached. The calibrated press
+    check judges the press against the whole command and read it as acting
+    (navigate 0.65, live 2026-11-02), and the reviewer refused it as "navigates
+    rather than toggling". The switch itself still needs set_ui, with its
+    own validation and readback. Once a switch so named is visible, a press
+    is no longer this step.
+
+    System Settings only, and the pressed row's whole label must be what
+    the command toggles: elsewhere a row named like the target can be a
+    poll option or a send ("turn on VPN" beside a "VPN" vote), which is
+    exactly what the press check exists to catch.
+    """
+    snapshot = session.current_ui_snapshot or {}
+    if (str(snapshot.get("bundle_id") or "") != _SYSTEM_SETTINGS_BUNDLE
+            or _requested_toggle_state(session.transcript) is None
+            or not turn_is_self_evident_collection_navigation(parsed, session)):
+        return False
+    presses = [
+        step for step in parsed.get("steps") or []
+        if isinstance(step, dict)
+        and str(step.get("do") or "").strip().lower()
+        in _INDEXED_NAVIGATION_VERBS
+    ]
+    if len(presses) != 1:
+        return False
+    element = next((item for item in snapshot.get("elements") or []
+                    if item.get("index") == presses[0].get("index")), None)
+    if (element is None or normalized_term(str(element.get("label") or ""))
+            != _toggle_target(session.transcript)):
+        return False
+    return not _named_switches(snapshot, session.transcript)
+
+
+def turn_is_observed_toggle_done(parsed: dict,
+                                 session: "ActionSession") -> bool:
+    """Whether a bare done on a foreground native window is backed by what
+    the tree shows: exactly one switch whose whole label is the command's
+    toggle target, already in the state the command explicitly asks for.
+
+    A foreground window has no verify_state, a partial tree never feeds the
+    goal verifier, and on a complete one the verifier cannot prove it
+    either: its evidence is selection, focus, or change, and a switch that
+    was already on is none of those (live, 2026-11-02: "evidence does not
+    prove active target state" until the turn cap). This observation is the
+    proof. The done ends the action; Swift reports it performed but
+    unverified.
+    """
+    if parsed.get("done") is not True or parsed.get("steps"):
+        return False
+    return observed_toggle(session) is not None
+
+
+def observed_toggle(session: "ActionSession") -> dict | None:
+    """The switch behind an observed done, for the app to re-read live:
+    {"snapshot", "index", "label", "state"}, or None. Foreground native
+    windows only; a routed window proves state with verify_state."""
+    snapshot = session.current_ui_snapshot or {}
+    if (snapshot.get("window_id") is not None
+            or snapshot.get("source") != _UI_SOURCE_NATIVE
+            or not snapshot.get("id")):
+        return None
+    wanted = _requested_toggle_state(session.transcript)
+    if wanted is None:
+        return None
+    switches = _named_switches(snapshot, session.transcript)
+    if len(switches) != 1 or switches[0].get("toggle") != wanted:
+        return None
+    return {"snapshot": str(snapshot["id"]),
+            "index": switches[0]["index"],
+            "label": str(switches[0].get("label") or ""),
+            "state": wanted}
+
+
+_SETTLE_PASSIVE_VERBS = frozenset(("wait_frontmost", "verify_context"))
+
+
+def settle_named_toggle(parsed: dict, session: "ActionSession") -> dict:
+    """Resolve a turn whose only effect is the one switch an explicit on/off
+    command names, on a foreground native window, before validation.
+
+    - The switch already shows the asked-for state: a bare done. The 4B
+      planner kept repeating it (press_ui, set_ui, verify_state) with or
+      without done (bench and live, 2026-11-02); each was refused, so the
+      action failed with its goal met, and the press would have flipped
+      Wi-Fi off had it run.
+    - It does not, and the tree is partial: find_ui for its label. Indexed
+      actions are refused on a partial tree, and live the planner repeated
+      press_ui instead of the find_ui the repair note asked for. The find
+      result shows every match in the window, then set_ui with readback.
+
+    The target is the command's whole toggle target (`_named_switches`), so
+    "turn on wifi calling" or "turn on Wi-Fi and Bluetooth" never resolves
+    to a visible "Wi-Fi". Any other step, or another control, keeps the
+    turn as the planner wrote it.
+    """
+    steps = parsed.get("steps")
+    if not isinstance(steps, list) or not steps:
+        return parsed
+    snapshot = session.current_ui_snapshot or {}
+    if (snapshot.get("source") != _UI_SOURCE_NATIVE
+            or snapshot.get("window_id") is not None):
+        return parsed
+    wanted = _requested_toggle_state(session.transcript)
+    if wanted is None:
+        return parsed
+    switches = _named_switches(snapshot, session.transcript)
+    if len(switches) != 1:
+        return parsed
+    switch = switches[0]
+    acts: set[str] = set()
+    waits: list[dict] = []
+    for step in steps:
+        if not isinstance(step, dict):
+            return parsed
+        verb = str(step.get("do") or "").strip().lower()
+        if verb in _SETTLE_PASSIVE_VERBS:
+            if verb == "wait_frontmost":
+                waits.append(step)
+            continue
+        index = step.get("index")
+        if isinstance(index, bool) or index != switch.get("index"):
+            return parsed
+        if not (verb == "press_ui"
+                or (verb == "set_ui" and step.get("state") == wanted)
+                or (verb == "verify_state" and step.get("assert") == wanted)):
+            return parsed
+        acts.add(verb)
+    if not acts:
+        return parsed
+    settled = dict(parsed)
+    if switch.get("toggle") == wanted:
+        settled["steps"] = []
+        settled["done"] = True
+        return settled
+    if (snapshot.get("complete") is True or snapshot_is_find_scoped(snapshot)
+            or "verify_state" in acts):
+        return parsed
+    settled["steps"] = [*waits, {"do": "find_ui",
+                                 "text": str(switch.get("label") or "")}]
+    settled["done"] = False
+    return settled
+
+
 def turn_requires_ui_action_review(parsed: dict, session: "ActionSession") -> bool:
     snapshot = session.current_ui_snapshot
     has_ui_press = bool(snapshot) and any(
@@ -2202,6 +2408,8 @@ def turn_requires_goal_verifier(parsed: dict, session: "ActionSession") -> bool:
         # The goal verifier never accepts a find result, and a foreground
         # one has no verify_state either: done ends the action unverified
         # instead of looping on refusals to the turn cap.
+        return False
+    if turn_is_observed_toggle_done(parsed, session):
         return False
     navigation_only = all(_goal_replaceable_step(step) for step in steps)
     return (parsed.get("done") is True and navigation_only
@@ -2667,7 +2875,9 @@ def _validate_press_ui(step: dict, state: "SessionState | None") -> dict:
     if state is None or not state.ui_snapshot_id:
         raise PlanError("press_ui: no current structured UI snapshot")
     if not state.ui_snapshot_complete:
-        raise PlanError("press_ui: structured UI snapshot is incomplete")
+        raise PlanError(
+            "press_ui: structured UI snapshot is incomplete — use find_ui "
+            "with the visible name of the control first")
     snapshot_id = state.ui_snapshot_id
     index = step.get("index")
     if not isinstance(index, int) or isinstance(index, bool):
@@ -4076,10 +4286,15 @@ class ActionSession:
         # promises to raise without mutating state so the server's repair
         # starts from the same place. Rejecting after validating burned two
         # of the 24 steps on every refusal (review finding).
+        #
+        # One observation does justify it: the starting snapshot showing the
+        # one switch an explicit on/off command names already in that state
+        # ("turn on wifi" with Wi-Fi visibly on).
         if parsed["done"] and self.turns_used == 0 and not any(
                 isinstance(step, dict)
                 and str(step.get("do", "")).strip().lower() in EFFECTIVE_VERBS
-                for step in parsed["steps"]):
+                for step in parsed["steps"]) and not (
+                    turn_is_observed_toggle_done(parsed, self)):
             raise PlanError(
                 "done: the first turn finished without doing anything — "
                 "either act on the command or reply {\"fail\": \"<why>\"}")

@@ -91,9 +91,10 @@ Snapshot-level:
 ```
 
 - `scope` present only on find-scoped snapshots. `complete` there means the
-  whole window was searched and every match (≤30) is included.
-- `menu_bar.items`: enabled leaf items that pass the menu policy below, ≤600,
-  depth ≤4 below the bar, components ≤80 chars, walk deadline 0.5 s
+  whole window was searched and every match is included (≤500 records).
+- `menu_bar.items`: enabled leaf items that pass the menu policy below, no
+  item count, depth ≤4 below the bar, components ≤80 chars, walk deadline
+  0.5 s
   (`complete:false` when cut). `top` excludes the Apple menu; it includes the
   app menu title only if the app menu contributes an item.
 
@@ -172,6 +173,64 @@ current `menu_bar.items` entry it matched.
   (any completeness). Final step of its batch. NOT effective, needs no focus
   checkpoint, changes no text/focus state, never combines with `done`.
 
+### Toggle commands in System Settings (live run, 2026-11-02)
+"turn on wifi" failed safely on the first live run (Wi-Fi was never
+flipped): System Settings opened on General; the calibrated press check
+scored the Wi-Fi sidebar press navigate 0.65 (< 0.90) and the reviewer
+refused it as "navigates rather than toggling"; the Wi-Fi switch
+(`AXSwitch`, id `wifi-power`) had no name; and the page is always partial
+(~40 nearby networks overflow the 60-children cap). Fixes:
+- Swift names an unnamed AXCheckBox / AXSlider / AXPopUpButton from the one
+  short static text in the run directly before it in its parent
+  (`ActionDerivedLabelPolicy.rowTextLabel`); another sibling control ends
+  the run, and two short texts name nothing (a heading above a title would
+  otherwise name the wrong switch). Capture, the find walk and execution
+  rechecks share it.
+- The toggle target is the command minus only its toggle phrase
+  (`_toggle_target`: "turn on the Wi-Fi", "turn the wifi on please" →
+  `wifi`), every other word kept in any script, compared whole with a
+  label: a visible "Wi-Fi" never stands in for "turn on wifi calling" or
+  "turn on Wi-Fi 以外", a "Find" switch never for "turn on Find My", and
+  "turn on Wi-Fi and Bluetooth" matches no switch. Other phrasings
+  ("can you turn on wifi") get no target and keep the verifier path.
+- Engine `turn_opens_named_setting`: in System Settings only, a self-evident
+  collection press on the row whose whole label is the target skips the
+  press check while no switch of that name is on screen. Elsewhere a row
+  named like the target can be a vote or a send.
+- Engine `turn_is_observed_toggle_done` / `observed_toggle`: a foreground
+  bare done skips the goal verifier when exactly one switch whose whole
+  label is the target shows the requested state, partial or complete tree
+  (live: the verifier refused "evidence does not prove active target state"
+  until the turn cap, since its evidence is selection, focus or change).
+  The server ends the action on such an observation with no model call,
+  turn 1 included (accept_reply's first-turn "did nothing" refusal is
+  waived only here), and sends `observed`; Swift returns `.completed` only
+  if `ActionHost.observedToggle` re-reads that exact element live (same
+  snapshot id, index, label, frontmost process).
+- Engine `settle_named_toggle` (before `bound_observation_turn`): Qwen
+  repeated the already-on switch (press_ui, set_ui on, verify_state) with
+  and without done (bench and live); each was refused, and the press would
+  have flipped Wi-Fi off. A turn whose only effect is that switch becomes a
+  bare done when it shows the wanted state, and `find_ui` for its label on
+  a partial tree when it does not (live, the model never followed the
+  repair note). press_ui's partial-tree refusal points at find_ui too.
+- Live result (build app, 2026-11-02): from Appearance, press Wi-Fi row →
+  done, 4 s, completed+verified; already on the Wi-Fi page, done in <1 s
+  with no model call. Wi-Fi stayed on both times. Bench 9/9.
+- Hard limits removed (owner ask, 2026-11-02): the snapshot's 60 children
+  per parent (the Wi-Fi window is 293 nodes, one list of 104, so it was
+  partial only because of this), depth 30 (now a 128 pathology guard), the
+  find walk's 6000 nodes and 30 matches, the legacy screen-name and
+  press_element walks' 40-children/depth caps, the 600 menu-leaf cap (Swift
+  and engine) and the engine's 500 known-apps clip. Kept: 500 snapshot nodes
+  and 2 s, ACTION_MAX_INPUT_TOKENS, AX timeouts, untrusted-text lengths,
+  step/turn caps.
+- Cross-vendor review (Codex, two rounds) found the label substring match,
+  the unscoped page-open exemption, the heading-names-switch case, and
+  filler/non-ASCII words dropped from the target; all are fixed above.
+  Open: a foreground find result still ends on a bare done unverified
+  (from #38), so a compound command can stop after its first switch.
+
 ### Finishing on a find result
 `verify_state` binds to an exact window id, which only routed background
 snapshots carry; the goal verifier never accepts a find result. In the
@@ -235,11 +294,12 @@ checks of press_ui.
   full-window walk is incomplete is replaced by a find-scoped walk for the
   current query; a complete full-window walk is returned as-is; a new
   `find_ui` replaces the query; an app/window change clears it.
-  Find walk: whole window, visit ≤6000 nodes, deadline 2 s; match = normalized
-  derived/authored label or short static-text value CONTAINS the normalized
-  query; ≤30 matches; records = matches + every ancestor (nearest included
-  ancestor becomes parent) + a match's enclosing AXRow; indices renumbered in
-  tree order; `complete` = walk exhausted and ≤30 matches.
+  Find walk: whole window, deadline 2 s (depth 128 pathology guard); match =
+  normalized derived/authored label or short static-text value CONTAINS the
+  normalized query; every match; records = matches + every ancestor (nearest
+  included ancestor becomes parent) + a match's enclosing AXRow, ≤500;
+  indices renumbered in tree order; `complete` = walk exhausted within 500
+  records.
 
 ### Menu policy (Swift, at capture and at execution)
 - Apple menu (menu bar item 0) excluded entirely.

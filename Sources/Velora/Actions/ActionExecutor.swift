@@ -213,6 +213,10 @@ protocol ActionHost: AnyObject {
     /// predicate; the plan cannot supply process/window or polling mechanics.
     func verifyState(_ check: ActionStateCheck,
                      expecting bundleID: String?) -> ActionStateReceipt?
+    /// Live readback behind an engine `observed` done: the exact element of
+    /// this host's current snapshot, same id, label, and frontmost process,
+    /// shows `observed.state` now.
+    func observedToggle(_ observed: ActionObservedToggle) -> Bool
     /// YouTube skill: in the frontmost browser showing `resultsURL`'s
     /// search, press the first video and prove the watch page loaded.
     /// Returns nil as soon as `isCancelled` says so: the wait can run
@@ -294,6 +298,9 @@ extension ActionHost {
     }
     func typeText(_ text: String, target: ActionTextTarget,
                   expecting bundleID: String?) -> ActionStateReceipt? { nil }
+    /// Whether the exact switch the engine names still shows its state, read
+    /// live from the snapshot this host captured. Hosts without one: no.
+    func observedToggle(_ observed: ActionObservedToggle) -> Bool { false }
     func replaceText(_ text: String, target: ActionTextTarget,
                      expecting bundleID: String?) -> ActionStateReceipt? { nil }
     func searchText(_ text: String, target: ActionTextTarget,

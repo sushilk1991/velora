@@ -126,7 +126,7 @@ final class AgentSessionManager {
     func handle(_ event: EngineEvent) {
         if let activeTaskID, let activeActionID = core.activeActionID,
            case .actionTurn(let eventID, let turn, let sends, let goal,
-                            let steps, _, let durationMs) = event,
+                            let steps, _, let durationMs, _) = event,
            eventID == activeActionID {
             store.recordTurn(
                 taskID: activeTaskID,

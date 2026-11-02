@@ -586,6 +586,24 @@ final class SystemActionHost: ActionHost {
         return pressed
     }
 
+    func observedToggle(_ observed: ActionObservedToggle) -> Bool {
+        guard Permissions.accessibilityGranted,
+              let snapshot = actionUISnapshot,
+              snapshot.observation.source == .native,
+              snapshot.observation.id == observed.snapshotID,
+              let record = snapshot.observation.elements.first(where: {
+                  $0.index == observed.index
+              }),
+              AppMatcher.normalize(record.label ?? "")
+                == AppMatcher.normalize(observed.label),
+              let app = onMain({ NSWorkspace.shared.frontmostApplication }),
+              app.processIdentifier == actionUISnapshotPID,
+              app.bundleIdentifier == snapshot.observation.bundleID
+        else { return false }
+        return ScreenContext.observedToggleState(
+            index: observed.index, in: snapshot) == observed.state
+    }
+
     func setElement(index: Int, snapshotID: String, label: String,
                     role: String, state: ActionUISetState,
                     expecting bundleID: String?) -> ActionUISetResult {

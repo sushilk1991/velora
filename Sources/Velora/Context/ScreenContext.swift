@@ -280,10 +280,11 @@ enum ScreenContext {
 
     /// Max entities returned; keeps the prompt/vocabulary bounded.
     private static let maxEntities = 4
-    /// Electron applications commonly nest the useful editable surface under
-    /// several layers of web containers. Slack's visible composer is depth 23;
-    /// this remains bounded by the independent node and wall-clock ceilings.
-    static let actionTreeDepthBudget = 30
+    /// Cycle/pathology guard only, as in the find walk: the node budget, the
+    /// deadline and the visited-element guard are the real bound. Electron
+    /// nests deep (Slack's composer is depth 23); a fixed 30 only made deep
+    /// trees partial.
+    static let actionTreeDepthBudget = 128
     static let actionSnapshotDeadline: TimeInterval = 2
     private static let backgroundFrameTolerance: CGFloat = 1
     private static let backgroundAncestorLimit = 64
@@ -598,13 +599,15 @@ enum ScreenContext {
         var nextIndex = 0
         var truncated = false
         var visited = AXIdentityGuard()
+        var head = 0
 
-        while !queue.isEmpty {
+        while head < queue.count {
             guard Date() < stopAt else {
                 truncated = true
                 break
             }
-            let item = queue.removeFirst()
+            let item = queue[head]
+            head += 1
             guard visited.insert(item.element) else { continue }
             guard records.count < nodeBudget else {
                 truncated = true
@@ -629,10 +632,15 @@ enum ScreenContext {
                 if !children.isEmpty { truncated = true }
                 continue
             }
-            for child in children.prefix(60) {
+            // No per-parent cap: a 60-child cap made System Settings' Wi-Fi
+            // page (293 nodes, one 104-row list) partial, so set_ui could not
+            // act on it. Only what the node budget can still visit is queued;
+            // a wider list leaves the tree partial.
+            let room = max(0, nodeBudget - records.count - (queue.count - head))
+            if children.count > room { truncated = true }
+            for child in children.prefix(room) {
                 queue.append((child, index, item.depth + 1))
             }
-            if children.count > 60 { truncated = true }
         }
 
         if let focusedElement,
@@ -655,7 +663,7 @@ enum ScreenContext {
             bundleID: app.bundleIdentifier ?? "",
             appElement: appElement, window: window,
             windowID: windowID, windowTitle: windowTitle,
-            complete: !truncated && queue.isEmpty, scope: nil)
+            complete: !truncated && head >= queue.count, scope: nil)
     }
 
     /// Shared tail of the full-window and find-scoped walks: row selection
@@ -1081,7 +1089,7 @@ enum ScreenContext {
         if role == "AXRow" {
             derived = derivedRowLabel(element)
         } else if ActionDerivedLabelPolicy.titleElementRoles.contains(role) {
-            derived = titleElementLabel(element)
+            derived = controlTextLabel(element)
         } else {
             derived = nil
         }
@@ -1127,6 +1135,29 @@ enum ScreenContext {
             }
         }
         return iconName
+    }
+
+    /// A checkbox/slider/pop-up's visible name: its AXTitleUIElement, else
+    /// the text directly before it in its row (`ActionDerivedLabelPolicy`).
+    private static func controlTextLabel(_ element: AXUIElement) -> String? {
+        titleElementLabel(element) ?? rowTextLabel(element)
+    }
+
+    private static func rowTextLabel(_ element: AXUIElement) -> String? {
+        guard let parent = axElement(element, kAXParentAttribute),
+              let siblings = axChildren(parent),
+              let position = siblings.firstIndex(where: {
+                  CFEqual($0, element)
+              }), position > 0
+        else { return nil }
+        let start = max(0, position - ActionDerivedLabelPolicy.rowTextSiblings)
+        let preceding = siblings[start..<position].reversed().map { sibling in
+            let role = axString(sibling, kAXRoleAttribute) ?? ""
+            return (role: role,
+                    value: role == kAXStaticTextRole as String
+                        ? axString(sibling, kAXValueAttribute) : nil)
+        }
+        return ActionDerivedLabelPolicy.rowTextLabel(preceding: preceding)
     }
 
     /// The AXTitleUIElement's title, or its value when it is static text.
@@ -1357,6 +1388,30 @@ enum ScreenContext {
 
     /// Foreground `set_ui`: the exact retained element of the current
     /// focused window, re-identified, then driven and proven by readback.
+    /// One switch's live state, after the identity recheck an indexed set
+    /// makes: the snapshot's window is still focused, and the element's live
+    /// role and label are still the recorded ones (a recycled row must not
+    /// vouch for another switch).
+    static func observedToggleState(
+        index: Int, in snapshot: ScreenActionUISnapshot
+    ) -> ActionToggleState? {
+        guard focusedWindowIsCurrent(snapshot),
+              let record = snapshot.observation.elements.first(where: {
+                  $0.index == index
+              }),
+              record.toggle != nil,
+              let label = record.label, !label.isEmpty,
+              let element = snapshot.elementsByIndex[index],
+              axString(element, kAXRoleAttribute) == record.role
+        else { return nil }
+        let current = actionElementLabel(
+            element, role: record.role,
+            actions: modelActionNames(from: axActionNames(element)))
+        guard AppMatcher.normalize(current ?? "") == AppMatcher.normalize(label)
+        else { return nil }
+        return liveToggleState(element)
+    }
+
     static func setActionElement(
         index: Int, state: ActionUISetState,
         in snapshot: ScreenActionUISnapshot
@@ -1507,17 +1562,17 @@ enum ScreenContext {
         return nil
     }
 
-    /// `find_ui`: search the whole window the full walk used (≤6000 nodes,
-    /// 2 s) for a visible name, and observe only the matches (≤30) plus
-    /// their ancestors, renumbered in walk order. The tree grants navigation
-    /// only (`scope`); matched static text is named by its own short value.
+    /// `find_ui`: search the whole window the full walk used (within 2 s) for
+    /// a visible name, and observe every match plus its ancestors (≤500
+    /// records, the snapshot's own bound), renumbered in walk order. The
+    /// tree grants navigation only (`scope`); matched static text is named
+    /// by its own short value.
     static func findActionUISnapshot(
         scopedTo full: ScreenActionUISnapshot, query: String,
-        nodeBudget: Int = ActionFindPolicy.maxNodes,
         deadline: TimeInterval = ActionFindPolicy.deadline
     ) -> ScreenActionUISnapshot? {
         let needle = AppMatcher.normalize(query)
-        guard !needle.isEmpty, nodeBudget > 0, deadline > 0,
+        guard !needle.isEmpty, deadline > 0,
               full.observation.source == .native,
               Permissions.accessibilityGranted else { return nil }
         struct Node {
@@ -1539,7 +1594,7 @@ enum ScreenContext {
         var overflow = false
 
         while head < queue.count {
-            guard Date() < stopAt, nodes.count < nodeBudget else { break }
+            guard Date() < stopAt else { break }
             let item = queue[head]
             head += 1
             guard visited.insert(item.element) else { continue }
@@ -1582,14 +1637,10 @@ enum ScreenContext {
                 }
             } else if ActionDerivedLabelPolicy.titleElementRoles.contains(role),
                       ActionFindPolicy.matches(
-                        titleElementLabel(item.element), query: needle) {
+                        controlTextLabel(item.element), query: needle) {
                 isMatch = true
             }
             if isMatch {
-                guard matchOrder.count < ActionFindPolicy.maxMatches else {
-                    overflow = true
-                    break
-                }
                 matched.insert(index)
                 matchOrder.append(index)
             }
@@ -1760,9 +1811,7 @@ enum ScreenContext {
             }
             let ambiguous = ambiguousTitles(reads)
             for read in reads {
-                guard complete || items.count < ActionMenuPolicy.maxItems,
-                      Date() < stopAt,
-                      items.count < ActionMenuPolicy.maxItems else {
+                guard Date() < stopAt else {
                     complete = false
                     return
                 }
@@ -1806,8 +1855,7 @@ enum ScreenContext {
                 continue
             }
             top.append(title)
-            if let menu = read.submenu, Date() < stopAt,
-               items.count < ActionMenuPolicy.maxItems {
+            if let menu = read.submenu, Date() < stopAt {
                 visit(menu, path: [title])
             } else if read.submenu != nil {
                 complete = false
@@ -2379,8 +2427,8 @@ enum ScreenContext {
     /// screen, so this hands the planner the actual candidates.
     ///
     /// A bounded breadth-first walk: Electron trees are enormous and every read
-    /// is IPC, so this caps nodes, depth, and wall time rather than trusting the
-    /// tree to be small. Runs off the hotkey path.
+    /// is IPC, so this caps nodes and wall time rather than trusting the tree
+    /// to be small. Runs off the hotkey path.
     static func visibleNames(
         of app: NSRunningApplication?,
         limit: Int = 40,
@@ -2398,12 +2446,13 @@ enum ScreenContext {
         let stopAt = Date().addingTimeInterval(deadline)
         var names: [String] = []
         var seen = Set<String>()
-        var queue: [(element: AXUIElement, depth: Int)] = [(window, 0)]
-        var visited = 0
+        var queue: [AXUIElement] = [window]
+        var head = 0
 
-        while !queue.isEmpty, visited < nodeBudget, names.count < limit, Date() < stopAt {
-            let (element, depth) = queue.removeFirst()
-            visited += 1
+        while head < queue.count, head < nodeBudget, names.count < limit,
+              Date() < stopAt {
+            let element = queue[head]
+            head += 1
             AXUIElementSetMessagingTimeout(element, 0.2)
             for attribute in [kAXTitleAttribute, kAXDescriptionAttribute] {
                 var ref: CFTypeRef?
@@ -2414,10 +2463,8 @@ enum ScreenContext {
                 let key = candidate.lowercased()
                 if seen.insert(key).inserted { names.append(candidate) }
             }
-            guard depth < 8 else { continue }
-            for child in (axChildren(element) ?? []).prefix(40) {
-                queue.append((child, depth + 1))
-            }
+            queue.append(contentsOf: (axChildren(element) ?? [])
+                .prefix(max(0, nodeBudget - queue.count)))
         }
         return names
     }
@@ -2448,12 +2495,12 @@ enum ScreenContext {
             appElement, pid: app.processIdentifier) else { return false }
 
         let stopAt = Date().addingTimeInterval(deadline)
-        var queue: [(element: AXUIElement, depth: Int)] = [(window, 0)]
-        var visited = 0
+        var queue: [AXUIElement] = [window]
+        var head = 0
 
-        while !queue.isEmpty, visited < nodeBudget, Date() < stopAt {
-            let (element, depth) = queue.removeFirst()
-            visited += 1
+        while head < queue.count, head < nodeBudget, Date() < stopAt {
+            let element = queue[head]
+            head += 1
             AXUIElementSetMessagingTimeout(element, 0.2)
             for attribute in [kAXTitleAttribute, kAXDescriptionAttribute] {
                 guard let text = axString(element, attribute),
@@ -2486,10 +2533,8 @@ enum ScreenContext {
                     ancestor = axElement(candidate, kAXParentAttribute)
                 }
             }
-            guard depth < 10 else { continue }
-            for child in (axChildren(element) ?? []).prefix(40) {
-                queue.append((child, depth + 1))
-            }
+            queue.append(contentsOf: (axChildren(element) ?? [])
+                .prefix(max(0, nodeBudget - queue.count)))
         }
         return false
     }

@@ -260,12 +260,13 @@ def test_menu_bar_is_bounded_exact_and_native_only():
                for path in paths for part in path), "over-long titles dropped"
     assert not any("<|im_start|>" in part for path in paths for part in path)
 
+    # A big app's menu is kept whole: no item count, only the walk deadline.
     raw["menu_bar"] = {"complete": True, "top": ["File"],
                        "items": [{"path": ["File", f"Item {i}"]}
-                                 for i in range(actions.MAX_MENU_ITEMS + 5)]}
-    capped = actions.normalize_ui_snapshot(raw)["menu_bar"]
-    assert len(capped["items"]) == actions.MAX_MENU_ITEMS
-    assert capped["complete"] is False
+                                 for i in range(2_000)]}
+    whole = actions.normalize_ui_snapshot(raw)["menu_bar"]
+    assert len(whole["items"]) == 2_000
+    assert whole["complete"] is True
 
     assert "menu_bar" not in actions.normalize_ui_snapshot(
         finder(source="cua"))
@@ -1124,3 +1125,278 @@ def test_verify_state_without_a_window_id_steers_to_done():
         actions._validate_verify_state(
             {"do": "verify_state", "index": 3, "assert": "selected"},
             session.state)
+
+
+# ------------------------------------------- toggle commands in System Settings
+
+def settings_general(snapshot_id="gen-1", *, wifi_switch=None):
+    """System Settings as the live probe saw it (2026-11-02), foreground (no
+    window id): sidebar rows each hold a cell holding a pressable button."""
+    elements = [
+        {"index": 0, "depth": 0, "role": "AXWindow", "label": "General",
+         "frame": {"x": 0, "y": 0, "w": 900, "h": 700}},
+        {"index": 1, "parent_index": 0, "depth": 1, "role": "AXOutline",
+         "label": "Sidebar", "frame": {"x": 0, "y": 50, "w": 220, "h": 600}},
+    ]
+    index = 2
+    for n, name in enumerate(("Wi-Fi", "Bluetooth", "Network", "VPN",
+                              "Battery", "General")):
+        y = 60 + 30 * n
+        frame = {"x": 0, "y": y, "w": 220, "h": 28}
+        elements += [
+            {"index": index, "parent_index": 1, "depth": 2, "role": "AXRow",
+             "label": name, "frame": frame,
+             **({"selected": True} if name == "General"
+                else {"set": ["selected"]})},
+            {"index": index + 1, "parent_index": index, "depth": 3,
+             "role": "AXCell", "frame": frame},
+            {"index": index + 2, "parent_index": index + 1, "depth": 4,
+             "role": "AXButton", "label": name, "actions": ["AXPress"],
+             "frame": {"x": 8, "y": y, "w": 200, "h": 28}},
+        ]
+        index += 3
+    if wifi_switch is not None:
+        elements.append(
+            {"index": 90, "parent_index": 0, "depth": 1, "role": "AXCheckBox",
+             "label": "Wi‑Fi", "actions": ["AXPress"],
+             "toggle": wifi_switch,
+             "set": ["off" if wifi_switch == "on" else "on"]})
+    return {"id": snapshot_id, "source": "native", "complete": True,
+            "app_name": "System Settings",
+            "bundle_id": "com.apple.systempreferences",
+            "window_title": "General", "elements": elements}
+
+
+def wifi_pane(snapshot_id="wifi-1", *, toggle="on", complete=False,
+              window_id=None):
+    """The Wi-Fi page: ~40 nearby networks overflow the 60-children cap, so
+    the tree is partial; the switch is named by its row's text."""
+    snap = settings_general(snapshot_id, wifi_switch=toggle)
+    snap.update(window_title="Wi‑Fi", complete=complete,
+                window_id=window_id)
+    return snap
+
+
+def _wifi_press(snapshot):
+    button = next(item for item in snapshot["elements"]
+                  if item["role"] == "AXButton" and item["label"] == "Wi-Fi")
+    return {"sends": False, "steps": [
+        wait("System Settings"),
+        {"do": "press_ui", "index": button["index"], "role": "AXButton",
+         "label": "Wi-Fi"}]}
+
+
+def test_opening_the_named_switch_page_needs_no_press_check():
+    general = settings_general()
+    for command in ("turn on wifi", "turn wi-fi off", "enable Wi-Fi"):
+        session = make_session(command, general)
+        assert actions.turn_opens_named_setting(_wifi_press(general), session)
+        assert not actions.turn_requires_ui_action_review(
+            _wifi_press(general), session), command
+    # Not a toggle command: the calibrated press check still decides.
+    assert not actions.turn_opens_named_setting(
+        _wifi_press(general), make_session("open wifi", general))
+    # The switch is already on screen: act on it, do not navigate again.
+    shown = settings_general(wifi_switch="off")
+    assert not actions.turn_opens_named_setting(
+        _wifi_press(shown), make_session("turn on wifi", shown))
+    # Another row than the one the command names is not this step.
+    bluetooth = next(item for item in general["elements"]
+                     if item["role"] == "AXButton"
+                     and item["label"] == "Bluetooth")
+    other = {"sends": False, "steps": [
+        wait("System Settings"),
+        {"do": "press_ui", "index": bluetooth["index"], "role": "AXButton",
+         "label": "Bluetooth"}]}
+    assert not actions.turn_opens_named_setting(
+        other, make_session("turn on wifi", general))
+    # The row must be the whole target, not part of it.
+    assert not actions.turn_opens_named_setting(
+        _wifi_press(general), make_session("turn on wifi calling", general))
+    # Outside System Settings a row named like the target can be a vote or
+    # a send: the calibrated press check still decides.
+    elsewhere = dict(general, app_name="Slack",
+                     bundle_id="com.tinyspeck.slackmacgap")
+    assert not actions.turn_opens_named_setting(
+        _wifi_press(elsewhere), make_session("turn on wifi", elsewhere))
+
+
+def test_observed_switch_state_backs_a_foreground_done_on_a_partial_tree():
+    done = {"done": True}
+    on = make_session("turn on wifi", wifi_pane(toggle="on"))
+    assert actions.turn_is_observed_toggle_done(done, on)
+    assert not actions.turn_requires_goal_verifier(done, on)
+    # A complete tree too: the goal verifier cannot prove an unchanged
+    # switch, so this observation is the proof (live 2026-11-02).
+    whole = make_session("turn on wifi", wifi_pane(toggle="on", complete=True))
+    assert actions.turn_is_observed_toggle_done(done, whole)
+    assert not actions.turn_requires_goal_verifier(done, whole)
+    for command in ("turn on the Wi-Fi", "please switch wifi on",
+                    "enable wi fi"):
+        assert actions.turn_is_observed_toggle_done(
+            done, make_session(command, wifi_pane(toggle="on"))), command
+    for session in (
+            make_session("turn off wifi", wifi_pane(toggle="on")),
+            make_session("open wifi", wifi_pane(toggle="on")),
+            make_session("turn on bluetooth", wifi_pane(toggle="on")),
+            # A longer target than the visible switch is not that switch.
+            make_session("turn on wifi calling", wifi_pane(toggle="on")),
+            make_session("turn on wifi", wifi_pane(toggle="on",
+                                                   window_id=88))):
+        assert not actions.turn_is_observed_toggle_done(done, session), \
+            session.transcript
+    assert not actions.turn_is_observed_toggle_done(
+        {"done": True, "steps": [wait("System Settings")]}, on)
+
+
+def test_done_that_repeats_an_observed_switch_state_settles_to_bare_done():
+    pane = wifi_pane(toggle="on")
+    on = make_session("turn on wifi", pane)
+    check = {"do": "verify_context", "expect": ["Wi-Fi"]}
+    for last in (
+            {"do": "press_ui", "index": 90, "role": "AXCheckBox",
+             "label": "Wi-Fi"},
+            {"do": "set_ui", "index": 90, "role": "AXCheckBox",
+             "label": "Wi-Fi", "state": "on"},
+            {"do": "verify_state", "index": 90, "assert": "on"}):
+        parsed = {"goal": "turn on wifi", "sends": False, "done": True,
+                  "steps": [wait("System Settings"), check, last]}
+        settled = actions.settle_named_toggle(parsed, on)
+        assert settled["done"] is True and settled["steps"] == [], last
+        assert settled["goal"] == "turn on wifi"
+        assert actions.turn_is_observed_toggle_done(settled, on)
+    press = {"do": "press_ui", "index": 90, "role": "AXCheckBox",
+             "label": "Wi-Fi"}
+    # Without done too: the exact target is already met (live 2026-11-02).
+    assert actions.settle_named_toggle(
+        {"done": False, "steps": [wait("System Settings"), press]}, on) == {
+            "done": True, "steps": []}
+    kept = (
+        # Nothing repeated.
+        (on, {"done": True, "steps": [wait("System Settings")]}),
+        # Another state than the observed one.
+        (on, {"done": True, "steps": [
+            {"do": "set_ui", "index": 90, "role": "AXCheckBox",
+             "label": "Wi-Fi", "state": "off"}]}),
+        # Another control beside the switch.
+        (on, {"done": True, "steps": [
+            press, {"do": "press_ui", "index": 4, "role": "AXButton",
+                    "label": "Wi-Fi"}]}),
+        # Not yet in the asked-for state, on a complete tree: set_ui runs.
+        (make_session("turn off wifi", wifi_pane(toggle="on", complete=True)),
+         {"done": True, "steps": [press]}),
+        # A background window can verify_state for itself.
+        (make_session("turn on wifi", wifi_pane(toggle="on", window_id=88)),
+         {"done": True, "steps": [press]}),
+        # Not an explicit on/off command.
+        (make_session("toggle wifi", pane), {"done": True, "steps": [press]}),
+        # The command names more than the visible switch.
+        (make_session("turn on wifi calling", pane),
+         {"done": True, "steps": [press]}),
+        (make_session("turn on Wi-Fi and turn on Bluetooth", pane),
+         {"done": True, "steps": [press]}),
+    )
+    for session, parsed in kept:
+        assert actions.settle_named_toggle(parsed, session) is parsed, \
+            (session.transcript, parsed)
+
+
+def test_a_press_on_the_named_switch_in_a_partial_tree_finds_it_first():
+    off = make_session("turn on wifi", wifi_pane(toggle="off"))
+    for act in ({"do": "press_ui", "index": 90, "role": "AXCheckBox",
+                 "label": "Wi‑Fi"},
+                {"do": "set_ui", "index": 90, "role": "AXCheckBox",
+                 "label": "Wi‑Fi", "state": "on"}):
+        parsed = {"goal": "turn on wifi", "sends": False, "done": False,
+                  "steps": [wait("System Settings"),
+                            {"do": "verify_context", "expect": ["Wi-Fi"]},
+                            act]}
+        found = actions.settle_named_toggle(parsed, off)
+        assert found["steps"] == [wait("System Settings"),
+                                  {"do": "find_ui", "text": "Wi‑Fi"}], act
+        assert found["done"] is False and found["goal"] == "turn on wifi"
+        # The rewritten turn is one the validator accepts.
+        actions.validate_plan(dict(found), off.state)
+    press = {"do": "press_ui", "index": 90, "role": "AXCheckBox",
+             "label": "Wi‑Fi"}
+    for session, parsed in (
+            # The wrong state asked: set_ui off is not this switch's step.
+            (off, {"steps": [{"do": "set_ui", "index": 90,
+                              "role": "AXCheckBox", "label": "Wi‑Fi",
+                              "state": "off"}]}),
+            # verify_state of a state not shown is the verifier's business.
+            (off, {"done": True, "steps": [
+                {"do": "verify_state", "index": 90, "assert": "on"}]}),
+            # A complete tree or a find result already allows set_ui.
+            (make_session("turn on wifi",
+                          wifi_pane(toggle="off", complete=True)),
+             {"steps": [press]}),
+            (make_session("turn on wifi",
+                          dict(wifi_pane(toggle="off"), complete=True,
+                               scope={"kind": "find", "query": "wi-fi",
+                                      "matches": 1})),
+             {"steps": [press]})):
+        assert actions.settle_named_toggle(parsed, session) is parsed, parsed
+
+
+def test_a_first_turn_done_stands_when_the_named_switch_already_shows_it():
+    done = '{"sends": false, "steps": [], "done": true}'
+    on = make_session("turn on wifi", wifi_pane(toggle="on", complete=True))
+    turn_one = on.accept_reply(done)
+    assert turn_one["done"] is True and turn_one["steps"] == []
+    # Anything else is still the model shrugging on turn 1.
+    for session in (make_session("turn off wifi", wifi_pane(toggle="on")),
+                    make_session("open wifi", wifi_pane(toggle="on")),
+                    make_session("turn on wifi calling",
+                                 wifi_pane(toggle="on"))):
+        with pytest.raises(actions.PlanError, match="first turn finished"):
+            session.accept_reply(done)
+
+
+async def test_turn_on_wifi_while_its_page_shows_it_on_needs_no_model(engine):
+    eng, sock = engine
+    eng.cleanup = FakePlanner()
+    client = await connect(sock)
+    await client.recv_event("ready")
+    await send_start(client, transcript="turn on wifi",
+                     context={"frontmost_app": "System Settings",
+                              "frontmost_bundle": "com.apple.systempreferences",
+                              "running_apps": ["System Settings"],
+                              "ui_snapshot": wifi_pane(toggle="on",
+                                                       complete=True)})
+    first = await client.recv_event("action_turn")
+    assert first["done"] is True and first["steps"] == []
+    assert eng.cleanup.calls == []
+    # What the app re-reads live before it reports the action done.
+    assert first["observed"] == {"snapshot": "wifi-1", "index": 90,
+                                 "label": "Wi‑Fi", "state": "on"}
+
+
+@pytest.mark.parametrize("complete", [False, True])
+async def test_turn_on_wifi_that_is_already_on_ends_after_opening_its_page(
+        engine, complete):
+    eng, sock = engine
+    general = settings_general()
+    # Only the page press is planned: the fresh Wi-Fi page shows the switch
+    # already on, which ends the action with no model call (live
+    # 2026-11-02: the verifier could not prove an unchanged switch).
+    eng.cleanup = FakePlanner(
+        turn(_wifi_press(general)["steps"], goal="turn on wifi", sends=False),
+    )
+    client = await connect(sock)
+    await client.recv_event("ready")
+    await send_start(client, transcript="turn on wifi",
+                     context={"frontmost_app": "System Settings",
+                              "frontmost_bundle": "com.apple.systempreferences",
+                              "running_apps": ["System Settings"],
+                              "ui_snapshot": general})
+    first = await client.recv_event("action_turn")
+    assert first["steps"][-1]["do"] == "press_ui"
+    assert first["steps"][-1]["label"] == "Wi-Fi"
+    await send_observe(client, observation=observation(
+        frontmost_app="System Settings",
+        ui_snapshot=wifi_pane(toggle="on", complete=complete),
+        executed=["press_ui Wi-Fi"]))
+    second = await client.recv_event("action_turn")
+    assert second["done"] is True and second["steps"] == []
+    assert len(eng.cleanup.calls) == 1, "no controller, reviewer or verifier"

@@ -4895,6 +4895,18 @@ class Engine:
             # optimization miss: fall back to the normal controller below.
             direct_goal_check = session.direct_goal_check_pending
             session.direct_goal_check_pending = False
+            # The switch the command names already shows the asked-for state
+            # on this fresh observation: that is the whole goal, and no model
+            # call can prove it better (the verifier's evidence is selection,
+            # focus or change). Ends without a controller turn, on the first
+            # turn too when the starting window already shows it.
+            if (turn is None
+                    and actions.turn_is_observed_toggle_done(
+                        {"done": True}, session)):
+                log.info("action named switch already shows the requested "
+                         "state; done without a model call")
+                turn = session.accept_reply(
+                    '{"sends":false,"steps":[],"done":true}')
             if (turn is None and direct_goal_check
                     and actions.goal_snapshot_can_verify(
                         session.current_ui_snapshot)
@@ -5044,6 +5056,14 @@ class Engine:
                 try:
                     reply_text = result.text
                     parsed = actions.parse_turn(reply_text)
+                    settled = actions.settle_named_toggle(parsed, session)
+                    if settled is not parsed:
+                        log.info("action turn on the named switch resolved "
+                                 "to %s", json.dumps(settled.get("steps"),
+                                                     ensure_ascii=False))
+                        parsed = settled
+                        reply_text = json.dumps(
+                            parsed, ensure_ascii=False, separators=(",", ":"))
                     bounded = actions.bound_observation_turn(parsed)
                     if bounded is not parsed:
                         parsed = bounded
@@ -5062,6 +5082,14 @@ class Engine:
                                 "press check: not surely navigation")
                         needs_review = True
                     if needs_review:
+                        shown = session.current_ui_snapshot or {}
+                        log.info(
+                            "action review: ui complete=%s scope=%s "
+                            "elements=%d window_id=%s",
+                            shown.get("complete"),
+                            (shown.get("scope") or {}).get("kind"),
+                            len(shown.get("elements") or []),
+                            shown.get("window_id"))
                         review_prompt = actions.build_ui_action_review_prompt(
                             session.current_ui_snapshot)
                         review_message = actions.ui_action_review_message(
@@ -5357,6 +5385,12 @@ class Engine:
                 "sends": bool(session.sends), "goal": session.goal,
                 "steps": turn["steps"], "done": turn["done"], "ms": ms,
             }
+            # A no-step done the named switch's state backs: the app re-reads
+            # that exact element live before it reports anything.
+            if turn["done"] and not turn["steps"]:
+                observed = actions.observed_toggle(session)
+                if observed is not None:
+                    evt["observed"] = observed
             if msg.get("id") is not None:
                 evt["id"] = msg.get("id")
             self._restart_if_cleanup_unhealthy()
@@ -5465,6 +5499,10 @@ class Engine:
         if action_fastpath.presses_may_call(session):
             log.info("action press in a calling app; reviewer runs")
             return True
+        if actions.turn_opens_named_setting(parsed, session):
+            log.info("action press opens the named switch's page; "
+                     "no press check")
+            return False
 
         decide = getattr(self.cleanup, "decide", None)
         model_id = getattr(self.cleanup, "model_id", None)

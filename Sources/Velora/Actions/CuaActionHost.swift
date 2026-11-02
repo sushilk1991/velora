@@ -2073,6 +2073,12 @@ final class BackgroundRoutingActionHost: ActionHost {
         return true
     }
 
+    /// Foreground only: a routed window proves state with verify_state.
+    func observedToggle(_ observed: ActionObservedToggle) -> Bool {
+        guard terminalFailureReason == nil, !routed else { return false }
+        return system.observedToggle(observed)
+    }
+
     func setElement(index: Int, snapshotID: String, label: String,
                     role: String, state: ActionUISetState,
                     expecting bundleID: String?) -> ActionUISetResult {
