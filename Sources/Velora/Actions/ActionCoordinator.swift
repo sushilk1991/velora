@@ -261,6 +261,12 @@ extension ActionPlan {
                 return "verify \(check.assertion.rawValue)"
             case .playFirstVideo:
                 return "play the first video on the results page"
+            case .setUI(_, let index, let role, let label, let state):
+                return "set [\(index)] \(role) \"\(label)\" to \(state.rawValue)"
+            case .menuItem(_, let path):
+                return "choose menu \(path.joined(separator: " > "))"
+            case .findUI(let text):
+                return "find \"\(text)\" in the window"
             }
         }
     }

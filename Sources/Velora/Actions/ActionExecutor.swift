@@ -67,6 +67,15 @@ struct ActionProcessIdentity: Equatable {
     }
 }
 
+/// Outcome of one declarative `set_ui`. `stale` asks for a fresh turn;
+/// `unverified` means the host acted (or may have) and readback disagreed,
+/// which is never retried.
+enum ActionUISetResult: Equatable {
+    case verified
+    case stale
+    case unverified
+}
+
 enum ActionMediaControlResult: Equatable {
     case verified
     case unavailable
@@ -161,6 +170,18 @@ protocol ActionHost: AnyObject {
     /// must refuse a stale snapshot or changed app/label/role.
     func pressElement(index: Int, snapshotID: String, label: String,
                       role: String, expecting bundleID: String?) -> Bool
+    /// Put one exact element from `uiSnapshot` into `state`, idempotently,
+    /// and prove it by readback. Same identity rules as the indexed press.
+    func setElement(index: Int, snapshotID: String, label: String,
+                    role: String, state: ActionUISetState,
+                    expecting bundleID: String?) -> ActionUISetResult
+    /// Run one enabled menu-bar command of the app `snapshotID` observed,
+    /// resolved live by exact path. No menu is opened; no key is posted.
+    func pressMenuItem(path: [String], snapshotID: String,
+                       expecting bundleID: String?) -> Bool
+    /// Store a sticky find query for later incomplete observations of the
+    /// current native target. True only when such a target exists.
+    func findUI(text: String, expecting bundleID: String?) -> Bool
     /// Re-read exact model-selected evidence without performing an action.
     func verifyElement(index: Int, snapshotID: String, label: String,
                        role: String, target: String,
@@ -246,6 +267,14 @@ extension ActionHost {
                        purpose: ActionVerificationPurpose) -> Bool {
         false
     }
+    func setElement(index: Int, snapshotID: String, label: String,
+                    role: String, state: ActionUISetState,
+                    expecting bundleID: String?) -> ActionUISetResult {
+        .stale
+    }
+    func pressMenuItem(path: [String], snapshotID: String,
+                       expecting bundleID: String?) -> Bool { false }
+    func findUI(text: String, expecting bundleID: String?) -> Bool { false }
     func foregroundWindow() -> ActionWindowIdentity? { nil }
     func actionWindow() -> ActionWindowIdentity? { foregroundWindow() }
     func actionProcess() -> ActionProcessIdentity? {
@@ -308,6 +337,8 @@ enum ActionEffectKind: Equatable {
     case pasteText
     case key
     case pressElement
+    case setUI
+    case menuItem
 }
 
 struct ActionRunResult: Equatable {
@@ -905,6 +936,85 @@ final class ActionExecutor {
                 verifiedUITarget = false
                 host.sleep(ms: Self.indexedPressSettleMs)
 
+            case .setUI(let snapshotID, let elementIndex, let role,
+                        let label, let target):
+                guard !host.screenIsLocked else {
+                    note("set_ui [\(elementIndex)] \(label): screen locked")
+                    return failed(index, "the screen is locked", recoverable: false)
+                }
+                guard focusStillHeld() else {
+                    note("set_ui [\(elementIndex)] \(label): focus lost")
+                    return failed(index, "\(expectedAppName ?? "the app") lost focus",
+                                  recoverable: false)
+                }
+                switch host.setElement(
+                    index: elementIndex, snapshotID: snapshotID,
+                    label: label, role: role, state: target,
+                    expecting: expectedBundleID) {
+                case .verified:
+                    break
+                case .stale:
+                    if let reason = host.actionFailureReason {
+                        note("set_ui [\(elementIndex)] \(label): \(reason)")
+                        return failed(index, reason, recoverable: false)
+                    }
+                    note("set_ui [\(elementIndex)] \(label): stale or refused")
+                    return failed(
+                        index,
+                        "the selected UI element changed; inspect the fresh screen",
+                        recoverable: true)
+                case .unverified:
+                    let reason = host.actionFailureReason
+                        ?? "The UI change could not be verified. It was not retried."
+                    note("set_ui [\(elementIndex)] \(label) \(target.rawValue): "
+                         + "not verified")
+                    return failed(index, reason, recoverable: false)
+                }
+                evidence.append(.unverifiedEffect(.setUI))
+                note("set_ui [\(elementIndex)] \(role) \(label) = \(target.rawValue)")
+                verifiedUITarget = false
+                host.sleep(ms: Self.indexedPressSettleMs)
+
+            case .menuItem(let snapshotID, let path):
+                let shown = path.joined(separator: " > ")
+                guard !host.screenIsLocked else {
+                    note("menu_item \(shown): screen locked")
+                    return failed(index, "the screen is locked", recoverable: false)
+                }
+                guard focusStillHeld() else {
+                    note("menu_item \(shown): focus lost")
+                    return failed(index, "\(expectedAppName ?? "the app") lost focus",
+                                  recoverable: false)
+                }
+                guard host.pressMenuItem(
+                    path: path, snapshotID: snapshotID,
+                    expecting: expectedBundleID) else {
+                    if let reason = host.actionFailureReason {
+                        note("menu_item \(shown): \(reason)")
+                        return failed(index, reason, recoverable: false)
+                    }
+                    note("menu_item \(shown): not available — the menu changed, "
+                         + "the item is disabled, or the command does not act on "
+                         + "the observed window")
+                    return failed(
+                        index, "that menu command is not available right now",
+                        recoverable: true)
+                }
+                evidence.append(.unverifiedEffect(.menuItem))
+                note("menu_item \(shown)")
+                verifiedUITarget = false
+                host.sleep(ms: Self.indexedPressSettleMs)
+
+            case .findUI(let text):
+                guard host.findUI(text: text, expecting: expectedBundleID) else {
+                    note("find_ui \"\(text)\": no native window tree to search")
+                    return failed(
+                        index, "this window cannot be searched",
+                        recoverable: true)
+                }
+                note("find_ui \"\(text)\": the next observation is scoped to "
+                     + "matches when the full window is too large")
+
             case .pause(let ms):
                 host.sleep(ms: ms)
                 note("pause \(ms)ms")
@@ -995,6 +1105,17 @@ final class ActionExecutor {
             return control.state == .play ? "Starting playback" : "Pausing playback"
         case .verifyState: return "Verifying completion"
         case .playFirstVideo: return "Playing the first video"
+        case .setUI(_, _, _, let label, let state):
+            switch state {
+            case .on: return "Turning on \(label)"
+            case .off: return "Turning off \(label)"
+            case .selected: return "Opening \(label)"
+            case .expanded: return "Expanding \(label)"
+            case .collapsed: return "Collapsing \(label)"
+            }
+        case .menuItem(_, let path):
+            return "Choosing \(path.last ?? "menu item")"
+        case .findUI(let text): return "Finding \(text)"
         case .typeTextAt(_, let operation, _):
             switch operation {
             case .replace: return "Replacing text"
@@ -1007,7 +1128,8 @@ final class ActionExecutor {
     private static func mutatesUI(_ step: ActionStep) -> Bool {
         switch step {
         case .typeText, .typeTextAt, .searchText, .pasteText, .key,
-             .pressElement, .pressUI, .mediaControl, .playFirstVideo:
+             .pressElement, .pressUI, .mediaControl, .playFirstVideo,
+             .setUI, .menuItem:
             return true
         default:
             return false

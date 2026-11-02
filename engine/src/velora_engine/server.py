@@ -5119,8 +5119,15 @@ class Engine:
                             # not to the done-proof path below: nothing has
                             # asked the controller yet, so no model has
                             # concluded the command cannot proceed.
+                            # A find_ui result is the one tree that can
+                            # still act but can never carry completion
+                            # proof: converting its refusal into a done
+                            # would end the action with nothing run, so the
+                            # controller repairs instead, as on turn 1.
                             if (declared_sends is False and session.turns_used > 0
-                                    and attempt != _FAST_ATTEMPT):
+                                    and attempt != _FAST_ATTEMPT
+                                    and not actions.snapshot_is_find_scoped(
+                                        session.current_ui_snapshot)):
                                 # Do not execute the refused press. Give the
                                 # independent completion verifier the current
                                 # tree; it can replace the press only with

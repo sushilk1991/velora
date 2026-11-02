@@ -46,6 +46,9 @@ struct ActionTextTarget: Equatable {
 enum ActionStateAssertion: String, Equatable {
     case writtenText = "written_text"
     case selected
+    /// The exact native toggle currently reads on / off.
+    case on
+    case off
 }
 
 struct ActionStateCheck: Equatable {
@@ -99,6 +102,16 @@ enum ActionStep: Equatable {
     /// The YouTube skill's second step: press the first video on the
     /// results page `resultsURL` opened, then prove the watch page loaded.
     case playFirstVideo(resultsURL: URL)
+    /// Declarative target state on one exact native element from the
+    /// current snapshot. Idempotent; the host proves it by readback.
+    case setUI(snapshotID: String, index: Int, role: String,
+               label: String, state: ActionUISetState)
+    /// One enabled menu-bar command, resolved live by exact normalized path.
+    /// `snapshotID` is Swift's own binding to the observation whose menu bar
+    /// listed the path; it is never read from the planner.
+    case menuItem(snapshotID: String, path: [String])
+    /// Sticky find scope for later incomplete observations. Not an effect.
+    case findUI(String)
 
     /// Steps that put characters or keystrokes into another app.
     var isInput: Bool {
@@ -230,6 +243,11 @@ enum ActionPlanError: Error, Equatable {
     case urlEmbedsCredentials
     case mediaNativeRequired(step: Int)
     case skillStepOutOfPlace(step: Int)
+    case invalidMenuPath(step: Int)
+    case committingMenuItem(String)
+    case menuItemNotFound(path: [String], prefix: [String], children: [String])
+    case invalidFindQuery(step: Int)
+    case findRequiresFreshObservation(step: Int)
 
     var message: String {
         switch self {
@@ -296,7 +314,37 @@ enum ActionPlanError: Error, Equatable {
             return "bare Space can activate ambient controls; use type_text to enter spaces"
         case .unsafeBareKey(let key):
             return "bare key '\(key)' is not an allowed Action Mode capability"
+        case .invalidMenuPath(let step):
+            return "step \(step): menu_item 'path' must be 1-5 menu titles, top menu first"
+        case .committingMenuItem(let title):
+            return "'\(Self.clip(title, 40))' is a committing or editing menu command — navigation and view commands only"
+        case .menuItemNotFound(let path, let prefix, let children):
+            let wanted = path.map { Self.clip($0, 40) }.joined(separator: " > ")
+            let shown = children.prefix(12).map { "\"\(Self.clip($0, 40))\"" }
+                .joined(separator: ", ")
+            let hint: String
+            if shown.isEmpty {
+                hint = "the menu bar lists no enabled items"
+            } else if prefix.isEmpty {
+                hint = "the menu bar has: \(shown)"
+            } else {
+                let under = prefix.map { Self.clip($0, 40) }
+                    .joined(separator: " > ")
+                hint = "under \"\(under)\" the menu has: \(shown)"
+            }
+            return String("no enabled menu item \(wanted); \(hint)".prefix(400))
+        case .invalidFindQuery(let step):
+            return "step \(step): find_ui 'text' needs 3-60 characters of a visible name"
+        case .findRequiresFreshObservation(let step):
+            return "step \(step): find_ui must end its turn; observe the scoped screen first"
         }
+    }
+
+    /// Screen-derived text in an error that reaches the next observation.
+    private static func clip(_ text: String, _ limit: Int) -> String {
+        let clean = ActionPlan.sanitize(text)
+            .split(whereSeparator: \.isWhitespace).joined(separator: " ")
+        return clean.count <= limit ? clean : String(clean.prefix(limit)) + "…"
     }
 }
 
@@ -398,6 +446,19 @@ extension ActionPlan {
             "cerrarsesion", "deconnecter", "sedeconnecter", "abmelden",
             "afmelden", "disconnetti", "sairdaconta", "uitloggen",
         ]
+        /// A switch label names a setting, not a commit: `set_ui` on/off
+        /// uses the press denylist MINUS these words. Mirrored from the
+        /// engine's TOGGLE_EXEMPT_WORDS (contract-tested via this marker).
+        // toggle_exempt: toggle turn enable disable play pause stop start resume connect disconnect record mute lock sleep save close quit block subscribe
+        static let toggleExemptWords: Set<String> = [
+            "toggle", "turn", "enable", "disable", "play", "pause", "stop",
+            "start", "resume", "connect", "disconnect", "record", "mute",
+            "lock", "sleep", "save", "close", "quit", "block", "subscribe",
+        ]
+        /// Content edits a menu command may never perform, on top of the
+        /// press denylist. Mirrored from the engine's MENU_DENY_WORDS.
+        // menu_deny: paste cut undo redo
+        static let menuDenyWords: Set<String> = ["paste", "cut", "undo", "redo"]
         /// The same controls in scripts the word splitter cannot tokenize —
         /// Japanese and Chinese have no spaces, so a word list can never match
         /// them. Checked as substrings of the folded label. Mirrored from
@@ -831,11 +892,28 @@ extension ActionPlan {
         _ label: String, command: String
     ) -> Bool {
         let labelWords = Set(AppMatcher.words(label))
-        let commandWords = Set(AppMatcher.words(command))
-        return !labelWords.intersection(commandWords).filter {
+        let commandSequence = AppMatcher.words(command)
+        if !labelWords.intersection(commandSequence).filter({
             $0.count >= Limits.minVerifyTermCharacters
                 && !commandMentionWords.contains($0)
-        }.isEmpty
+        }).isEmpty {
+            return true
+        }
+        // "Wi-Fi" splits into words too short to share; "wifi" or "wi fi"
+        // in the command still names it. The whole label must equal one to
+        // three consecutive command words joined. Mirrors the engine's
+        // `command_mentions_ui_label`.
+        let whole = AppMatcher.normalize(label)
+        guard whole.count >= 4, !commandMentionWords.contains(whole) else {
+            return false
+        }
+        for span in 1...3 where span <= commandSequence.count {
+            for start in 0...(commandSequence.count - span)
+            where commandSequence[start..<(start + span)].joined() == whole {
+                return true
+            }
+        }
+        return false
     }
 
     private static func validatePressUI(
@@ -866,13 +944,63 @@ extension ActionPlan {
         }
         switch snapshot.source {
         case .native:
+            // A press flips a switch blindly: "turn on" an already-on switch
+            // would turn it off. set_ui is idempotent and read back. Mirrors
+            // the engine's `_validate_press_ui`.
             guard !element.actions.contains(ActionUICapability.cuaClick),
-                  element.actions.contains(ActionUICapability.axPress) else {
+                  element.actions.contains(ActionUICapability.axPress),
+                  element.toggle == nil else {
                 throw ActionPlanError.invalidStructuredUICapability(step: step)
             }
         case .cua, .cuaVisual, .appNative:
             throw ActionPlanError.invalidStructuredUICapability(step: step)
         }
+    }
+
+    /// Mirrors the engine's `_validate_set_ui`: exact current native
+    /// element, complete tree (a complete find-scoped tree counts), and a
+    /// target state Swift listed in the element's `set`.
+    private static func validateSetUI(
+        snapshotID: String, index: Int, role: String, label: String,
+        target: ActionUISetState, state: BatchState, step: Int
+    ) throws {
+        guard let snapshot = state.structuredUISnapshot,
+              snapshot.source == .native else {
+            throw ActionPlanError.invalidStructuredUICapability(step: step)
+        }
+        guard snapshot.complete else {
+            throw ActionPlanError.incompleteStructuredUI(step: step)
+        }
+        guard snapshot.id == snapshotID,
+              let element = snapshot.elements.first(where: { $0.index == index }),
+              element.role == role,
+              AppMatcher.normalize(element.label ?? "")
+                == AppMatcher.normalize(label),
+              element.enabled,
+              !element.actions.contains(ActionUICapability.cuaClick),
+              element.settable.contains(target) else {
+            throw ActionPlanError.invalidStructuredUICapability(step: step)
+        }
+    }
+
+    /// Mirrors the engine's `menu_path_components`: a list, or one string
+    /// written the way menus are ("View > Show Sidebar").
+    static func menuPathComponents(_ raw: Any?) -> [String]? {
+        let parts: [Any]
+        if let text = raw as? String {
+            parts = text.components(separatedBy: CharacterSet(charactersIn: ">›→"))
+        } else if let list = raw as? [Any] {
+            parts = list
+        } else {
+            return nil
+        }
+        var path: [String] = []
+        for part in parts {
+            guard let text = part as? String else { return nil }
+            path.append(ActionPlan.sanitize(text)
+                .split(whereSeparator: \.isWhitespace).joined(separator: " "))
+        }
+        return path
     }
 
     private static func validateVerifyUI(
@@ -882,6 +1010,7 @@ extension ActionPlan {
     ) throws {
         guard state.requireUITargetVerification,
               let snapshot = state.structuredUISnapshot,
+              !snapshot.isFindScoped,
               snapshot.id == snapshotID,
               let element = snapshot.elements.first(where: { $0.index == index }),
               element.role == role,
@@ -932,6 +1061,7 @@ extension ActionPlan {
     ) throws -> ActionTextTarget {
         guard let snapshot = state.structuredUISnapshot,
               snapshot.source == .native, snapshot.complete,
+              !snapshot.isFindScoped,
               snapshot.windowID != nil,
               let snapshotID = step["snapshot"] as? String,
               snapshotID == snapshot.id,
@@ -1002,6 +1132,14 @@ extension ActionPlan {
                 throw ActionPlanError.invalidStructuredUICapability(
                     step: stepIndex)
             }
+        case .on, .off:
+            let wanted: ActionToggleState = assertion == .on ? .on : .off
+            guard expected == nil, element.toggle == wanted, !label.isEmpty,
+                  ActionPlan.commandMentionsUILabel(
+                    label, command: state.spokenCommand) else {
+                throw ActionPlanError.invalidStructuredUICapability(
+                    step: stepIndex)
+            }
         }
         return ActionStateCheck(
             snapshotID: snapshotID, index: number.intValue,
@@ -1011,15 +1149,44 @@ extension ActionPlan {
 
     /// True when the label names a committing or state-changing control.
     static func pressLabelIsCommitting(_ label: String) -> Bool {
+        labelHitsDenylist(label, exempt: [])
+    }
+
+    /// `set_ui` label policy. on/off change a setting, so they keep the
+    /// denylist minus the toggle-exempt words (a switch label names the
+    /// setting). selected/expanded/collapsed are selection and disclosure:
+    /// they cannot send, delete, or pay, so a row NAMED "Trash", "Lock
+    /// Screen", or "Wallet & Apple Pay" is a destination like any other
+    /// (owner steer, 2026-11-02: no checks that only make navigation fail).
+    static func setLabelIsCommitting(
+        _ label: String, state: ActionUISetState
+    ) -> Bool {
+        guard state.isToggle else { return false }
+        return labelHitsDenylist(label, exempt: Limits.toggleExemptWords)
+    }
+
+    /// The label's folded comparison words, as the engine's
+    /// `press_label_words` produces them.
+    static func labelWords(_ label: String) -> [String] {
         // Fold diacritics so localized labels compare as the engine spells
         // them: the engine's word regex is ASCII-only and folds first, so
         // "Répondre" is "repondre" on both sides.
+        label.folding(options: [.diacriticInsensitive, .widthInsensitive],
+                      locale: nil).lowercased()
+            .split(whereSeparator: { !$0.isLetter && !$0.isNumber })
+            .map(String.init)
+    }
+
+    private static func labelHitsDenylist(
+        _ label: String, exempt: Set<String>
+    ) -> Bool {
         let folded = label.folding(options: [.diacriticInsensitive, .widthInsensitive],
                                    locale: nil).lowercased()
-        let words = folded.split(whereSeparator: { !$0.isLetter && !$0.isNumber })
-            .map(String.init)
+        let words = labelWords(label)
         let joinedPairs = zip(words, words.dropFirst()).map { $0 + $1 }
-        if (words + joinedPairs).contains(where: { Limits.pressDenyWords.contains($0) }) {
+        if (words + joinedPairs).contains(where: {
+            Limits.pressDenyWords.contains($0) && !exempt.contains($0)
+        }) {
             return true
         }
         // Scripts with no word boundaries. The needles are folded the same
@@ -1640,6 +1807,120 @@ extension ActionPlan {
                     clearPendingTarget()
                 }
 
+            case "set_ui":
+                guard focusEstablished else {
+                    throw ActionPlanError.inputBeforeFocus(step: index)
+                }
+                guard index == rawSteps.count - 1 else {
+                    throw ActionPlanError.pressRequiresFreshObservation(step: index)
+                }
+                let snapshotID = String(try string("snapshot").prefix(80))
+                guard let number = step["index"] as? NSNumber,
+                      CFGetTypeID(number) != CFBooleanGetTypeID(),
+                      !CFNumberIsFloatType(number), number.intValue >= 0 else {
+                    throw ActionPlanError.missingField(step: index, field: "index")
+                }
+                let role = String(try string("role").prefix(40))
+                let label = String(ActionPlan.sanitize(try string("label"))
+                    .split(whereSeparator: \.isWhitespace)
+                    .joined(separator: " ")
+                    .prefix(Limits.maxStructuredUILabelCharacters))
+                guard let rawState = step["state"] as? String,
+                      let target = ActionUISetState(rawValue: rawState) else {
+                    throw ActionPlanError.missingField(step: index, field: "state")
+                }
+                guard AppMatcher.normalize(label).count
+                        >= Limits.minPressLabelCharacters else {
+                    throw ActionPlanError.weakPressLabel(label)
+                }
+                guard !ActionPlan.setLabelIsCommitting(label, state: target) else {
+                    throw ActionPlanError.committingPressLabel(label)
+                }
+                try ActionPlan.validateSetUI(
+                    snapshotID: snapshotID, index: number.intValue,
+                    role: role, label: label, target: target,
+                    state: state, step: index)
+                steps.append(.setUI(
+                    snapshotID: snapshotID, index: number.intValue,
+                    role: role, label: label, state: target))
+                // Same carried effect as press_ui: the screen may have
+                // changed under any pending text.
+                focusEstablished = false
+                uiTargetVerified = false
+                if pendingText {
+                    unverifiedText = true
+                    pendingValue = ""
+                    clearPendingTarget()
+                }
+
+            case "menu_item":
+                guard focusEstablished else {
+                    throw ActionPlanError.inputBeforeFocus(step: index)
+                }
+                guard index == rawSteps.count - 1 else {
+                    throw ActionPlanError.pressRequiresFreshObservation(step: index)
+                }
+                guard let path = ActionPlan.menuPathComponents(step["path"]),
+                      !path.isEmpty,
+                      path.count <= ActionMenuPolicy.maxPathComponents,
+                      path.allSatisfy({
+                          !$0.isEmpty
+                              && $0.count <= ActionMenuPolicy.maxComponentCharacters
+                      }) else {
+                    throw ActionPlanError.invalidMenuPath(step: index)
+                }
+                if let denied = path.first(where: ActionMenuPolicy.componentIsDenied) {
+                    throw ActionPlanError.committingMenuItem(denied)
+                }
+                guard let snapshot = state.structuredUISnapshot,
+                      snapshot.source == .native else {
+                    throw ActionPlanError.invalidStructuredUICapability(step: index)
+                }
+                // A checkpoint on another app cannot borrow this app's menu.
+                if !currentApp.isEmpty, !snapshot.appName.isEmpty,
+                   !AppMatcher.namesSameApp(currentApp, snapshot.appName) {
+                    throw ActionPlanError.invalidStructuredUICapability(step: index)
+                }
+                let bar = snapshot.menuBar
+                    ?? ActionMenuBar(complete: false, top: [], items: [])
+                guard let entry = bar.entry(matching: path) else {
+                    let near = bar.deepestPrefix(of: path)
+                    throw ActionPlanError.menuItemNotFound(
+                        path: path, prefix: near.prefix,
+                        children: near.prefix.isEmpty && !bar.top.isEmpty
+                            ? bar.top : near.children)
+                }
+                if let denied = entry.first(where: ActionMenuPolicy.componentIsDenied) {
+                    throw ActionPlanError.committingMenuItem(denied)
+                }
+                steps.append(.menuItem(snapshotID: snapshot.id, path: entry))
+                focusEstablished = false
+                uiTargetVerified = false
+                if pendingText {
+                    unverifiedText = true
+                    pendingValue = ""
+                    clearPendingTarget()
+                }
+
+            case "find_ui":
+                // Observation only: no checkpoint needed, no text or focus
+                // state touched. It must end the batch so the scoped tree is
+                // observed before anything acts on it.
+                guard index == rawSteps.count - 1 else {
+                    throw ActionPlanError.findRequiresFreshObservation(step: index)
+                }
+                guard let raw = step["text"] as? String,
+                      let query = ActionFindPolicy.cleanedQuery(raw),
+                      AppMatcher.normalize(query).count
+                        >= ActionFindPolicy.minQueryCharacters else {
+                    throw ActionPlanError.invalidFindQuery(step: index)
+                }
+                guard let snapshot = state.structuredUISnapshot,
+                      snapshot.source == .native else {
+                    throw ActionPlanError.invalidStructuredUICapability(step: index)
+                }
+                steps.append(.findUI(query))
+
             case "present_ui":
                 throw ActionPlanError.invalidUIPresentation(step: index)
 
@@ -1774,7 +2055,7 @@ extension ActionPlan {
                 if next.pendingText { next.unverifiedText = true }
                 next.pendingValue = ""
                 clearPendingTarget()
-            case .pressElement, .pressUI:
+            case .pressElement, .pressUI, .setUI, .menuItem:
                 // Navigation that executed moved the screen out from under
                 // any pending text; its verification no longer describes
                 // where a Return would land.

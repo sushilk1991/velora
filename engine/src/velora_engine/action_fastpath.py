@@ -510,8 +510,13 @@ def press_check(parsed: dict, session: "ActionSession") -> FastProposal | None:
     if not turn_is_self_evident_collection_navigation(parsed, session):
         return None
     snapshot = session.current_ui_snapshot
+    # The exemption also covers set_ui state=selected on a row: selecting
+    # a list row navigates exactly like pressing one, so it gets the same
+    # check rather than a separately calibrated question.
     index = next(step["index"] for step in parsed["steps"]
-                 if isinstance(step, dict) and step.get("do") == "press_ui")
+                 if isinstance(step, dict)
+                 and str(step.get("do") or "").strip().lower()
+                 in ("press_ui", "set_ui"))
     by_index = {item["index"]: item for item in snapshot["elements"]}
     target = by_index[index]
 

@@ -4541,6 +4541,12 @@ extension DictationController: HotkeyMonitorDelegate {
         actionSession = sessionID
         actionOriginApp = origin
         actionScreenNames = []
+        // The origin app's menu bar (≤0.5 s, off-main) is walked while the
+        // user speaks, so the first planner turn reads it from the cache.
+        if let origin, let bundleID = origin.bundleIdentifier {
+            ActionMenuBarCache.shared.prewarm(
+                pid: Int(origin.processIdentifier), bundleID: bundleID)
+        }
         // Harvested while the user is still speaking: the walk is bounded but
         // not instant, and the hotkey path must not wait on Electron's AX tree.
         let harvestSession = sessionID

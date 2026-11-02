@@ -18,6 +18,13 @@ final class FakeActionHost: ActionHost {
     var uiWindowStillCurrent = true
     var pressableUIIndices: Set<Int> = []
     var verifiableUIIndices: Set<Int> = []
+    /// Outcome of `setElement`; nil means the fake has no such control.
+    var setUIResult: ActionUISetResult?
+    var menuItemResult = false
+    var findUIResult = false
+    private(set) var setUICalls: [(index: Int, state: ActionUISetState)] = []
+    private(set) var menuItemCalls: [[String]] = []
+    private(set) var findUICalls: [String] = []
     /// Labels that `pressElement` can find on the fake screen.
     var pressableLabels: Set<String> = []
     var canPostInput = true
@@ -271,6 +278,36 @@ final class FakeActionHost: ActionHost {
         return true
     }
 
+    func setElement(index: Int, snapshotID: String, label: String,
+                    role: String, state: ActionUISetState,
+                    expecting bundleID: String?) -> ActionUISetResult {
+        log.append("setUI(\(index),\(state.rawValue))")
+        guard let result = setUIResult,
+              let snapshot = uiSnapshotValue, snapshot.id == snapshotID,
+              expectingBundle(expecting: bundleID, equals: snapshot.bundleID)
+        else { return .stale }
+        setUICalls.append((index, state))
+        uiSnapshotValue = nil
+        return result
+    }
+
+    func pressMenuItem(path: [String], snapshotID: String,
+                       expecting bundleID: String?) -> Bool {
+        log.append("menuItem(\(path.joined(separator: ">")))")
+        guard menuItemResult,
+              let snapshot = uiSnapshotValue, snapshot.id == snapshotID
+        else { return false }
+        menuItemCalls.append(path)
+        uiSnapshotValue = nil
+        return true
+    }
+
+    func findUI(text: String, expecting bundleID: String?) -> Bool {
+        log.append("findUI(\(text))")
+        findUICalls.append(text)
+        return findUIResult
+    }
+
     func verifyElement(index: Int, snapshotID: String, label: String,
                        role: String, target: String,
                        expecting bundleID: String?,
@@ -456,6 +493,7 @@ extension Selftest {
         testStreamDraftRevisionPolicy()
         testActionCLIParsing()
         testBackgroundActions()
+        testSemanticActions()
     }
 
     private static func testAgentTaskLedger() {
@@ -7235,7 +7273,7 @@ extension Selftest {
         }
     }
 
-    private static func makeRoutedHost(
+    static func makeRoutedHost(
         system: FakeActionHost, transport: FakeCuaTransport,
         enabled: Bool = true, healthy: Bool = true,
         accessibilityGranted: Bool = true,
@@ -7261,6 +7299,23 @@ extension Selftest {
         nativeValueEquals: @escaping (
             String, Int, ScreenActionUISnapshot
         ) -> Bool = { _, _, _ in false },
+        nativeFind: @escaping (
+            ScreenActionUISnapshot, String
+        ) -> ScreenActionUISnapshot? = { _, _ in nil },
+        nativeSet: @escaping (
+            Int, ActionUISetState, ScreenActionUISnapshot
+        ) -> ActionUISetResult = { _, _, _ in .stale },
+        nativeMenuPress: @escaping (
+            [String], ScreenActionUISnapshot
+        ) -> ScreenContext.MenuPressResult = { _, _ in .refused },
+        // Default: the app has not changed the switch since it was observed.
+        nativeToggle: @escaping (
+            Int, ScreenActionUISnapshot
+        ) -> ActionToggleState? = { index, snapshot in
+            snapshot.observation.elements.first { $0.index == index }?.toggle
+        },
+        menuBar: @escaping (Int, String) -> ActionMenuBar? = { _, _ in nil },
+        invalidateMenuBar: @escaping (Int) -> Void = { _ in },
         restoreForeground: @escaping (
             ActionWindowIdentity, () -> Bool
         ) -> Bool = { _, _ in false },
@@ -7296,6 +7351,12 @@ extension Selftest {
             nativePress: nativePress,
             nativeWrite: nativeWrite,
             nativeValueEquals: nativeValueEquals,
+            nativeFind: nativeFind,
+            nativeSet: nativeSet,
+            nativeMenuPress: nativeMenuPress,
+            nativeToggle: nativeToggle,
+            menuBar: menuBar,
+            invalidateMenuBar: invalidateMenuBar,
             restoreForeground: restoreForeground,
             userFocusForWindow: userFocusForWindow,
             localResolve: { name in
@@ -7769,7 +7830,7 @@ extension Selftest {
         ]
     }
 
-    private static func scriptNotesWorld(_ transport: FakeCuaTransport) {
+    static func scriptNotesWorld(_ transport: FakeCuaTransport) {
         transport.freshWindowSnapshots = true
         transport.responses["list_apps"] = ["apps": [
             ["name": "Notes", "bundle_id": "com.apple.Notes",

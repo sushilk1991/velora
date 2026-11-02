@@ -102,6 +102,22 @@ final class SystemActionHost: ActionHost {
     /// field survives planner turns, but is reset before the next user action.
     private var targetState = ActionTextTargetState()
     private var actionUISnapshot: ScreenActionUISnapshot?
+    private var actionUISnapshotPID: pid_t = 0
+    /// Sticky `find_ui` query, bound to the exact process and AX window it
+    /// was issued against. Any other app or window clears it.
+    private struct FindQuery {
+        let text: String
+        let pid: pid_t
+        let window: AXUIElement
+    }
+    private var findQuery: FindQuery?
+    /// Set when a resolved menu command's AXPress reported an error. The
+    /// command may already have run (an item that opens a modal times the
+    /// press out), so the action ends instead of letting the planner press
+    /// it again, as the background host does.
+    private var menuCommandFailure: String?
+
+    var actionFailureReason: String? { menuCommandFailure }
 
     init(
         inserter: TextInserter,
@@ -114,11 +130,15 @@ final class SystemActionHost: ActionHost {
     func beginActionInputSession(command _: String) {
         targetState.reset()
         actionUISnapshot = nil
+        findQuery = nil
+        menuCommandFailure = nil
     }
 
     func endActionInputSession() {
         targetState.reset()
         actionUISnapshot = nil
+        findQuery = nil
+        menuCommandFailure = nil
     }
 
     private func clearActionTextState() {
@@ -491,11 +511,35 @@ final class SystemActionHost: ActionHost {
         guard let app = onMain({ NSWorkspace.shared.frontmostApplication })
         else {
             actionUISnapshot = nil
+            findQuery = nil
             return nil
         }
-        let snapshot = ScreenContext.actionUISnapshot(of: app)
+        guard var snapshot = ScreenContext.actionUISnapshot(of: app) else {
+            actionUISnapshot = nil
+            if findQuery?.pid != app.processIdentifier { findQuery = nil }
+            return nil
+        }
+        if let query = findQuery,
+           query.pid != app.processIdentifier
+            || !CFEqual(query.window, snapshot.focusedWindow) {
+            findQuery = nil
+        }
+        // A complete full-window walk is returned as-is; only a partial one
+        // is replaced by the sticky find-scoped walk.
+        if let query = findQuery, !snapshot.observation.complete,
+           let scoped = ScreenContext.findActionUISnapshot(
+                scopedTo: snapshot, query: query.text) {
+            snapshot = scoped
+        }
+        if let bundleID = app.bundleIdentifier,
+           let bar = ActionMenuBarCache.shared.menuBar(
+                pid: Int(app.processIdentifier), bundleID: bundleID) {
+            snapshot = snapshot.replacingObservation(
+                snapshot.observation.withMenuBar(bar))
+        }
         actionUISnapshot = snapshot
-        return snapshot?.observation
+        actionUISnapshotPID = app.processIdentifier
+        return snapshot.observation
     }
 
     /// These come off the frontmost window, which is by definition what the
@@ -540,6 +584,76 @@ final class SystemActionHost: ActionHost {
         actionUISnapshot = nil
         if pressed { clearActionTextState() }
         return pressed
+    }
+
+    func setElement(index: Int, snapshotID: String, label: String,
+                    role: String, state: ActionUISetState,
+                    expecting bundleID: String?) -> ActionUISetResult {
+        guard Permissions.accessibilityGranted,
+              let snapshot = actionUISnapshot,
+              snapshot.observation.source == .native,
+              snapshot.observation.complete,
+              snapshot.observation.id == snapshotID,
+              let record = snapshot.observation.elements.first(where: {
+                  $0.index == index
+              }),
+              record.role == role, record.settable.contains(state),
+              !record.actions.contains(ActionUICapability.cuaClick),
+              AppMatcher.normalize(record.label ?? "")
+                == AppMatcher.normalize(label),
+              let app = onMain({ NSWorkspace.shared.frontmostApplication }),
+              app.processIdentifier == actionUISnapshotPID,
+              app.bundleIdentifier == snapshot.observation.bundleID,
+              expectedBundle(bundleID, matches: snapshot.observation.bundleID)
+        else { return .stale }
+        let result = ScreenContext.setActionElement(
+            index: index, state: state, in: snapshot)
+        // Like a press: the tree may have changed, so no later indexed step
+        // reuses capabilities from it.
+        actionUISnapshot = nil
+        if result != .stale { clearActionTextState() }
+        return result
+    }
+
+    func pressMenuItem(path: [String], snapshotID: String,
+                       expecting bundleID: String?) -> Bool {
+        guard Permissions.accessibilityGranted,
+              let snapshot = actionUISnapshot,
+              snapshot.observation.source == .native,
+              snapshot.observation.id == snapshotID,
+              let entry = snapshot.observation.menuBar?.entry(matching: path),
+              let app = onMain({ NSWorkspace.shared.frontmostApplication }),
+              app.processIdentifier == actionUISnapshotPID,
+              app.bundleIdentifier == snapshot.observation.bundleID,
+              expectedBundle(bundleID, matches: snapshot.observation.bundleID)
+        else { return false }
+        let result = ScreenContext.pressMenuItem(
+            path: entry, in: snapshot, binding: .focusedWindow)
+        actionUISnapshot = nil
+        ActionMenuBarCache.shared.invalidate(pid: Int(app.processIdentifier))
+        if result == .failed {
+            menuCommandFailure =
+                "The menu command was not accepted. It was not retried."
+        }
+        guard result == .pressed else { return false }
+        clearActionTextState()
+        return true
+    }
+
+    func findUI(text: String, expecting bundleID: String?) -> Bool {
+        guard Permissions.accessibilityGranted,
+              let snapshot = actionUISnapshot,
+              snapshot.observation.source == .native,
+              let query = ActionFindPolicy.cleanedQuery(text),
+              let app = onMain({ NSWorkspace.shared.frontmostApplication }),
+              app.processIdentifier == actionUISnapshotPID,
+              app.bundleIdentifier == snapshot.observation.bundleID,
+              expectedBundle(bundleID, matches: snapshot.observation.bundleID)
+        else { return false }
+        findQuery = FindQuery(
+            text: query, pid: app.processIdentifier,
+            window: snapshot.focusedWindow)
+        return true
     }
 
     func verifyElement(index: Int, snapshotID: String, label: String,
