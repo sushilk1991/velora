@@ -29,6 +29,14 @@ DSYM="build/Velora.app.dSYM"
 DSYM_ZIP="build/Velora-$VERSION.dSYM.zip"
 PENDING_DSYM_ZIP="build/.Velora-$VERSION.dSYM.pending.zip"
 STAGING="build/dmg-staging"
+# Refuse before any cleanup can run: a published DMG may sit beside the
+# pending symbols an interrupted run left for a manual rename.
+for artifact in "$DMG" "$DSYM_ZIP"; do
+  if [[ -e "$artifact" ]]; then
+    echo "ERROR: refusing to overwrite existing release artifact $artifact" >&2
+    exit 1
+  fi
+done
 PUBLISHED=0
 cleanup() {
   rm -rf "$STAGING"
@@ -38,12 +46,6 @@ trap cleanup EXIT
 
 rm -rf "$STAGING"
 rm -f "$PENDING_DMG" "$PENDING_DSYM_ZIP"
-for artifact in "$DMG" "$DSYM_ZIP"; do
-  if [[ -e "$artifact" ]]; then
-    echo "ERROR: refusing to overwrite existing release artifact $artifact" >&2
-    exit 1
-  fi
-done
 mkdir -p "$STAGING"
 cp -R "$APP" "$STAGING/"
 ln -s /Applications "$STAGING/Applications"
