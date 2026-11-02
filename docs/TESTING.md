@@ -18,6 +18,15 @@ does not replace real permission, audio-route, insertion, or signed-app checks.
 `make test` runs the first-line Mac, engine, site, and release-script gates
 without requiring Xcode or macOS privacy grants.
 
+The self-test harness (`Sources/Velora/Selftest`: `--selftest`,
+`--action-probe`, the snapshot flags) exists in checkout builds only:
+`.build/*/Velora` and a local `./scripts/make-app.sh` bundle, which is where
+permission-gated self-tests run. The DMG build compiles it out
+(`VELORA_DISTRIBUTION`) and strips the executable, so the shipped binary is
+not the one `--selftest` ran. It is built from the same sources with the same
+release flags, minus the harness, and `verify-dmg.sh` checks the shipped
+bytes with CLI, MCP, and engine-bootstrap smoke tests.
+
 ## Hardware and permission gates
 
 Run these when capture, permissions, hotkeys, insertion, meetings, packaging,
@@ -40,7 +49,7 @@ or updates change:
 | Normal text field with a non-text clipboard item | Text lands once and the original clipboard is restored |
 | Proofread a selection in TextEdit, Notes, a Chrome textarea, Gmail compose, Slack, and VS Code | The selection is replaced in place and the HUD shows struck and inserted words; in Terminal or on a static webpage nothing is pasted and the HUD says the text is on the clipboard; a click or key press before the result lands leaves it on the clipboard |
 | Quit during dictation or meeting capture | Capture stops, media state is restored, and recoverable meeting audio is finalized or retained |
-| Signed release DMG | Signature, notarization, staple, Gatekeeper, bundle identity, and packaged engine/CLI/MCP runtime checks all pass |
+| Signed release DMG | Signature, notarization, staple, Gatekeeper, bundle identity, stripped harness-free executable, and packaged engine/CLI/MCP runtime checks all pass |
 | Software update window | Full release-note structure is readable; closing a manual changelog changes nothing; closing an automatic prompt defers only that version; one Install click downloads, verifies, replaces a disposable app copy, and relaunches that copy; a local-feed E2E leaves the real Skip/Later/check preferences unchanged |
 
 ## Stop-to-delivery timing

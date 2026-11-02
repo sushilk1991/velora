@@ -4,17 +4,32 @@ import AppKit
 // AppKit lifecycle (menubar accessory app); SwiftUI hosted where it shines
 // (HUD, settings, onboarding). See docs/ARCHITECTURE.md.
 
+// The DMG build (make-app.sh with VELORA_DISTRIBUTION=1) compiles out the
+// test harness in Sources/Velora/Selftest. Its flags exit with usage there
+// rather than falling through to launch the app.
+#if VELORA_DISTRIBUTION
+func exitHarnessUnavailable(_ flag: String) -> Never {
+    FileHandle.standardError.write(Data(
+        "Velora: \(flag) is not in distribution builds; run it from .build/release/Velora or a make-app.sh build/Velora.app\n".utf8))
+    exit(EX_USAGE)
+}
+#endif
+
 // Headless test mode: CommandLineTools ships neither XCTest nor swift-testing,
 // so the pure-logic tests are compiled in and run with
 // `.build/release/Velora --selftest` (exits non-zero on failure). Runs in
 // the snapshot harnesses' scratch home and defaults suite, debug and release
-// alike: tests that write AppConfig.shared (the pill's visibility) must never
-// reach the owner's settings.json, even when a run is killed mid-test. The
-// gate re-execs in place, so the launched pid is the run: its signals and
-// exit status are the tests'.
+// alike (every build but the DMG): tests that write AppConfig.shared (the
+// pill's visibility) must never reach the owner's settings.json, even when a
+// run is killed mid-test. The gate re-execs in place, so the launched pid is
+// the run: its signals and exit status are the tests'.
 if CommandLine.arguments.contains("--selftest") {
+    #if VELORA_DISTRIBUTION
+    exitHarnessUnavailable("--selftest")
+    #else
     WindowSnapshot.enterScratchHome(label: "selftest")
     exit(Selftest.run())
+    #endif
 }
 
 // Real-window design QA: shows the shell windows, onboarding and the pill on
@@ -24,7 +39,7 @@ if CommandLine.arguments.contains("--selftest") {
 // build refuses the flag rather than launching the app on the user's data.
 // See WindowSnapshot.
 if let windowSnapshotIndex = CommandLine.arguments.firstIndex(of: "--window-snapshot") {
-    #if DEBUG
+    #if DEBUG && !VELORA_DISTRIBUTION
     guard CommandLine.arguments.count > windowSnapshotIndex + 1 else {
         print("usage: Velora --window-snapshot <output-dir>")
         exit(EX_USAGE)
@@ -44,7 +59,7 @@ if let windowSnapshotIndex = CommandLine.arguments.firstIndex(of: "--window-snap
 // touch preferences. A release build refuses the flag rather than launching
 // the app on the user's data. See SnapshotRenderer.
 if let snapshotIndex = CommandLine.arguments.firstIndex(of: "--snapshot") {
-    #if DEBUG
+    #if DEBUG && !VELORA_DISTRIBUTION
     guard CommandLine.arguments.count > snapshotIndex + 1 else {
         print("usage: Velora --snapshot <output-dir>")
         exit(EX_USAGE)
@@ -85,10 +100,16 @@ if let streamIndex = CommandLine.arguments.firstIndex(of: "--stream-e2e") {
 // Read-only Accessibility survey of the running apps for Action Mode design
 // (tree sizes, settable attributes, background menu bars). Launch through
 // `open -n` so the bundle's own Accessibility grant applies. See ActionAXProbe.
+#if VELORA_DISTRIBUTION
+if CommandLine.arguments.contains("--action-probe") {
+    exitHarnessUnavailable("--action-probe")
+}
+#else
 if let probeIndex = CommandLine.arguments.firstIndex(of: "--action-probe") {
     exit(ActionAXProbe.run(
         arguments: Array(CommandLine.arguments.dropFirst(probeIndex + 1))))
 }
+#endif
 
 // The app binary doubles as the bundled headless CLI through its exact
 // `Resources/bin/velora` symlink (or explicitly with --cli). Do this before

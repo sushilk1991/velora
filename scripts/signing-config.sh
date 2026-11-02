@@ -230,3 +230,25 @@ require_bundle_uv() {
     return 1
   fi
 }
+
+# The DMG's executable ships stripped (make-app.sh keeps the symbols in a
+# dSYM beside the bundle) and without the self-test harness, which
+# VELORA_DISTRIBUTION compiles out of Sources/Velora/Selftest. The `Selftest`
+# type name outlives stripping in Swift metadata, so finding it means the
+# harness shipped; test-signing-config.sh checks every Selftest/ file sits
+# behind that guard.
+validate_distribution_executable() {
+  local executable="$1"
+  local defined
+  defined="$(nm -U "$executable" 2>/dev/null)" \
+    || { signing_error "cannot read the symbol table of $executable"; return 1; }
+  # nm prints local (non-external) symbols with a lowercase type letter.
+  if awk '$2 ~ /^[a-z]$/ { found = 1 } END { exit !found }' <<< "$defined"; then
+    signing_error "distribution executable is not stripped (local symbols remain): $executable"
+    return 1
+  fi
+  if LC_ALL=C grep -aqF 'Selftest' "$executable"; then
+    signing_error "distribution executable contains the self-test harness: $executable"
+    return 1
+  fi
+}

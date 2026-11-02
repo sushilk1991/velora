@@ -21,7 +21,7 @@ Mic, Accessibility, and Input Monitoring attach to `build/Velora.app`, not `.bui
 - Package without shipping a version: `./scripts/make-app.sh release none`. `make app` bumps `VERSION` (patch default). Never reuse a shipped version; bump levels are in `scripts/bump-version.sh`.
 - Ship a built-in mode change to existing installs: add the old parsed JSON to `_BUILTIN_MODE_SUPERSEDED` and bump `_BUILTIN_MODES_REV` in `engine/src/velora_engine/config.py`. Files under `engine/src/velora_engine/modes_builtin/` do not overwrite `~/.velora/modes/`.
 - Keep dictation STT/cleanup on-device (`docs/SPEC.md`). Engine tests that construct STT set `VELORA_FAKE_STT=1` (`engine/tests/conftest.py`).
-- Put Mac logic tests in `Sources/Velora/Selftest/Selftest.swift` and run them with `--selftest`.
+- Put Mac logic tests in `Sources/Velora/Selftest/Selftest.swift` and run them with `--selftest`. The DMG build compiles `Selftest/` out (`VELORA_DISTRIBUTION`), so production code must not reference it.
 - Land finished work on `main` of `sushilk1991/velora` in the same round. Unmerged branches have sat on shipped features.
 
 ## Pointers

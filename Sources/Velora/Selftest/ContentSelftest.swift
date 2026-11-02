@@ -1,3 +1,6 @@
+// Test harness: compiled out of the DMG build (VELORA_DISTRIBUTION; see
+// main.swift). Production code must not reference anything in Selftest/.
+#if !VELORA_DISTRIBUTION
 import AppKit
 import Foundation
 import SwiftUI
@@ -1570,3 +1573,4 @@ extension Selftest {
                "opening an auto-learned word asks to confirm it in Make Permanent, not promote it at once")
     }
 }
+#endif

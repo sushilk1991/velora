@@ -1,7 +1,8 @@
 #!/bin/zsh
 # Builds a distributable DMG: Developer ID-signed, hardened Velora.app inside
 # a signed, notarized, and stapled compressed UDZO image.
-# Output: build/Velora-<CFBundleShortVersionString>.dmg
+# Output: build/Velora-<CFBundleShortVersionString>.dmg, plus
+# build/Velora-<version>.dSYM.zip with the symbols of its stripped executable.
 set -euo pipefail
 cd "$(dirname "$0")/.."
 
@@ -24,20 +25,25 @@ APP="build/Velora.app"
 VERSION="$(/usr/libexec/PlistBuddy -c 'Print :CFBundleShortVersionString' "$APP/Contents/Info.plist")"
 DMG="build/Velora-$VERSION.dmg"
 PENDING_DMG="build/.Velora-$VERSION.pending.dmg"
+DSYM="build/Velora.app.dSYM"
+DSYM_ZIP="build/Velora-$VERSION.dSYM.zip"
+PENDING_DSYM_ZIP="build/.Velora-$VERSION.dSYM.pending.zip"
 STAGING="build/dmg-staging"
 PUBLISHED=0
 cleanup() {
   rm -rf "$STAGING"
-  [[ "$PUBLISHED" == "1" ]] || rm -f "$PENDING_DMG"
+  [[ "$PUBLISHED" == "1" ]] || rm -f "$PENDING_DMG" "$PENDING_DSYM_ZIP"
 }
 trap cleanup EXIT
 
 rm -rf "$STAGING"
-rm -f "$PENDING_DMG"
-if [[ -e "$DMG" ]]; then
-  echo "ERROR: refusing to overwrite existing release artifact $DMG" >&2
-  exit 1
-fi
+rm -f "$PENDING_DMG" "$PENDING_DSYM_ZIP"
+for artifact in "$DMG" "$DSYM_ZIP"; do
+  if [[ -e "$artifact" ]]; then
+    echo "ERROR: refusing to overwrite existing release artifact $artifact" >&2
+    exit 1
+  fi
+done
 mkdir -p "$STAGING"
 cp -R "$APP" "$STAGING/"
 ln -s /Applications "$STAGING/Applications"
@@ -78,6 +84,12 @@ xcrun stapler staple "$PENDING_DMG"
 xcrun stapler validate "$PENDING_DMG"
 ./scripts/verify-dmg.sh "$PENDING_DMG"
 
+# The shipped executable is stripped: a user's crash report carries only
+# addresses and this build's UUID, and this archive is what names them.
+ditto -c -k --keepParent "$DSYM" "$PENDING_DSYM_ZIP"
+
+mv "$PENDING_DSYM_ZIP" "$DSYM_ZIP"
 mv "$PENDING_DMG" "$DMG"
 PUBLISHED=1
 echo "OK: $DMG"
+echo "OK: $DSYM_ZIP (keep it with the release; see docs/RELEASING.md)"

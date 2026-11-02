@@ -95,6 +95,14 @@ on `main`.
    reuse it and take seconds. The script refuses to overwrite an existing DMG:
    **a version never ships twice** — if the artifact is wrong, bump again.
 
+   Next to it, `build/Velora-X.Y.Z.dSYM.zip` holds the symbols of that DMG's
+   executable, which ships stripped. Archive it outside `build/` (`make clean`
+   deletes `build/`). A user's crash report shows only addresses and the
+   binary's UUID, and only this dSYM turns them into function names and
+   lines: unzip it, then run
+   `atos -o Velora.app.dSYM -arch arm64 -l <load address> <address>…` with the
+   `Velora` image's load address and frame addresses from the report.
+
    `make-app.sh` stamps `Resources/Info.plist` at build time with VERSION and
    a `CFBundleVersion` of `git rev-list --count HEAD`. The stamp left in the
    working tree is a build artifact: the committed plist is not authoritative
@@ -155,6 +163,10 @@ on `main`.
   *after* the GitHub release, with the sha256 of the exact shipped DMG.
 - `make-dmg.sh` fails closed at every stage (identity, profile, notarization,
   verification) rather than producing a DMG that downloaded users cannot open.
+- The DMG's executable is stripped and compiled without the self-test
+  harness (`VELORA_DISTRIBUTION` leaves out `Sources/Velora/Selftest`);
+  `verify-dmg.sh` checks both. Run `--selftest` from a checkout build. The
+  dSYM archive is the only copy of the shipped binary's symbols.
 - `scripts/test-publish-release.sh` (part of `make test`) pins the publish
   script's preconditions and plan so this document and the automation cannot
   silently drift apart.
