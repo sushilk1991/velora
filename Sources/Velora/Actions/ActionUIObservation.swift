@@ -65,6 +65,11 @@ struct ActionUIElement: Equatable {
     let selected: Bool
     let focused: Bool
     let inWebContent: Bool
+    /// Native-only semantic state. `settable` lists only target states the
+    /// element can be put into NOW, never its current state.
+    let toggle: ActionToggleState?
+    let expanded: Bool?
+    let settable: [ActionUISetState]
 
     init(
         index: Int,
@@ -77,7 +82,10 @@ struct ActionUIElement: Equatable {
         enabled: Bool = true,
         selected: Bool = false,
         focused: Bool = false,
-        inWebContent: Bool = false
+        inWebContent: Bool = false,
+        toggle: ActionToggleState? = nil,
+        expanded: Bool? = nil,
+        settable: [ActionUISetState] = []
     ) {
         self.index = index
         self.parentIndex = parentIndex
@@ -90,6 +98,24 @@ struct ActionUIElement: Equatable {
         self.selected = selected
         self.focused = focused
         self.inWebContent = inWebContent
+        self.toggle = toggle
+        self.expanded = expanded
+        self.settable = settable
+    }
+
+    /// The same record with a different capability list (background hosts
+    /// strip AXFocus) or a different settable list (container selection is
+    /// known only after the walk).
+    func replacing(
+        actions: [String]? = nil, settable: [ActionUISetState]? = nil
+    ) -> ActionUIElement {
+        ActionUIElement(
+            index: index, parentIndex: parentIndex, depth: depth,
+            role: role, label: label, frame: frame,
+            actions: actions ?? self.actions, enabled: enabled,
+            selected: selected, focused: focused,
+            inWebContent: inWebContent, toggle: toggle,
+            expanded: expanded, settable: settable ?? self.settable)
     }
 
     var payload: [String: Any] {
@@ -117,6 +143,9 @@ struct ActionUIElement: Equatable {
         if selected { out["selected"] = true }
         if focused { out["focused"] = true }
         if inWebContent { out["in_web_content"] = true }
+        if let toggle { out["toggle"] = toggle.rawValue }
+        if let expanded { out["expanded"] = expanded }
+        if !settable.isEmpty { out["set"] = settable.map(\.rawValue) }
         return out
     }
 }
@@ -232,12 +261,18 @@ struct ActionUISnapshot: Equatable {
     let complete: Bool
     let elements: [ActionUIElement]
     let capabilities: [ActionNativeCapability]
+    /// Present only on find-scoped trees, which grant navigation only.
+    let scope: ActionUIScope?
+    /// The target app's bounded menu bar (native snapshots only).
+    let menuBar: ActionMenuBar?
 
     init(id: String, source: ActionUISnapshotSource = .native,
          appName: String, bundleID: String,
          windowTitle: String, windowID: Int? = nil, complete: Bool,
          elements: [ActionUIElement],
-         capabilities: [ActionNativeCapability] = []) {
+         capabilities: [ActionNativeCapability] = [],
+         scope: ActionUIScope? = nil,
+         menuBar: ActionMenuBar? = nil) {
         self.id = id
         self.source = source
         self.appName = appName
@@ -247,7 +282,11 @@ struct ActionUISnapshot: Equatable {
         self.complete = complete
         self.elements = elements
         self.capabilities = capabilities
+        self.scope = scope
+        self.menuBar = menuBar
     }
+
+    var isFindScoped: Bool { scope?.isFind == true }
 
     var payload: [String: Any] {
         var out: [String: Any] = [
@@ -263,6 +302,8 @@ struct ActionUISnapshot: Equatable {
             out["capabilities"] = capabilities.map(\.payload)
         }
         if let windowID { out["window_id"] = windowID }
+        if let scope { out["scope"] = scope.payload }
+        if let menuBar { out["menu_bar"] = menuBar.payload }
         return out
     }
 
@@ -272,7 +313,16 @@ struct ActionUISnapshot: Equatable {
         ActionUISnapshot(
             id: id, source: source, appName: appName, bundleID: bundleID,
             windowTitle: windowTitle, windowID: windowID, complete: complete,
-            elements: elements, capabilities: values)
+            elements: elements, capabilities: values, scope: scope,
+            menuBar: menuBar)
+    }
+
+    func withMenuBar(_ value: ActionMenuBar?) -> ActionUISnapshot {
+        ActionUISnapshot(
+            id: id, source: source, appName: appName, bundleID: bundleID,
+            windowTitle: windowTitle, windowID: windowID, complete: complete,
+            elements: elements, capabilities: capabilities, scope: scope,
+            menuBar: value)
     }
 }
 
@@ -302,5 +352,14 @@ struct ScreenActionUISnapshot {
         self.elementsByIndex = elementsByIndex
         self.pressReadbacks = pressReadbacks
         self.writeBaselines = writeBaselines
+    }
+
+    /// Same retained capabilities, different serializable observation
+    /// (menu bar attached after the walk).
+    func replacingObservation(_ value: ActionUISnapshot) -> ScreenActionUISnapshot {
+        ScreenActionUISnapshot(
+            observation: value, applicationElement: applicationElement,
+            focusedWindow: focusedWindow, elementsByIndex: elementsByIndex,
+            pressReadbacks: pressReadbacks, writeBaselines: writeBaselines)
     }
 }

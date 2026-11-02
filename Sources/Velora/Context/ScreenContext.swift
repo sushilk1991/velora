@@ -270,6 +270,7 @@ enum ScreenContext {
     private enum BackgroundElementUse {
         case press
         case readback
+        case set(ActionUISetState)
     }
 
     private enum BackgroundTitleMatch {
@@ -648,6 +649,31 @@ enum ScreenContext {
             }
         }
 
+        return finishActionSnapshot(
+            records: records, references: references,
+            appName: app.localizedName ?? "",
+            bundleID: app.bundleIdentifier ?? "",
+            appElement: appElement, window: window,
+            windowID: windowID, windowTitle: windowTitle,
+            complete: !truncated && queue.isEmpty, scope: nil)
+    }
+
+    /// Shared tail of the full-window and find-scoped walks: row selection
+    /// through a list container (known only once the parent chain exists),
+    /// background press readbacks and write baselines, and the observation.
+    private static func finishActionSnapshot(
+        records walked: [ActionUIElement],
+        references: [Int: AXUIElement],
+        appName: String,
+        bundleID: String,
+        appElement: AXUIElement,
+        window: AXUIElement,
+        windowID: Int?,
+        windowTitle: String,
+        complete: Bool,
+        scope: ActionUIScope?
+    ) -> ScreenActionUISnapshot {
+        var records = containerSelectableRows(walked, references: references)
         var pressReadbacks: [Int: ScreenAXReadback] = [:]
         var writeBaselines: [Int: String] = [:]
         if windowID != nil {
@@ -655,7 +681,10 @@ enum ScreenContext {
                 guard let element = references[record.index] else {
                     return record
                 }
-                if isEditableActionRole(record.role), record.enabled,
+                // A find-scoped tree never authorizes text, so it never
+                // reads an editable's value either.
+                if scope == nil,
+                   isEditableActionRole(record.role), record.enabled,
                    !record.inWebContent,
                    axAttributeIsSettable(element, kAXValueAttribute),
                    let value = axRawString(element, kAXValueAttribute) {
@@ -669,25 +698,19 @@ enum ScreenContext {
                 guard actions != record.actions else {
                     return record
                 }
-                return ActionUIElement(
-                    index: record.index, parentIndex: record.parentIndex,
-                    depth: record.depth, role: record.role,
-                    label: record.label, frame: record.frame,
-                    actions: actions,
-                    enabled: record.enabled, selected: record.selected,
-                    focused: record.focused,
-                    inWebContent: record.inWebContent)
+                return record.replacing(actions: actions)
             }
         }
 
         let observation = ActionUISnapshot(
             id: UUID().uuidString,
-            appName: app.localizedName ?? "",
-            bundleID: app.bundleIdentifier ?? "",
+            appName: appName,
+            bundleID: bundleID,
             windowTitle: String(windowTitle.prefix(180)),
             windowID: windowID,
-            complete: !truncated && queue.isEmpty,
-            elements: records)
+            complete: complete,
+            elements: records,
+            scope: scope)
         return ScreenActionUISnapshot(
             observation: observation,
             applicationElement: appElement,
@@ -695,6 +718,41 @@ enum ScreenContext {
             elementsByIndex: references,
             pressReadbacks: pressReadbacks,
             writeBaselines: writeBaselines)
+    }
+
+    /// `selected` for an unselected labelled AXRow whose own AXSelected is
+    /// read-only but whose nearest AXTable/AXOutline/AXList ancestor (≤3
+    /// levels) has a settable AXSelectedRows. One settable read per container.
+    private static func containerSelectableRows(
+        _ records: [ActionUIElement],
+        references: [Int: AXUIElement]
+    ) -> [ActionUIElement] {
+        let byIndex = Dictionary(
+            records.map { ($0.index, $0) }, uniquingKeysWith: { first, _ in first })
+        var settableContainers: [Int: Bool] = [:]
+        return records.map { record in
+            guard record.role == "AXRow", record.label != nil,
+                  !record.selected, !record.settable.contains(.selected)
+            else { return record }
+            var parent = record.parentIndex
+            for _ in 0..<ActionUISetPolicy.containerAncestorLevels {
+                guard let index = parent, let ancestor = byIndex[index] else {
+                    break
+                }
+                if ActionUISetPolicy.selectionContainerRoles.contains(ancestor.role) {
+                    let settable = settableContainers[index]
+                        ?? references[index].map {
+                            axAttributeIsSettable($0, kAXSelectedRowsAttribute)
+                        } ?? false
+                    settableContainers[index] = settable
+                    guard settable else { return record }
+                    return record.replacing(settable: ActionUISetState.ordered(
+                        Set(record.settable).union([.selected])))
+                }
+                parent = ancestor.parentIndex
+            }
+            return record
+        }
     }
 
     private static func backgroundElement(
@@ -718,22 +776,24 @@ enum ScreenContext {
               AXUIElementGetPid(element, &elementPID) == .success,
               appPID > 0, appPID == elementPID
         else { return nil }
-        let authored = [
-            axString(element, kAXTitleAttribute),
-            axString(element, kAXDescriptionAttribute),
-            axString(element, kAXPlaceholderValueAttribute),
-        ].compactMap { $0 }
         let actions = modelActionNames(from: axActionNames(element))
-        let label = actionUILabel(
-            role: record.role, authored: authored, actions: actions)
+        let label = actionElementLabel(
+            element, role: record.role, actions: actions)
         guard AppMatcher.normalize(label ?? "")
                 == AppMatcher.normalize(record.label ?? "")
         else { return nil }
-        if case .press = use {
+        switch use {
+        case .press:
             guard let label = record.label, !label.isEmpty,
                   actions.contains(kAXPressAction as String),
                   !ActionPlan.pressLabelIsCommitting(label)
             else { return nil }
+        case .set(let state):
+            guard let label = record.label, !label.isEmpty,
+                  !ActionPlan.setLabelIsCommitting(label, state: state)
+            else { return nil }
+        case .readback:
+            break
         }
         return (record, element)
     }
@@ -916,13 +976,6 @@ enum ScreenContext {
         focused: Bool
     ) -> ActionUIElement {
         let role = axString(element, kAXRoleAttribute) ?? "AXUnknown"
-        let authored = [
-            axString(element, kAXTitleAttribute),
-            axString(element, kAXDescriptionAttribute),
-            axString(element, kAXPlaceholderValueAttribute),
-        ]
-            .compactMap { $0?.trimmingCharacters(in: .whitespacesAndNewlines) }
-            .filter { !$0.isEmpty }
         var rawActions = axActionNames(element)
         if isEditableActionRole(role) {
             var settable = DarwinBoolean(false)
@@ -933,14 +986,154 @@ enum ScreenContext {
             }
         }
         let actions = modelActionNames(from: rawActions)
-        let label = actionUILabel(
-            role: role, authored: authored, actions: actions)
+        let label = actionElementLabel(element, role: role, actions: actions)
         let selected = label != nil
             && axBool(element, kAXSelectedAttribute) == true
+        // Semantic state is read only for labelled elements of the few roles
+        // that carry it: a set_ui target needs a label, and every other node
+        // keeps the walk's existing cost.
+        let semantic = label == nil
+            ? SemanticState()
+            : semanticState(
+                element, role: role, actions: actions, selected: selected)
         return ActionUIElement(
             index: index, parentIndex: parentIndex, depth: depth,
             role: role, label: label, frame: axFrame(element),
-            actions: actions, selected: selected, focused: focused)
+            actions: actions, selected: selected, focused: focused,
+            toggle: semantic.toggle, expanded: semantic.expanded,
+            settable: ActionUISetState.ordered(semantic.settable))
+    }
+
+    private struct SemanticState {
+        var toggle: ActionToggleState?
+        var expanded: Bool?
+        var settable: Set<ActionUISetState> = []
+    }
+
+    /// Toggle value, disclosure, and the target states reachable now, for
+    /// AXCheckBox, AXRow, and AXDisclosureTriangle only. Container-granted
+    /// row selection is added after the walk (`containerSelectableRows`).
+    private static func semanticState(
+        _ element: AXUIElement, role: String, actions: [String],
+        selected: Bool
+    ) -> SemanticState {
+        var state = SemanticState()
+        let hasPress = actions.contains(kAXPressAction as String)
+        switch role {
+        case "AXCheckBox":
+            guard hasPress,
+                  let value = axNumber(element, kAXValueAttribute),
+                  let toggle = ActionToggleState(axValue: value)
+            else { break }
+            state.toggle = toggle
+            state.settable = ActionUISetPolicy.toggleTargets(
+                toggle, hasPress: hasPress)
+        case "AXRow":
+            let ownSelectable = !selected
+                && axAttributeIsSettable(element, kAXSelectedAttribute)
+            state.settable = ActionUISetPolicy.selectionTargets(
+                role: role, selected: selected,
+                ownSelectable: ownSelectable, containerSelectable: false)
+            if let disclosing = axBool(element, kAXDisclosingAttribute) {
+                let changeable = axAttributeIsSettable(
+                    element, kAXDisclosingAttribute)
+                // A leaf row reports AXDisclosing=false; only an expandable
+                // (or expanded) row has a disclosure state worth showing.
+                if disclosing || changeable {
+                    state.expanded = disclosing
+                    state.settable.formUnion(ActionUISetPolicy.disclosureTargets(
+                        expanded: disclosing, changeable: changeable))
+                }
+            }
+        case "AXDisclosureTriangle":
+            guard let value = axNumber(element, kAXValueAttribute),
+                  value == 0 || value == 1 else { break }
+            state.expanded = value == 1
+            state.settable = ActionUISetPolicy.disclosureTargets(
+                expanded: value == 1, changeable: hasPress)
+        default:
+            break
+        }
+        return state
+    }
+
+    /// The ONE label function for capture and every execution-time recheck.
+    /// Authored title/description/placeholder first (passive prose filtered
+    /// by `actionUILabel`). Only when nothing is authored: an AXRow borrows
+    /// the first short name in its subtree, and a checkbox/slider/pop-up
+    /// borrows its AXTitleUIElement's name. AXValue of an editable role is
+    /// never read here.
+    static func actionElementLabel(
+        _ element: AXUIElement, role: String, actions: [String]
+    ) -> String? {
+        let authored = [
+            axString(element, kAXTitleAttribute),
+            axString(element, kAXDescriptionAttribute),
+            axString(element, kAXPlaceholderValueAttribute),
+        ].compactMap { $0 }
+        // An empty AXTitle is not an authored name: rows often report "".
+        if authored.contains(where: {
+            !$0.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+        }) {
+            return actionUILabel(role: role, authored: authored, actions: actions)
+        }
+        let derived: String?
+        if role == "AXRow" {
+            derived = derivedRowLabel(element)
+        } else if ActionDerivedLabelPolicy.titleElementRoles.contains(role) {
+            derived = titleElementLabel(element)
+        } else {
+            derived = nil
+        }
+        guard let derived else { return nil }
+        return actionUILabel(role: role, authored: [derived], actions: actions)
+    }
+
+    /// First short name in a row's subtree (BFS, ≤4 levels, ≤16 nodes): an
+    /// authored title/description, or a non-editable AXStaticText's value.
+    private static func derivedRowLabel(_ row: AXUIElement) -> String? {
+        var queue: [(element: AXUIElement, level: Int)] =
+            (axChildren(row) ?? []).map { ($0, 1) }
+        var head = 0
+        while head < queue.count, head < ActionDerivedLabelPolicy.rowNodes {
+            let (node, level) = queue[head]
+            head += 1
+            let values = axValues(node, [
+                kAXRoleAttribute, kAXTitleAttribute,
+                kAXDescriptionAttribute, kAXChildrenAttribute,
+            ])
+            for candidate in [values[1] as? String, values[2] as? String] {
+                if let candidate,
+                   ActionDerivedLabelPolicy.isShortName(candidate) {
+                    return candidate.trimmingCharacters(
+                        in: .whitespacesAndNewlines)
+                }
+            }
+            if values[0] as? String == kAXStaticTextRole as String,
+               let value = axString(node, kAXValueAttribute),
+               ActionDerivedLabelPolicy.isShortName(value) {
+                return value
+            }
+            if level < ActionDerivedLabelPolicy.rowLevels,
+               let children = values[3] as? [AXUIElement] {
+                queue.append(contentsOf: children.map { ($0, level + 1) })
+            }
+        }
+        return nil
+    }
+
+    /// The AXTitleUIElement's title, or its value when it is static text.
+    private static func titleElementLabel(_ element: AXUIElement) -> String? {
+        guard let title = axElement(element, kAXTitleUIElementAttribute) else {
+            return nil
+        }
+        if let text = axString(title, kAXTitleAttribute),
+           !text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+            return text
+        }
+        guard axString(title, kAXRoleAttribute) == kAXStaticTextRole as String
+        else { return nil }
+        return axString(title, kAXValueAttribute)
     }
 
     /// Keeps affirmative focus evidence inside the model cap. A late focused
@@ -1020,11 +1213,6 @@ enum ScreenContext {
         else { return false }
         let role = axString(element, kAXRoleAttribute) ?? "AXUnknown"
         guard role == record.role else { return false }
-        let authored = [
-            axString(element, kAXTitleAttribute),
-            axString(element, kAXDescriptionAttribute),
-            axString(element, kAXPlaceholderValueAttribute),
-        ].compactMap { $0 }
         var rawActions = axActionNames(element)
         if isEditableActionRole(role) {
             var settable = DarwinBoolean(false)
@@ -1035,8 +1223,8 @@ enum ScreenContext {
             }
         }
         let currentActions = modelActionNames(from: rawActions)
-        let currentLabel = actionUILabel(
-            role: role, authored: authored, actions: currentActions)
+        let currentLabel = actionElementLabel(
+            element, role: role, actions: currentActions)
         guard AppMatcher.normalize(currentLabel ?? "")
                 == AppMatcher.normalize(record.label ?? "") else { return false }
         guard isEditableActionRole(record.role) else {
@@ -1080,6 +1268,7 @@ enum ScreenContext {
         switch purpose {
         case .target:
             guard snapshot.observation.source == .native,
+                  !snapshot.observation.isFindScoped,
                   !snapshot.observation.bundleID.isEmpty,
                   !snapshot.observation.windowTitle.isEmpty
                     || snapshot.observation.windowID != nil,
@@ -1089,18 +1278,14 @@ enum ScreenContext {
                   CFEqual(focused, element) else { return false }
         case .goal:
             guard snapshot.observation.complete,
+                  !snapshot.observation.isFindScoped,
                   let currentElements = currentGoalElements(in: snapshot),
                   ActionUIEvidencePolicy.mayVerifyGoal(
                     index: index, source: .native, in: currentElements)
             else { return false }
         }
-        let authored = [
-            axString(element, kAXTitleAttribute),
-            axString(element, kAXDescriptionAttribute),
-            axString(element, kAXPlaceholderValueAttribute),
-        ].compactMap { $0 }
-        let currentLabel = actionUILabel(
-            role: role, authored: authored,
+        let currentLabel = actionElementLabel(
+            element, role: role,
             actions: modelActionNames(from: axActionNames(element)))
         guard AppMatcher.normalize(currentLabel ?? "")
                 == AppMatcher.normalize(label) else { return false }
@@ -1138,6 +1323,571 @@ enum ScreenContext {
             return false
         }
         return CFEqual(current, snapshot.focusedWindow)
+    }
+
+    // MARK: - Semantic actions (set_ui, find_ui, menu_item)
+
+    /// Several attributes in one IPC round trip. Missing attributes are nil.
+    private static func axValues(
+        _ element: AXUIElement, _ attributes: [String]
+    ) -> [AnyObject?] {
+        AXUIElementSetMessagingTimeout(element, axTimeout)
+        var ref: CFArray?
+        guard AXUIElementCopyMultipleAttributeValues(
+                element, attributes as CFArray,
+                AXCopyMultipleAttributeOptions(rawValue: 0), &ref) == .success,
+              let values = ref as? [AnyObject],
+              values.count == attributes.count
+        else { return Array(repeating: nil, count: attributes.count) }
+        return values.map { value in
+            if CFGetTypeID(value) == AXValueGetTypeID(),
+               AXValueGetType(value as! AXValue) == .axError {  // type checked
+                return nil
+            }
+            return value
+        }
+    }
+
+    /// Foreground `set_ui`: the exact retained element of the current
+    /// focused window, re-identified, then driven and proven by readback.
+    static func setActionElement(
+        index: Int, state: ActionUISetState,
+        in snapshot: ScreenActionUISnapshot
+    ) -> ActionUISetResult {
+        guard snapshot.observation.complete,
+              focusedWindowIsCurrent(snapshot),
+              let record = snapshot.observation.elements.first(where: {
+                  $0.index == index
+              }),
+              record.settable.contains(state),
+              let label = record.label, !label.isEmpty,
+              !ActionPlan.setLabelIsCommitting(label, state: state),
+              let element = snapshot.elementsByIndex[index],
+              axString(element, kAXRoleAttribute) == record.role,
+              axBool(element, kAXEnabledAttribute) != false
+        else { return .stale }
+        let current = actionElementLabel(
+            element, role: record.role,
+            actions: modelActionNames(from: axActionNames(element)))
+        guard AppMatcher.normalize(current ?? "") == AppMatcher.normalize(label)
+        else { return .stale }
+        return applySet(element, role: record.role, state: state) { element }
+    }
+
+    /// Background `set_ui` on the exact routed window: the same identity
+    /// recheck as the background press, then a readback through a fresh
+    /// identity check on every poll.
+    static func backgroundSet(
+        index: Int, state: ActionUISetState,
+        in snapshot: ScreenActionUISnapshot
+    ) -> ActionUISetResult {
+        guard snapshot.observation.complete,
+              let (record, element) = backgroundElement(
+                index: index, in: snapshot, use: .set(state)),
+              record.settable.contains(state)
+        else { return .stale }
+        return applySet(element, role: record.role, state: state) {
+            backgroundElement(index: index, in: snapshot, use: .readback)?.1
+        }
+    }
+
+    /// Idempotent: a control already in the target state is success without
+    /// acting. Otherwise one action, then ≤5 readbacks 50 ms apart.
+    private static func applySet(
+        _ element: AXUIElement, role: String, state: ActionUISetState,
+        current: () -> AXUIElement?
+    ) -> ActionUISetResult {
+        func settle(_ attempted: AXError, _ holds: () -> Bool) -> ActionUISetResult {
+            for attempt in 0..<ActionUISetPolicy.readbackAttempts {
+                if holds() { return .verified }
+                if attempt + 1 < ActionUISetPolicy.readbackAttempts {
+                    Thread.sleep(forTimeInterval: ActionUISetPolicy.readbackInterval)
+                }
+            }
+            // An AX refusal that changed nothing asks for a fresh turn; an
+            // accepted (or ambiguous) action that did not land is final.
+            switch attempted {
+            case .success, .cannotComplete: return .unverified
+            default: return .stale
+            }
+        }
+
+        switch state {
+        case .on, .off:
+            let target: Double = state == .on ? 1 : 0
+            guard role == "AXCheckBox",
+                  let before = axNumber(element, kAXValueAttribute),
+                  ActionToggleState(axValue: before) != nil
+            else { return .stale }
+            if before == target { return .verified }
+            guard axActionNames(element).contains(kAXPressAction as String)
+            else { return .stale }
+            let result = AXUIElementPerformAction(
+                element, kAXPressAction as CFString)
+            return settle(result) {
+                current().flatMap { axNumber($0, kAXValueAttribute) } == target
+            }
+
+        case .selected:
+            guard role == "AXRow" else { return .stale }
+            if axBool(element, kAXSelectedAttribute) == true { return .verified }
+            let result: AXError
+            if let container = selectionContainer(of: element) {
+                // Exclusive: the row becomes the list's only selection.
+                result = AXUIElementSetAttributeValue(
+                    container, kAXSelectedRowsAttribute as CFString,
+                    [element] as CFArray)
+            } else if axAttributeIsSettable(element, kAXSelectedAttribute) {
+                result = AXUIElementSetAttributeValue(
+                    element, kAXSelectedAttribute as CFString, kCFBooleanTrue)
+            } else {
+                return .stale
+            }
+            return settle(result) {
+                current().flatMap { axBool($0, kAXSelectedAttribute) } == true
+            }
+
+        case .expanded, .collapsed:
+            let wanted = state == .expanded
+            if role == "AXRow" {
+                guard let before = axBool(element, kAXDisclosingAttribute) else {
+                    return .stale
+                }
+                if before == wanted { return .verified }
+                guard axAttributeIsSettable(element, kAXDisclosingAttribute)
+                else { return .stale }
+                let result = AXUIElementSetAttributeValue(
+                    element, kAXDisclosingAttribute as CFString,
+                    wanted ? kCFBooleanTrue : kCFBooleanFalse)
+                return settle(result) {
+                    current().flatMap {
+                        axBool($0, kAXDisclosingAttribute)
+                    } == wanted
+                }
+            }
+            guard role == "AXDisclosureTriangle",
+                  let before = axNumber(element, kAXValueAttribute),
+                  before == 0 || before == 1 else { return .stale }
+            let target: Double = wanted ? 1 : 0
+            if before == target { return .verified }
+            guard axActionNames(element).contains(kAXPressAction as String)
+            else { return .stale }
+            let result = AXUIElementPerformAction(
+                element, kAXPressAction as CFString)
+            return settle(result) {
+                current().flatMap { axNumber($0, kAXValueAttribute) } == target
+            }
+        }
+    }
+
+    /// Nearest AXTable/AXOutline/AXList ancestor (≤3 levels) whose
+    /// AXSelectedRows is settable; nil when the nearest one is read-only.
+    private static func selectionContainer(
+        of row: AXUIElement
+    ) -> AXUIElement? {
+        var current = row
+        for _ in 0..<ActionUISetPolicy.containerAncestorLevels {
+            guard let parent = axElement(current, kAXParentAttribute) else {
+                return nil
+            }
+            if let role = axString(parent, kAXRoleAttribute),
+               ActionUISetPolicy.selectionContainerRoles.contains(role) {
+                return axAttributeIsSettable(parent, kAXSelectedRowsAttribute)
+                    ? parent : nil
+            }
+            current = parent
+        }
+        return nil
+    }
+
+    /// `find_ui`: search the whole window the full walk used (≤6000 nodes,
+    /// 2 s) for a visible name, and observe only the matches (≤30) plus
+    /// their ancestors, renumbered in walk order. The tree grants navigation
+    /// only (`scope`); matched static text is named by its own short value.
+    static func findActionUISnapshot(
+        scopedTo full: ScreenActionUISnapshot, query: String,
+        nodeBudget: Int = ActionFindPolicy.maxNodes,
+        deadline: TimeInterval = ActionFindPolicy.deadline
+    ) -> ScreenActionUISnapshot? {
+        let needle = AppMatcher.normalize(query)
+        guard !needle.isEmpty, nodeBudget > 0, deadline > 0,
+              full.observation.source == .native,
+              Permissions.accessibilityGranted else { return nil }
+        struct Node {
+            let element: AXUIElement
+            let parent: Int?
+            let depth: Int
+            let underMatch: Bool
+        }
+        let stopAt = Date().addingTimeInterval(deadline)
+        var queue: [(element: AXUIElement, parent: Int?, depth: Int)] = [
+            (full.focusedWindow, nil, 0),
+        ]
+        var head = 0
+        var nodes: [Node] = []
+        var matched = Set<Int>()
+        var matchOrder: [Int] = []
+        var staticLabels: [Int: String] = [:]
+        var visited = AXIdentityGuard()
+        var overflow = false
+
+        while head < queue.count {
+            guard Date() < stopAt, nodes.count < nodeBudget else { break }
+            let item = queue[head]
+            head += 1
+            guard visited.insert(item.element) else { continue }
+            let index = nodes.count
+            let underMatch = item.parent.map {
+                matched.contains($0) || nodes[$0].underMatch
+            } ?? false
+            nodes.append(Node(
+                element: item.element, parent: item.parent,
+                depth: item.depth, underMatch: underMatch))
+
+            let values = axValues(item.element, [
+                kAXRoleAttribute, kAXTitleAttribute, kAXDescriptionAttribute,
+                kAXPlaceholderValueAttribute, kAXChildrenAttribute,
+            ])
+            let role = values[0] as? String ?? ""
+            let authored = values[1...3].compactMap {
+                ($0 as? String)?.trimmingCharacters(in: .whitespacesAndNewlines)
+            }.filter { !$0.isEmpty }
+            var isMatch = false
+            if !authored.isEmpty {
+                let joined = authored.joined(separator: " ")
+                if ActionFindPolicy.matches(joined, query: needle) {
+                    // Long authored prose becomes no label; read actions only
+                    // for such a candidate to see whether it still names one.
+                    isMatch = ActionDerivedLabelPolicy.isShortName(joined)
+                        || actionUILabel(
+                            role: role, authored: authored,
+                            actions: modelActionNames(
+                                from: axActionNames(item.element))) != nil
+                }
+            } else if role == kAXStaticTextRole as String {
+                // Text inside an already-matched control adds nothing.
+                if !underMatch,
+                   let value = axString(item.element, kAXValueAttribute),
+                   ActionDerivedLabelPolicy.isShortName(value),
+                   ActionFindPolicy.matches(value, query: needle) {
+                    isMatch = true
+                    staticLabels[index] = value
+                }
+            } else if ActionDerivedLabelPolicy.titleElementRoles.contains(role),
+                      ActionFindPolicy.matches(
+                        titleElementLabel(item.element), query: needle) {
+                isMatch = true
+            }
+            if isMatch {
+                guard matchOrder.count < ActionFindPolicy.maxMatches else {
+                    overflow = true
+                    break
+                }
+                matched.insert(index)
+                matchOrder.append(index)
+            }
+            if let children = values[4] as? [AXUIElement], !children.isEmpty {
+                if item.depth < ActionFindPolicy.maxDepth {
+                    for child in children {
+                        queue.append((child, index, item.depth + 1))
+                    }
+                } else {
+                    // Children below the depth cap were never searched.
+                    overflow = true
+                }
+            }
+        }
+        let exhausted = head >= queue.count && !overflow
+
+        // Matches, every ancestor, and the window root. Walk order keeps
+        // ancestors before descendants, so renumbering stays a tree.
+        var included = Set<Int>([0])
+        for match in matchOrder {
+            var current: Int? = match
+            while let index = current, included.insert(index).inserted
+                || index == match {
+                current = nodes[index].parent
+            }
+        }
+        var ordered = included.sorted()
+        var truncated = false
+        if ordered.count > 500 {
+            ordered = Array(ordered.prefix(500))
+            truncated = true
+        }
+        var newIndex: [Int: Int] = [:]
+        for (position, old) in ordered.enumerated() { newIndex[old] = position }
+
+        var records: [ActionUIElement] = []
+        var references: [Int: AXUIElement] = [:]
+        for old in ordered {
+            let node = nodes[old]
+            let position = newIndex[old] ?? 0
+            var record = actionUIRecord(
+                node.element, index: position,
+                parentIndex: node.parent.flatMap { newIndex[$0] },
+                depth: node.depth, focused: false)
+            if record.label == nil, let text = staticLabels[old] {
+                record = ActionUIElement(
+                    index: record.index, parentIndex: record.parentIndex,
+                    depth: record.depth, role: record.role,
+                    label: String(text.prefix(180)), frame: record.frame,
+                    actions: record.actions, enabled: record.enabled,
+                    selected: record.selected, focused: record.focused,
+                    inWebContent: record.inWebContent)
+            }
+            records.append(record)
+            references[position] = node.element
+        }
+        let matchCount = matchOrder.filter { newIndex[$0] != nil }.count
+        return finishActionSnapshot(
+            records: records, references: references,
+            appName: full.observation.appName,
+            bundleID: full.observation.bundleID,
+            appElement: full.applicationElement, window: full.focusedWindow,
+            windowID: full.observation.windowID,
+            windowTitle: full.observation.windowTitle,
+            complete: exhausted && !truncated,
+            scope: ActionUIScope(query: query, matches: matchCount))
+    }
+
+    // MARK: Menu bar
+
+    private struct MenuItemRead {
+        let element: AXUIElement
+        /// Sanitized title in comparison form ("" for separators).
+        let normalized: String
+        /// The captured component, nil when the title fails the policy.
+        let component: String?
+        let enabled: Bool
+        let submenu: AXUIElement?
+        let cmdChar: String?
+        let virtualKey: Int?
+        let glyph: Int?
+        let modifiers: Int?
+
+        var shortcutDenied: Bool {
+            ActionMenuPolicy.shortcutIsDenied(
+                cmdChar: cmdChar, virtualKey: virtualKey,
+                glyph: glyph, modifiers: modifiers)
+        }
+        var isSettings: Bool {
+            ActionMenuPolicy.isSettingsShortcut(
+                cmdChar: cmdChar, modifiers: modifiers)
+        }
+    }
+
+    /// One batched read per item. Returns nil when the deadline cut it.
+    private static func readMenuItems(
+        _ menu: AXUIElement, until stopAt: Date
+    ) -> [MenuItemRead]? {
+        var reads: [MenuItemRead] = []
+        for item in axChildren(menu) ?? [] {
+            guard Date() < stopAt else { return nil }
+            let values = axValues(item, [
+                kAXTitleAttribute, kAXEnabledAttribute, kAXChildrenAttribute,
+                kAXMenuItemCmdCharAttribute, kAXMenuItemCmdVirtualKeyAttribute,
+                kAXMenuItemCmdGlyphAttribute, kAXMenuItemCmdModifiersAttribute,
+            ])
+            let raw = values[0] as? String ?? ""
+            let children = values[2] as? [AXUIElement] ?? []
+            let submenu = children.first {
+                axString($0, kAXRoleAttribute) == kAXMenuRole as String
+            }
+            reads.append(MenuItemRead(
+                element: item,
+                normalized: AppMatcher.normalize(ActionPlan.sanitize(raw)),
+                component: ActionMenuPolicy.capturedComponent(raw),
+                enabled: (values[1] as? NSNumber)?.boolValue != false,
+                submenu: submenu,
+                cmdChar: values[3] as? String,
+                virtualKey: (values[4] as? NSNumber)?.intValue,
+                glyph: (values[5] as? NSNumber)?.intValue,
+                modifiers: (values[6] as? NSNumber)?.intValue))
+        }
+        return reads
+    }
+
+    /// Normalized titles that occur more than once among siblings: such a
+    /// path could not resolve to exactly one item, so it is never offered.
+    private static func ambiguousTitles(_ reads: [MenuItemRead]) -> Set<String> {
+        var counts: [String: Int] = [:]
+        for read in reads where !read.normalized.isEmpty {
+            counts[read.normalized, default: 0] += 1
+        }
+        return Set(counts.filter { $0.value > 1 }.keys)
+    }
+
+    /// Bounded, read-only walk of one app's menu bar: enabled leaf items
+    /// that pass the menu policy, ≤600, ≤4 levels below the bar, 0.5 s.
+    /// Never opens a menu; reads attributes only.
+    static func actionMenuBar(
+        pid: Int, bundleID: String,
+        deadline: TimeInterval = ActionMenuPolicy.walkDeadline
+    ) -> ActionMenuBar? {
+        guard pid > 0, !bundleID.isEmpty,
+              Permissions.accessibilityGranted,
+              let app = NSRunningApplication(processIdentifier: pid_t(pid)),
+              !app.isTerminated,
+              app.bundleIdentifier?.caseInsensitiveCompare(bundleID)
+                == .orderedSame
+        else { return nil }
+        let appElement = AXUIElementCreateApplication(pid_t(pid))
+        AXUIElementSetMessagingTimeout(appElement, 0.3)
+        guard let bar = axElement(appElement, kAXMenuBarAttribute) else {
+            return nil
+        }
+        let stopAt = Date().addingTimeInterval(deadline)
+        guard let tops = readMenuItems(bar, until: stopAt) else {
+            return ActionMenuBar(complete: false, top: [], items: [])
+        }
+        let ambiguousTops = ambiguousTitles(tops)
+        var top: [String] = []
+        var items: [[String]] = []
+        var complete = true
+
+        func visit(_ menu: AXUIElement, path: [String]) {
+            guard let reads = readMenuItems(menu, until: stopAt) else {
+                complete = false
+                return
+            }
+            let ambiguous = ambiguousTitles(reads)
+            for read in reads {
+                guard complete || items.count < ActionMenuPolicy.maxItems,
+                      Date() < stopAt,
+                      items.count < ActionMenuPolicy.maxItems else {
+                    complete = false
+                    return
+                }
+                guard let title = read.component,
+                      !ambiguous.contains(read.normalized),
+                      read.enabled else { continue }
+                if let submenu = read.submenu {
+                    guard path.count + 1 < ActionMenuPolicy.maxPathComponents
+                    else {
+                        complete = false
+                        continue
+                    }
+                    visit(submenu, path: path + [title])
+                    if !complete, Date() >= stopAt { return }
+                } else if !read.shortcutDenied {
+                    items.append(path + [title])
+                }
+            }
+        }
+
+        // Item 0 is the Apple menu: never. Item 1 is the app menu: only its
+        // ⌘, leaf (Settings), and its title is listed only if that exists.
+        for (offset, read) in tops.enumerated() where offset > 0 {
+            guard let title = read.component,
+                  !ambiguousTops.contains(read.normalized) else { continue }
+            if offset == 1 {
+                guard let menu = read.submenu,
+                      let reads = readMenuItems(menu, until: stopAt) else {
+                    if Date() >= stopAt { complete = false }
+                    continue
+                }
+                let ambiguous = ambiguousTitles(reads)
+                if let settings = reads.first(where: {
+                    $0.isSettings && $0.enabled && $0.submenu == nil
+                        && $0.component != nil
+                        && !ambiguous.contains($0.normalized)
+                }), let leaf = settings.component {
+                    top.append(title)
+                    items.append([title, leaf])
+                }
+                continue
+            }
+            top.append(title)
+            if let menu = read.submenu, Date() < stopAt,
+               items.count < ActionMenuPolicy.maxItems {
+                visit(menu, path: [title])
+            } else if read.submenu != nil {
+                complete = false
+            }
+        }
+        return ActionMenuBar(complete: complete, top: top, items: items)
+    }
+
+    enum MenuPressResult: Equatable {
+        /// AXPress on the exact resolved leaf was accepted.
+        case pressed
+        /// Nothing was performed: the path, policy, or window binding failed.
+        case refused
+        /// AXPress reported an error after resolution.
+        case failed
+    }
+
+    /// Which live window must still be the snapshot's window: the focused
+    /// window for the foreground, the app's AXMainWindow for a background
+    /// target (menu commands act on the main window; never retarget).
+    enum MenuWindowBinding {
+        case focusedWindow
+        case mainWindow
+    }
+
+    /// Resolve `path` live in the snapshot's app (exactly one normalized
+    /// match per level, enabled leaf without submenu, policy re-checked) and
+    /// AXPress it, only while `binding` still names the snapshot's window.
+    static func pressMenuItem(
+        path: [String], in snapshot: ScreenActionUISnapshot,
+        binding: MenuWindowBinding
+    ) -> MenuPressResult {
+        let wanted = path.map { AppMatcher.normalize(ActionPlan.sanitize($0)) }
+        var pid = pid_t(0)
+        guard path.count >= 2,
+              path.count <= ActionMenuPolicy.maxPathComponents,
+              !wanted.contains(where: \.isEmpty),
+              !path.contains(where: ActionMenuPolicy.componentIsDenied),
+              snapshot.observation.source == .native,
+              Permissions.accessibilityGranted,
+              AXUIElementGetPid(snapshot.applicationElement, &pid) == .success,
+              pid > 0,
+              let app = NSRunningApplication(processIdentifier: pid),
+              !app.isTerminated,
+              app.bundleIdentifier?.caseInsensitiveCompare(
+                snapshot.observation.bundleID) == .orderedSame,
+              let bar = axElement(snapshot.applicationElement, kAXMenuBarAttribute)
+        else { return .refused }
+        let stopAt = Date().addingTimeInterval(2)
+        guard let tops = readMenuItems(bar, until: stopAt) else {
+            return .refused
+        }
+        let topMatches = tops.enumerated().filter {
+            $0.offset > 0 && $0.element.normalized == wanted[0]
+        }
+        guard topMatches.count == 1,
+              topMatches[0].element.component != nil,
+              var menu = topMatches[0].element.submenu else { return .refused }
+        let isAppMenu = topMatches[0].offset == 1
+        if isAppMenu, path.count != 2 { return .refused }
+
+        var leaf: MenuItemRead?
+        for level in 1..<path.count {
+            guard let reads = readMenuItems(menu, until: stopAt) else {
+                return .refused
+            }
+            let found = reads.filter { $0.normalized == wanted[level] }
+            guard found.count == 1, let item = found.first,
+                  item.component != nil, item.enabled else { return .refused }
+            if level < path.count - 1 {
+                guard let submenu = item.submenu else { return .refused }
+                menu = submenu
+            } else {
+                guard item.submenu == nil, !item.shortcutDenied,
+                      !isAppMenu || item.isSettings else { return .refused }
+                leaf = item
+            }
+        }
+        guard let leaf else { return .refused }
+        let attribute = binding == .mainWindow
+            ? kAXMainWindowAttribute : kAXFocusedWindowAttribute
+        guard let live = axElement(snapshot.applicationElement, attribute),
+              CFEqual(live, snapshot.focusedWindow)
+        else { return .refused }
+        return AXUIElementPerformAction(
+            leaf.element, kAXPressAction as CFString) == .success
+            ? .pressed : .failed
     }
 
     /// Best-effort entities for the given app. Never throws; returns [] when
@@ -1794,16 +2544,29 @@ enum ScreenContext {
     }
 
     /// The frontmost window, waking a dormant Chromium AX server if needed.
+    ///
+    /// Only an element whose role is AXWindow counts. With no window open,
+    /// some apps answer AXFocusedWindow with the application element itself
+    /// (seen live, 2026-11-02: System Settings, Herdr, Finder). Walking that
+    /// as a "window" handed the planner the app's whole menu tree as
+    /// pressable AXMenuItems, bypassing the menu_item policy entirely.
     private static func focusedOrFirstWindow(
         _ appElement: AXUIElement, pid: pid_t
     ) -> AXUIElement? {
-        if let window = axElement(appElement, kAXFocusedWindowAttribute)
-            ?? axElements(appElement, kAXWindowsAttribute).first {
-            return window
-        }
+        if let window = firstRealWindow(appElement) { return window }
         enableChromiumAccessibility(appElement, pid: pid)
-        return axElement(appElement, kAXFocusedWindowAttribute)
-            ?? axElements(appElement, kAXWindowsAttribute).first
+        return firstRealWindow(appElement)
+    }
+
+    private static func firstRealWindow(_ appElement: AXUIElement) -> AXUIElement? {
+        func isWindow(_ element: AXUIElement) -> Bool {
+            axString(element, kAXRoleAttribute) == (kAXWindowRole as String)
+        }
+        if let focused = axElement(appElement, kAXFocusedWindowAttribute),
+           isWindow(focused) {
+            return focused
+        }
+        return axElements(appElement, kAXWindowsAttribute).first(where: isWindow)
     }
 
     /// URL of the frontmost page in a browser, via Accessibility. The
@@ -2562,6 +3325,11 @@ enum ScreenContext {
               let number = ref as? NSNumber
         else { return nil }
         return number.boolValue
+    }
+
+    /// A switch's current on/off/mixed value, read live from AX.
+    static func liveToggleState(_ element: AXUIElement) -> ActionToggleState? {
+        axNumber(element, kAXValueAttribute).flatMap(ActionToggleState.init)
     }
 
     private static func axNumber(

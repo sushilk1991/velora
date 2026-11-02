@@ -82,6 +82,14 @@ if let streamIndex = CommandLine.arguments.firstIndex(of: "--stream-e2e") {
         arguments: Array(CommandLine.arguments.dropFirst(streamIndex + 1))))
 }
 
+// Read-only Accessibility survey of the running apps for Action Mode design
+// (tree sizes, settable attributes, background menu bars). Launch through
+// `open -n` so the bundle's own Accessibility grant applies. See ActionAXProbe.
+if let probeIndex = CommandLine.arguments.firstIndex(of: "--action-probe") {
+    exit(ActionAXProbe.run(
+        arguments: Array(CommandLine.arguments.dropFirst(probeIndex + 1))))
+}
+
 // The app binary doubles as the bundled headless CLI through its exact
 // `Resources/bin/velora` symlink (or explicitly with --cli). Do this before
 // NSApplication so renamed copies of the GUI binary still launch the app.

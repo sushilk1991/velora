@@ -435,6 +435,13 @@ final class ActionLoopRunner {
                     planner.end()
                     return .planned(plan)
                 }
+                // find_ui only rescopes the NEXT observation; a batch that
+                // searched has not finished anything (the engine refuses the
+                // combination; this is the app-side backstop).
+                let done = done && !plan.steps.contains {
+                    if case .findUI = $0 { return true }
+                    return false
+                }
 
                 let executor = ActionExecutor(host: host, progress: progress)
                 lock.lock()

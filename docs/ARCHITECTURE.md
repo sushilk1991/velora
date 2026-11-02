@@ -321,16 +321,44 @@ model that is still warming.
 
 **Step vocabulary** (closed by design — no shell, no scripts, no raw
 coordinates): `open_app`, `open_url`, `wait_frontmost`, `verify_context`,
-`press_ui`, `search_text`, `type_text`, `key`, `pause`; `verify_ui` is inserted
-only from reviewer evidence. `press_ui` names an exact element from the current,
-complete snapshot and is refused if the snapshot, app, role, label, or required
-capability changed: editable roles require AXFocus; other roles require AXPress.
-It also refuses labels naming committing controls (send/delete/pay/confirm/…),
-so navigation or editable focus cannot deliver. Every indexed action ends its
-batch and requires a fresh observation before continuing.
+`press_ui`, `set_ui`, `menu_item`, `find_ui`, `search_text`, `type_text`, `key`,
+`pause`; `verify_ui` is inserted only from reviewer evidence. `press_ui` names
+an exact element from the current, complete snapshot and is refused if the
+snapshot, app, role, label, or required capability changed: editable roles
+require AXFocus; other roles require AXPress, and a switch (an element with a
+`toggle` state) is never pressed blindly. It also refuses labels naming
+committing controls (send/delete/pay/confirm/…), so navigation or editable
+focus cannot deliver. Every indexed action ends its batch and requires a fresh
+observation before continuing.
 `press_element` is a
 label-addressed legacy fallback only when no structured snapshot exists. There
 is no app-to-role navigation table.
+
+The semantic verbs (contract and probe evidence:
+`docs/plans/2026-11-02-action-mode-semantic-actions.md`):
+
+- `set_ui` puts an exact element into a state Swift listed in its `set`
+  (`on`/`off`/`selected`/`expanded`/`collapsed`) and succeeds only when the
+  app reads that state back. It is idempotent, so "turn on" an on switch does
+  nothing. Native list rows usually have no AXPress but a settable
+  AXSelected, so selecting a row is how sidebars are navigated; selection and
+  disclosure carry no label denylist, while on/off keeps the press denylist
+  minus setting words (`// toggle_exempt:`).
+- `menu_item` names a menu-bar path. Swift resolves it live from the app's
+  AXMenuBar (prewarmed per pid+bundle while the user speaks) and presses the
+  leaf without opening a menu. It refuses commit or content-edit leaves:
+  the press denylist, `// menu_deny:` (paste/cut/undo/redo), and any item whose
+  shortcut is ⌘ plus Q/W/S/X/V/Z/H, Delete, Return, Enter or Escape. The
+  planner sees only menu paths the spoken command matches. The UI-action
+  reviewer is skipped only when the command is that menu command (every
+  spoken word is in the path); a press the app rejects after resolution
+  ends the action rather than being retried, since it may already have run.
+- `find_ui` re-walks the observed window for labels containing the text and
+  returns the matches with their ancestors, for windows whose tree the
+  500-node walk truncates. A find-scoped tree authorizes navigation and
+  `verify_state` only: never indexed text, `verify_ui`, or target evidence.
+  `verify_state` binds to a routed window's id, so in the foreground an
+  action that acted on a find result ends as performed but unverified.
 
 **The safety gate is implemented twice**, in `velora_engine/actions.py` and again
 in `Sources/Velora/Actions/ActionPlan.swift`. That is deliberate: the engine
@@ -409,7 +437,11 @@ driver's default target, the pid's focused element, can live in a different
 window of the same app) and counts as delivered only when the driver confirms
 by value readback, or that same element's value changes to include the
 insertion. An ambiguous window, an ambiguous element, or a truncated
-accessibility tree refuses instead of guessing. The planner, the validator,
+accessibility tree refuses instead of guessing. `set_ui` and `menu_item` take
+the same mutation lease and focus-preservation check as a press, and
+`find_ui` re-observes only the routed window. A background `menu_item` runs
+only while the routed window is its app's AXMainWindow, since a menu acts on
+the main window. The planner, the validator,
 and every budget above are unchanged: the driver is an actuator, never an
 authority. Mechanism notes, the live-verified driver behavior, and its
 security posture live in

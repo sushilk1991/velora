@@ -530,6 +530,18 @@ final class BackgroundRoutingActionHost: ActionHost {
     private let nativeValueEquals: (
         String, Int, ScreenActionUISnapshot
     ) -> Bool
+    private let nativeFind: (
+        ScreenActionUISnapshot, String
+    ) -> ScreenActionUISnapshot?
+    private let nativeSet: (
+        Int, ActionUISetState, ScreenActionUISnapshot
+    ) -> ActionUISetResult
+    private let nativeMenuPress: (
+        [String], ScreenActionUISnapshot
+    ) -> ScreenContext.MenuPressResult
+    private let nativeToggle: (Int, ScreenActionUISnapshot) -> ActionToggleState?
+    private let menuBar: (Int, String) -> ActionMenuBar?
+    private let invalidateMenuBar: (Int) -> Void
     private let restoreForeground: (
         ActionWindowIdentity, () -> Bool
     ) -> Bool
@@ -657,6 +669,14 @@ final class BackgroundRoutingActionHost: ActionHost {
         let inputGeneration: UInt64
     }
     private var routedNativeSnapshot: RoutedNativeSnapshot?
+    /// Sticky `find_ui` query for the exact routed process and window. It is
+    /// dropped with the route and whenever the routed window changes.
+    private struct RoutedFindQuery {
+        let text: String
+        let pid: Int
+        let windowID: Int
+    }
+    private var findQuery: RoutedFindQuery?
     private enum SnapshotIDResult {
         case fresh
         case replay
@@ -723,6 +743,35 @@ final class BackgroundRoutingActionHost: ActionHost {
              ScreenContext.backgroundValueEquals(
                 value, index: index, in: snapshot)
          },
+         nativeFind: @escaping (
+            ScreenActionUISnapshot, String
+         ) -> ScreenActionUISnapshot? = { full, query in
+             ScreenContext.findActionUISnapshot(scopedTo: full, query: query)
+         },
+         nativeSet: @escaping (
+            Int, ActionUISetState, ScreenActionUISnapshot
+         ) -> ActionUISetResult = { index, state, snapshot in
+             ScreenContext.backgroundSet(
+                index: index, state: state, in: snapshot)
+         },
+         nativeMenuPress: @escaping (
+            [String], ScreenActionUISnapshot
+         ) -> ScreenContext.MenuPressResult = { path, snapshot in
+             ScreenContext.pressMenuItem(
+                path: path, in: snapshot, binding: .mainWindow)
+         },
+         nativeToggle: @escaping (
+            Int, ScreenActionUISnapshot
+         ) -> ActionToggleState? = { index, snapshot in
+             snapshot.elementsByIndex[index].flatMap(
+                ScreenContext.liveToggleState)
+         },
+         menuBar: @escaping (Int, String) -> ActionMenuBar? = { pid, bundleID in
+             ActionMenuBarCache.shared.menuBar(pid: pid, bundleID: bundleID)
+         },
+         invalidateMenuBar: @escaping (Int) -> Void = { pid in
+             ActionMenuBarCache.shared.invalidate(pid: pid)
+         },
          restoreForeground: @escaping (
             ActionWindowIdentity, () -> Bool
          ) -> Bool = { target, allowed in
@@ -751,6 +800,12 @@ final class BackgroundRoutingActionHost: ActionHost {
         self.nativePress = nativePress
         self.nativeWrite = nativeWrite
         self.nativeValueEquals = nativeValueEquals
+        self.nativeFind = nativeFind
+        self.nativeSet = nativeSet
+        self.nativeMenuPress = nativeMenuPress
+        self.nativeToggle = nativeToggle
+        self.menuBar = menuBar
+        self.invalidateMenuBar = invalidateMenuBar
         self.restoreForeground = restoreForeground
         self.userFocusForWindow = userFocusForWindow
         self.localResolve = localResolve
@@ -1248,6 +1303,7 @@ final class BackgroundRoutingActionHost: ActionHost {
         pinnedElement = nil
         routedUISnapshot = nil
         routedNativeSnapshot = nil
+        findQuery = nil
         resetSnapshotLineage()
         backgroundDraft = ""
         writtenElement = nil
@@ -1693,7 +1749,11 @@ final class BackgroundRoutingActionHost: ActionHost {
         routed || terminalFailureReason != nil
     }
 
-    var actionFailureReason: String? { terminalFailureReason }
+    /// The foreground host's own terminal failure (a menu command that may
+    /// have run) ends the action too when this action was never routed.
+    var actionFailureReason: String? {
+        terminalFailureReason ?? system.actionFailureReason
+    }
 
     func visibleNames() -> [String] {
         guard terminalFailureReason == nil else { return [] }
@@ -1734,20 +1794,51 @@ final class BackgroundRoutingActionHost: ActionHost {
             return nil
         }
 
+        if let query = findQuery,
+           query.pid != targetPID || query.windowID != windowID {
+            findQuery = nil
+        }
+
         // Public Accessibility is the first choice: it retains exact native
         // element references and never activates the target. Cua supplies only
         // the read-only WindowServer lease used to bind AX title and bounds.
         if let window = exactTargetWindow(),
-           let native = nativeSnapshot(
+           let full = nativeSnapshot(
                 targetPID, windowID, window.title ?? "", window.bounds),
-           native.observation.source == .native,
-           native.observation.complete,
-           native.observation.windowID == windowID,
-           native.observation.bundleID.caseInsensitiveCompare(targetBundleID)
-                == .orderedSame,
+           nativeObservationIsExact(full, windowID: windowID),
            targetActivitySafe(inputGeneration, windowID: windowID),
            exactTargetWindow() == window {
-            nativeAXReady = true
+            // Readiness keeps its meaning: only a complete walk proves it.
+            if full.observation.complete { nativeAXReady = true }
+            // A complete full-window walk is returned as-is. A partial one is
+            // replaced by the sticky find-scoped walk, else returned partial
+            // (it grants no indexed action) so find_ui and menu_item stay
+            // reachable on a busy window.
+            var native = full
+            if !full.observation.complete {
+                if navigationReceipt != nil {
+                    _ = failRoute(
+                        "The UI action produced no complete native observation. "
+                            + "It was not retried.")
+                    return nil
+                }
+                if let query = findQuery,
+                   let scoped = nativeFind(full, query.text),
+                   scoped.observation.isFindScoped,
+                   nativeObservationIsExact(scoped, windowID: windowID) {
+                    native = scoped
+                }
+                guard targetActivitySafe(inputGeneration, windowID: windowID),
+                      exactTargetWindow() == window else {
+                    routedUISnapshot = nil
+                    routedNativeSnapshot = nil
+                    return nil
+                }
+            }
+            if let bar = menuBar(targetPID, targetBundleID) {
+                native = native.replacingObservation(
+                    native.observation.withMenuBar(bar))
+            }
             if var receipt = navigationReceipt {
                 guard receipt.observedSnapshotID == nil,
                       receipt.process == targetProcessIdentity,
@@ -1804,27 +1895,30 @@ final class BackgroundRoutingActionHost: ActionHost {
         return observation
     }
 
+    private func nativeObservationIsExact(
+        _ native: ScreenActionUISnapshot, windowID: Int
+    ) -> Bool {
+        native.observation.source == .native
+            && native.observation.windowID == windowID
+            && native.observation.bundleID.caseInsensitiveCompare(
+                targetBundleID) == .orderedSame
+    }
+
     private func backgroundObservation(
         _ source: ActionUISnapshot
     ) -> ActionUISnapshot {
         let elements = source.elements.map { element in
-            ActionUIElement(
-                index: element.index, parentIndex: element.parentIndex,
-                depth: element.depth, role: element.role,
-                label: element.label, frame: element.frame,
-                actions: element.actions.filter {
-                    $0 != ActionUICapability.axFocus
-                },
-                enabled: element.enabled, selected: element.selected,
-                focused: element.focused,
-                inWebContent: element.inWebContent)
+            element.replacing(actions: element.actions.filter {
+                $0 != ActionUICapability.axFocus
+            })
         }
         return ActionUISnapshot(
             id: source.id, source: source.source,
             appName: source.appName, bundleID: source.bundleID,
             windowTitle: source.windowTitle, windowID: source.windowID,
             complete: source.complete, elements: elements,
-            capabilities: source.capabilities)
+            capabilities: source.capabilities, scope: source.scope,
+            menuBar: source.menuBar)
     }
 
     func frontmostPageURL() -> String? {
@@ -1876,6 +1970,7 @@ final class BackgroundRoutingActionHost: ActionHost {
         pinnedElement = nil
         routedUISnapshot = nil
         routedNativeSnapshot = nil
+        findQuery = nil
         resetSnapshotLineage()
         backgroundDraft = ""
         writtenElement = nil
@@ -1930,9 +2025,16 @@ final class BackgroundRoutingActionHost: ActionHost {
               !ActionPlan.pressLabelIsCommitting(label),
               record.actions.contains(ActionUICapability.axPress),
               !record.selected,
+              cached.snapshot.observation.complete,
               mutationLeaseIsLive(lease)
         else { return false }
         let expected = cached.snapshot.pressReadbacks[index]
+        // A find-scoped tree cannot carry a navigation receipt: the next
+        // full walk of a busy window is partial, which ends the route. Only
+        // a press with its own state readback is provable there.
+        if expected == nil, cached.snapshot.observation.isFindScoped {
+            return false
+        }
         let receipt: NavigationReceipt?
         if expected == nil {
             guard let process = targetProcessIdentity,
@@ -1971,6 +2073,122 @@ final class BackgroundRoutingActionHost: ActionHost {
         return true
     }
 
+    func setElement(index: Int, snapshotID: String, label: String,
+                    role: String, state: ActionUISetState,
+                    expecting bundleID: String?) -> ActionUISetResult {
+        guard terminalFailureReason == nil else { return .stale }
+        guard routed else {
+            return system.setElement(
+                index: index, snapshotID: snapshotID, label: label,
+                role: role, state: state, expecting: bundleID)
+        }
+        guard snapshotLineage == .valid,
+              let cached = routedNativeSnapshot,
+              cached.snapshot.observation.complete,
+              cached.snapshot.observation.id == snapshotID,
+              cached.pid == targetPID, cached.windowID == targetWindowID,
+              cached.bundleID == targetBundleID,
+              targetActivitySafe(
+                  cached.inputGeneration, windowID: cached.windowID),
+              expectedMatchesTarget(bundleID), targetReady,
+              let lease = captureMutationLease(),
+              let record = cached.snapshot.observation.elements.first(where: {
+                  $0.index == index
+              }),
+              record.role == role, record.enabled, !record.inWebContent,
+              record.settable.contains(state),
+              AppMatcher.normalize(record.label ?? "")
+                == AppMatcher.normalize(label),
+              !ActionPlan.setLabelIsCommitting(label, state: state),
+              mutationLeaseIsLive(lease)
+        else { return .stale }
+        // Readback-verified at the element itself: no navigation receipt.
+        navigationReceipt = nil
+        routedNativeSnapshot = nil
+        pendingMutationLease = lease
+        let result = nativeSet(index, state, cached.snapshot)
+        let focusPreserved = finalizeMutation(lease)
+        guard focusPreserved else { return .unverified }
+        switch result {
+        case .verified:
+            break
+        case .stale:
+            // Nothing was accepted; the next turn observes again.
+            return .stale
+        case .unverified:
+            _ = failMutation(
+                "The UI change could not be verified. It was not retried.")
+            return .unverified
+        }
+        backgroundDraft = ""
+        writtenElement = nil
+        writtenNativeElement = nil
+        pinnedElement = nil
+        mutationOrdinal += 1
+        return .verified
+    }
+
+    func pressMenuItem(path: [String], snapshotID: String,
+                       expecting bundleID: String?) -> Bool {
+        guard terminalFailureReason == nil else { return false }
+        guard routed else {
+            return system.pressMenuItem(
+                path: path, snapshotID: snapshotID, expecting: bundleID)
+        }
+        guard snapshotLineage == .valid,
+              let cached = routedNativeSnapshot,
+              cached.snapshot.observation.id == snapshotID,
+              cached.pid == targetPID, cached.windowID == targetWindowID,
+              cached.bundleID == targetBundleID,
+              let entry = cached.snapshot.observation.menuBar?.entry(
+                matching: path),
+              targetActivitySafe(
+                  cached.inputGeneration, windowID: cached.windowID),
+              expectedMatchesTarget(bundleID), targetReady,
+              let lease = captureMutationLease(),
+              mutationLeaseIsLive(lease)
+        else { return false }
+        navigationReceipt = nil
+        routedNativeSnapshot = nil
+        pendingMutationLease = lease
+        let result = nativeMenuPress(entry, cached.snapshot)
+        invalidateMenuBar(cached.pid)
+        let focusPreserved = finalizeMutation(lease)
+        guard focusPreserved else { return false }
+        switch result {
+        case .pressed:
+            break
+        case .refused:
+            return false
+        case .failed:
+            return failMutation(
+                "The menu command was not accepted. It was not retried.")
+        }
+        backgroundDraft = ""
+        writtenElement = nil
+        writtenNativeElement = nil
+        pinnedElement = nil
+        mutationOrdinal += 1
+        return true
+    }
+
+    func findUI(text: String, expecting bundleID: String?) -> Bool {
+        guard terminalFailureReason == nil else { return false }
+        guard routed else {
+            return system.findUI(text: text, expecting: bundleID)
+        }
+        guard snapshotLineage == .valid,
+              let query = ActionFindPolicy.cleanedQuery(text),
+              let cached = routedNativeSnapshot,
+              cached.pid == targetPID, cached.windowID == targetWindowID,
+              cached.bundleID == targetBundleID,
+              expectedMatchesTarget(bundleID), targetReady
+        else { return false }
+        findQuery = RoutedFindQuery(
+            text: query, pid: cached.pid, windowID: cached.windowID)
+        return true
+    }
+
     func verifyElement(index: Int, snapshotID: String, label: String,
                        role: String, target: String,
                        expecting bundleID: String?,
@@ -1995,6 +2213,7 @@ final class BackgroundRoutingActionHost: ActionHost {
             guard routed, mutationOrdinal > 0,
                   snapshotLineage == .valid, targetReady,
                   expectedMatchesTarget(bundleID),
+                  cached.snapshot.observation.complete,
                   cached.snapshot.observation.id == check.snapshotID,
                   cached.pid == targetPID,
                   cached.windowID == targetWindowID,
@@ -2024,6 +2243,17 @@ final class BackgroundRoutingActionHost: ActionHost {
             case .selected:
                 guard !check.label.isEmpty, check.expectedValue == nil,
                       record.selected else {
+                    return nil
+                }
+            case .on, .off:
+                // The observation predates model inference, and an app may
+                // flip a switch on its own meanwhile: read it again now.
+                let wanted: ActionToggleState = check.assertion == .on
+                    ? .on : .off
+                guard !check.label.isEmpty, check.expectedValue == nil,
+                      record.toggle == wanted,
+                      nativeToggle(check.index, cached.snapshot) == wanted
+                else {
                     return nil
                 }
             }
@@ -2066,6 +2296,9 @@ final class BackgroundRoutingActionHost: ActionHost {
             }
         case .selected:
             guard check.expectedValue == nil, prior.selected else { return nil }
+        case .on, .off:
+            // The driver tree carries no toggle state.
+            return nil
         }
         let generation = UserInputActivity.snapshot()
         guard let current = snapshotTarget(maxElements: Self.snapshotElements),
@@ -2098,6 +2331,8 @@ final class BackgroundRoutingActionHost: ActionHost {
                 ],
                 "selected": true,
             ]
+        case .on, .off:
+            return nil
         }
         let predicates: [[String: Any]] = [
             ["window": [
@@ -2181,6 +2416,8 @@ final class BackgroundRoutingActionHost: ActionHost {
         if let cached = routedNativeSnapshot {
             guard snapshotLineage == .valid,
                   expectedMatchesTarget(bundleID), targetReady,
+                  cached.snapshot.observation.complete,
+                  !cached.snapshot.observation.isFindScoped,
                   cached.snapshot.observation.id == snapshotID,
                   cached.pid == targetPID,
                   cached.windowID == targetWindowID,
@@ -2262,6 +2499,8 @@ final class BackgroundRoutingActionHost: ActionHost {
             }
             guard snapshotLineage == .valid,
                   expectedMatchesTarget(bundleID), targetReady,
+                  cached.snapshot.observation.complete,
+                  !cached.snapshot.observation.isFindScoped,
                   cached.snapshot.observation.id == snapshotID,
                   cached.pid == targetPID,
                   cached.windowID == targetWindowID,
@@ -2546,6 +2785,8 @@ final class BackgroundRoutingActionHost: ActionHost {
               expectedMatchesTarget(bundleID), targetReady,
               let windowID = targetWindowID,
               let cached = routedNativeSnapshot,
+              cached.snapshot.observation.complete,
+              !cached.snapshot.observation.isFindScoped,
               cached.snapshot.observation.id == target.snapshotID,
               cached.pid == targetPID, cached.windowID == windowID,
               cached.bundleID == targetBundleID,
