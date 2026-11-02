@@ -1091,10 +1091,14 @@ enum ScreenContext {
 
     /// First short name in a row's subtree (BFS, ≤4 levels, ≤16 nodes): an
     /// authored title/description, or a non-editable AXStaticText's value.
+    /// An image's description names the icon ("Circle" for Tailscale's
+    /// status dot, live probe 2026-11-02), so it is used only when the row
+    /// has no other name.
     private static func derivedRowLabel(_ row: AXUIElement) -> String? {
         var queue: [(element: AXUIElement, level: Int)] =
             (axChildren(row) ?? []).map { ($0, 1) }
         var head = 0
+        var iconName: String?
         while head < queue.count, head < ActionDerivedLabelPolicy.rowNodes {
             let (node, level) = queue[head]
             head += 1
@@ -1102,11 +1106,14 @@ enum ScreenContext {
                 kAXRoleAttribute, kAXTitleAttribute,
                 kAXDescriptionAttribute, kAXChildrenAttribute,
             ])
+            let isImage = values[0] as? String == kAXImageRole as String
             for candidate in [values[1] as? String, values[2] as? String] {
                 if let candidate,
                    ActionDerivedLabelPolicy.isShortName(candidate) {
-                    return candidate.trimmingCharacters(
+                    let name = candidate.trimmingCharacters(
                         in: .whitespacesAndNewlines)
+                    guard isImage else { return name }
+                    if iconName == nil { iconName = name }
                 }
             }
             if values[0] as? String == kAXStaticTextRole as String,
@@ -1119,7 +1126,7 @@ enum ScreenContext {
                 queue.append(contentsOf: children.map { ($0, level + 1) })
             }
         }
-        return nil
+        return iconName
     }
 
     /// The AXTitleUIElement's title, or its value when it is static text.
