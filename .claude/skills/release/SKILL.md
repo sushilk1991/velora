@@ -34,5 +34,8 @@ that skipped the tap (or vice versa) is a bug, not a partial success.
   the tap to "catch up" without the GitHub release existing first.
 - Never delete or replace a published release asset; wrong bytes → new patch
   version.
+- The DMG is the only release asset. `build/Velora-X.Y.Z.dSYM.zip` stays
+  private: archive it in `~/Library/Developer/Velora/dSYMs/`, never attach it
+  to the release or the tap.
 - Do not fold unrelated uncommitted work into the `Release Velora X.Y.Z`
   commit.
