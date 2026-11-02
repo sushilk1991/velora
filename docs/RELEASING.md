@@ -96,10 +96,12 @@ on `main`.
    **a version never ships twice** — if the artifact is wrong, bump again.
 
    Next to it, `build/Velora-X.Y.Z.dSYM.zip` holds the symbols of that DMG's
-   executable, which ships stripped. Archive it outside `build/` (`make clean`
-   deletes `build/`). A user's crash report shows only addresses and the
-   binary's UUID, and only this dSYM turns them into function names and
-   lines: unzip it, then run
+   executable, which ships stripped. **Keep it private:** never attach it to
+   the GitHub release or the tap (its DWARF carries the builder's paths);
+   `publish-release.sh` uploads only the DMG. Archive it outside `build/`
+   (`make clean` deletes `build/`). A user's crash report shows only
+   addresses and the binary's UUID, and only this dSYM turns them into
+   function names and lines: unzip it, then run
    `atos -o Velora.app.dSYM -arch arm64 -l <load address> <address>…` with the
    `Velora` image's load address and frame addresses from the report.
 
@@ -169,7 +171,7 @@ on `main`.
 - The DMG's executable is stripped and compiled without the self-test
   harness (`VELORA_DISTRIBUTION` leaves out `Sources/Velora/Selftest`);
   `verify-dmg.sh` checks both. Run `--selftest` from a checkout build. The
-  dSYM archive is the only copy of the shipped binary's symbols.
+  private dSYM archive is the only copy of the shipped binary's symbols.
 - `scripts/test-publish-release.sh` (part of `make test`) pins the publish
   script's preconditions and plan so this document and the automation cannot
   silently drift apart.

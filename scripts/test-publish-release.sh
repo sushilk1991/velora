@@ -108,6 +108,11 @@ grep -q -- '--notes-file' scripts/publish-release.sh \
 if grep -qE -- '--draft|--prerelease' scripts/publish-release.sh; then
   echo "FAIL: the updater cannot see drafts or prereleases" >&2; FAILURES=$((FAILURES + 1))
 fi
+grep -qxF '  gh release create "$TAG" "$DMG" \' scripts/publish-release.sh \
+  || { echo "FAIL: the DMG must be the release's only asset" >&2; FAILURES=$((FAILURES + 1)); }
+if grep -qi 'dsym' scripts/publish-release.sh; then
+  echo "FAIL: the dSYM stays private; publish-release.sh must not touch it" >&2; FAILURES=$((FAILURES + 1))
+fi
 
 if (( FAILURES )); then
   echo "publish-release checks FAILED ($FAILURES)" >&2
