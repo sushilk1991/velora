@@ -13,7 +13,7 @@ import pytest
 
 from velora_engine import protocol
 from velora_engine.config import Config
-from velora_engine.cleanup_process import LOAD_TIMEOUT_S
+from velora_engine.cleanup_process import LOAD_TIMEOUT_S, RECOVERY_ATTEMPTS
 from velora_engine.downloads import DownloadCoordinator, DownloadError, DownloadResult
 from velora_engine.server import Engine
 from velora_engine.stt import FakeBackend
@@ -1045,6 +1045,9 @@ async def test_cleanup_source_removed(
     recovery, monkeypatch, tmp_path, socket_engine, capfd, entrypoint,
 ):
     # Server -> production proxy/CLI/worker -> local loader; acquisition trips fail.
+    # Each load spawns a real worker that imports mlx_lm (~1.8 s warm, several
+    # times that on a CI runner), so waits use production's load budget, not a
+    # guess: a fixed 15 s timed out during the three recovery loads on CI.
     from velora_engine.cleanup_process import CleanupProcess
     import velora_engine.cleanup_process as process_module
 
@@ -1081,7 +1084,7 @@ async def test_cleanup_source_removed(
     client = await _connect(socket_engine)
     try:
         await client.event("ready")
-        await client.event("setup_complete", timeout=15)
+        await client.event("setup_complete", timeout=LOAD_TIMEOUT_S)
         primary = recovery.engine.cleanup
         assert primary is not None
         assert json.loads(record.read_text().splitlines()[0]) == {
@@ -1092,7 +1095,7 @@ async def test_cleanup_source_removed(
         source.rmdir()
         if entrypoint == "switch":
             await client.send(cmd="set_model", model="example/cleanup-b", kind="cleanup")
-            await client.event("error", timeout=15)
+            await client.event("error", timeout=LOAD_TIMEOUT_S)
             snapshot = recovery.coordinator.snapshot()
             assert snapshot["downloads"][-1]["state"] == "failed"
             assert snapshot["downloads"][-1]["error"]["code"] == "model_load_failed"
@@ -1104,7 +1107,8 @@ async def test_cleanup_source_removed(
             assert not primary.loaded and primary.pid is None
         else:
             primary._process.kill()
-            async with asyncio.timeout(15):
+            # Crash recovery makes RECOVERY_ATTEMPTS loads before giving up.
+            async with asyncio.timeout(RECOVERY_ATTEMPTS * LOAD_TIMEOUT_S):
                 while not primary.unhealthy:
                     await asyncio.sleep(.01)
             assert not primary.loaded and primary.pid is None

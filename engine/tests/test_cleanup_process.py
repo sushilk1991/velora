@@ -2771,12 +2771,16 @@ async def test_process_local_source(monkeypatch, tmp_path: Path, entrypoint, mis
             assert await cleanup.ensure_loaded() is not missing
         else:
             cleanup._process.kill()
+            # Each load spawns a real worker importing mlx_lm (~1.8 s warm,
+            # several times that on CI), so bound by production's load budget.
+            load_s = cleanup_process_mod.LOAD_TIMEOUT_S
             if missing:
                 await wait_until(lambda: cleanup.unhealthy,
-                                 "local recovery did not exhaust retries", timeout_s=15.0)
+                                 "local recovery did not exhaust retries",
+                                 timeout_s=cleanup_process_mod.RECOVERY_ATTEMPTS * load_s)
             else:
                 await wait_until(lambda: len(spawned) == 2 and cleanup.loaded,
-                                 "local replacement never loaded", timeout_s=15.0)
+                                 "local replacement never loaded", timeout_s=load_s)
         assert cleanup.model_id == model_id
         assert cleanup.loaded is not missing
         if missing:
