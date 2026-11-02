@@ -22,6 +22,13 @@ final class FakeActionHost: ActionHost {
     var setUIResult: ActionUISetResult?
     var menuItemResult = false
     var findUIResult = false
+    /// Live readback behind an engine `observed` done.
+    var observedToggleResult = false
+    private(set) var observedToggleCalls: [ActionObservedToggle] = []
+    func observedToggle(_ observed: ActionObservedToggle) -> Bool {
+        observedToggleCalls.append(observed)
+        return observedToggleResult
+    }
     private(set) var setUICalls: [(index: Int, state: ActionUISetState)] = []
     private(set) var menuItemCalls: [[String]] = []
     private(set) var findUICalls: [String] = []
@@ -2287,6 +2294,62 @@ extension Selftest {
         }
         expect(emptyPlanner.observations.count == 2,
                "an invalid batch cannot renew an empty background retry")
+
+        // "turn on wifi" with Wi-Fi visibly on: the engine's no-step done
+        // names the switch, and only this app's live readback finishes it.
+        let wifi = ActionObservedToggle(
+            snapshotID: "wifi-1", index: 90, label: "Wi‑Fi", state: .on)
+        for readback in [true, false] {
+            let observedHost = FakeActionHost()
+            observedHost.observedToggleResult = readback
+            let observedPlanner = FakeTurnPlanner(turns: [
+                .turn(sends: false, goal: "", steps: [], done: true,
+                      observed: wifi),
+                .failure(reason: "planner should not be asked again",
+                         code: "failed"),
+            ])
+            let observedResult = ActionLoopRunner(
+                host: observedHost, planner: observedPlanner,
+                execute: true, allowSend: false
+            ).run(transcript: "turn on wifi", context: loopContext())
+            expect(observedHost.observedToggleCalls == [wifi],
+                   "the named switch is re-read live, once")
+            if readback {
+                if case .completed(_, let trace, _) = observedResult {
+                    expect(trace.last == "Wi‑Fi is on",
+                           "the trace says which switch already showed it")
+                } else {
+                    expect(false, "a switch read live in the asked-for state "
+                           + "completes a first-turn done")
+                }
+            } else if case .failed(let reason, _) = observedResult {
+                expect(reason == "the planner returned nothing to do",
+                       "without the live readback a first-turn done is a shrug")
+            } else {
+                expect(false, "an unconfirmed observed done never succeeds")
+            }
+        }
+
+        // The engine's claim must answer the spoken command: "on" for "turn
+        // off wifi" is never even read back.
+        let mismatchHost = FakeActionHost()
+        mismatchHost.observedToggleResult = true
+        let mismatch = ActionLoopRunner(
+            host: mismatchHost,
+            planner: FakeTurnPlanner(turns: [
+                .turn(sends: false, goal: "", steps: [], done: true,
+                      observed: wifi),
+                .failure(reason: "planner should not be asked again",
+                         code: "failed"),
+            ]),
+            execute: true, allowSend: false
+        ).run(transcript: "turn off wifi", context: loopContext())
+        if case .completed = mismatch {
+            expect(false, "an observed state the command did not ask for "
+                   + "never completes")
+        }
+        expect(mismatchHost.observedToggleCalls.isEmpty,
+               "a claim that does not answer the command is not read back")
 
         let invalidFollowUpHost = FakeActionHost()
         invalidFollowUpHost.appsByName["Calculator"] = (

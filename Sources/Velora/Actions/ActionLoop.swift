@@ -15,7 +15,8 @@ enum PlannedTurn {
     /// honoured), the goal, a batch of raw step JSON — decoded and
     /// re-validated app-side, never trusted — and whether the model says the
     /// goal is met once this batch finishes.
-    case turn(sends: Bool, goal: String, steps: [Any], done: Bool)
+    case turn(sends: Bool, goal: String, steps: [Any], done: Bool,
+              observed: ActionObservedToggle? = nil)
     case failure(reason: String, code: String)
 }
 
@@ -296,7 +297,7 @@ final class ActionLoopRunner {
                 }
                 return .failed(reason: reason, trace: fullTrace)
 
-            case .turn(let sends, _, let stepsJSON, let done):
+            case .turn(let sends, _, let stepsJSON, let done, let observed):
                 turnsUsed += 1
                 if lockedSends == nil {
                     // Decided here, never again: a later turn upgrading a
@@ -330,6 +331,19 @@ final class ActionLoopRunner {
                         progress(.planning(turn: turnsUsed + 1))
                         reply = planner.observe(observation)
                         continue
+                    }
+                    // The switch an explicit on/off command names already
+                    // shows that state: proven only by this app re-reading
+                    // that exact element live, on any turn ("turn on wifi"
+                    // with Wi-Fi visibly on is done, not a shrug).
+                    if done, let observed, observed.answers(transcript),
+                       host.observedToggle(observed) {
+                        planner.end()
+                        return .completed(
+                            goal: lockedGoal,
+                            trace: fullTrace + [
+                                "\(observed.label) is \(observed.state.rawValue)",
+                            ])
                     }
                     // A FIRST turn that reports done without doing anything is
                     // the planner shrugging. On later turns `done` may stop the

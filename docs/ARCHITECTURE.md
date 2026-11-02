@@ -277,9 +277,11 @@ roles, authored labels, geometry, supported actions, generic selected/focused
 state, and stable per-snapshot indices. Editable values are excluded so text
 the action just typed cannot confirm its own target. Every string is defanged
 (chat-template control markers neutralized, line structure collapsed) before
-it reaches the prompt. Capture walks at most 30 levels, 500 nodes, 60 children
-per node, and 1.2 seconds; the deeper level bound reaches nested Electron
-composers while the other independent ceilings remain fail-closed. Only
+it reaches the prompt. Capture walks at most 500 nodes in 2 seconds (the
+prompt's real guard is ACTION_MAX_INPUT_TOKENS); there is no per-node child
+cap, and depth 128 is only a pathology guard beside the visited-element
+check, so deep Electron composers and long lists such as System Settings'
+Wi-Fi networks stay complete when the window fits the budget. Only
 executable AXFocus and AXPress capabilities enter the model projection;
 ubiquitous passive AXShowMenu/AXScrollToVisible advertisements do not inflate
 it. Non-finite AX
@@ -343,7 +345,20 @@ The semantic verbs (contract and probe evidence:
   nothing. Native list rows usually have no AXPress but a settable
   AXSelected, so selecting a row is how sidebars are navigated; selection and
   disclosure carry no label denylist, while on/off keeps the press denylist
-  minus setting words (`// toggle_exempt:`).
+  minus setting words (`// toggle_exempt:`). A switch, slider or pop-up
+  with no name of its own is named by the one short text in the run directly
+  before it in its row, and by nothing when there are two (System Settings'
+  Wi-Fi switch is `wifi-power` otherwise). When an explicit on/off command
+  names a switch that is not on screen yet, pressing the System Settings
+  sidebar row whose whole label is that target is navigation and skips the
+  calibrated press check. In the foreground, once an observation shows
+  exactly that switch in the requested state the engine ends the action
+  with no model call (turn 1 too) and sends `observed` {snapshot, index,
+  label, state}; Swift reports it completed only after re-reading that exact
+  element live (`ActionHost.observedToggle`). The goal verifier cannot prove
+  it: its evidence is selection, focus or change. A planner turn that only
+  repeats that switch becomes that bare done, and on a partial tree a press
+  of it while in the other state becomes `find_ui` for its label.
 - `menu_item` names a menu-bar path. Swift resolves it live from the app's
   AXMenuBar (prewarmed per pid+bundle while the user speaks) and presses the
   leaf without opening a menu. It refuses commit or content-edit leaves:

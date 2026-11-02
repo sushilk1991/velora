@@ -74,7 +74,8 @@ enum EngineEvent {
     /// raw JSON so `ActionPlan.decode` — the app's own copy of the safety
     /// gate — is the only thing that turns them into executable steps.
     case actionTurn(id: String?, turn: Int, sends: Bool, goal: String,
-                    steps: [Any], done: Bool, ms: Int)
+                    steps: [Any], done: Bool, ms: Int,
+                    observed: ActionObservedToggle? = nil)
     case actionFailed(id: String?, error: String, code: String)
 
     /// File-transcription command reached the engine (sent before decoding —
@@ -254,7 +255,8 @@ enum EngineEvent {
                 goal: object["goal"] as? String ?? "",
                 steps: object["steps"] as? [Any] ?? [],
                 done: object["done"] as? Bool ?? false,
-                ms: object["ms"] as? Int ?? 0)
+                ms: object["ms"] as? Int ?? 0,
+                observed: ActionObservedToggle(payload: object["observed"]))
         case "action_failed":
             return .actionFailed(
                 id: object["id"] as? String,

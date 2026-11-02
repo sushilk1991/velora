@@ -30,10 +30,96 @@ enum ActionAXProbe {
             && app.processIdentifier != me {
             apps.append(survey(app))
         }
-        write(["apps": apps, "generated": ISO8601DateFormatter().string(
-            from: Date())], to: output)
+        var result: [String: Any] = [
+            "apps": apps,
+            "generated": ISO8601DateFormatter().string(from: Date()),
+        ]
+        // VELORA_PROBE_DUMP=<bundle id>: every node of that app's focused
+        // window with its role, the AX error when the role read fails, and
+        // the attribute names it does expose. Read-only.
+        if let bundle = ProcessInfo.processInfo.environment["VELORA_PROBE_DUMP"],
+           let app = NSWorkspace.shared.runningApplications.first(where: {
+               $0.bundleIdentifier == bundle
+           }) {
+            result["dump"] = dump(app)
+        }
+        // VELORA_PROBE_SNAPSHOT=<bundle id>: the production snapshot exactly
+        // as the engine receives it (indices, labels, toggle/set, complete).
+        if let bundle = ProcessInfo.processInfo.environment["VELORA_PROBE_SNAPSHOT"],
+           let app = NSWorkspace.shared.runningApplications.first(where: {
+               $0.bundleIdentifier == bundle
+           }),
+           let production = ScreenContext.actionUISnapshot(of: app) {
+            result["snapshot"] = production.observation.payload
+        }
+        write(result, to: output)
         return 0
     }
+
+    private static func dump(_ app: NSRunningApplication) -> [[String: Any]] {
+        let appElement = AXUIElementCreateApplication(app.processIdentifier)
+        AXUIElementSetMessagingTimeout(appElement, 1.0)
+        var ref: CFTypeRef?
+        guard AXUIElementCopyAttributeValue(
+                appElement, kAXFocusedWindowAttribute as CFString, &ref)
+                == .success, let ref,
+              CFGetTypeID(ref) == AXUIElementGetTypeID()
+        else { return [["error": "no focused window"]] }
+        var queue: [(AXUIElement, Int, Int?)] = [(ref as! AXUIElement, 0, nil)]
+        var out: [[String: Any]] = []
+        var head = 0
+        while head < queue.count, out.count < 700 {
+            let (node, depth, parent) = queue[head]
+            head += 1
+            AXUIElementSetMessagingTimeout(node, 1.0)
+            var roleRef: CFTypeRef?
+            let roleError = AXUIElementCopyAttributeValue(
+                node, kAXRoleAttribute as CFString, &roleRef)
+            var row: [String: Any] = [
+                "i": out.count, "depth": depth, "parent": parent ?? -1,
+                "role": (roleRef as? String) ?? "?",
+            ]
+            if roleError != .success { row["role_error"] = roleError.rawValue }
+            for (key, attr) in [("subrole", kAXSubroleAttribute),
+                                ("title", kAXTitleAttribute),
+                                ("desc", kAXDescriptionAttribute),
+                                ("id", kAXIdentifierAttribute)] {
+                if let value = string(node, attr), !value.isEmpty {
+                    row[key] = String(value.prefix(60))
+                }
+            }
+            var names: CFArray?
+            if AXUIElementCopyAttributeNames(node, &names) == .success,
+               let list = names as? [String] {
+                if roleError != .success || (roleRef as? String) == nil {
+                    row["attrs"] = list
+                }
+                row["n_attrs"] = list.count
+            }
+            var actions: CFArray?
+            if AXUIElementCopyActionNames(node, &actions) == .success,
+               let list = actions as? [String], !list.isEmpty {
+                row["actions"] = list
+            }
+            if let value = number(node, kAXValueAttribute) {
+                row["value_number"] = value
+            }
+            if (roleRef as? String) == kAXStaticTextRole as String,
+               let value = string(node, kAXValueAttribute) {
+                row["value"] = String(value.prefix(60))
+            }
+            let children = elements(node, kAXChildrenAttribute)
+            row["children"] = children.count
+            out.append(row)
+            if depth < 14 {
+                queue.append(contentsOf: children.map {
+                    ($0, depth + 1, out.count - 1)
+                })
+            }
+        }
+        return out
+    }
+
 
     /// What the production snapshot offers set_ui, and a find walk's cost.
     /// The query comes from VELORA_PROBE_FIND (default "settings").
@@ -116,7 +202,8 @@ enum ActionAXProbe {
     }
 
     /// Measures the whole window (up to 6000 nodes / 4 s) and records where
-    /// the production limits (500 nodes, 60 children, depth 30) would cut.
+    /// the production limits (500 nodes, depth 128) would cut, and which
+    /// parents are wide (the 60-children count is kept as a statistic).
     private static func walk(_ window: AXUIElement) -> [String: Any] {
         let stopAt = Date().addingTimeInterval(4)
         var queue: [(AXUIElement, Int)] = [(window, 0)]

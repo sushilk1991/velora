@@ -81,6 +81,73 @@ def settings_sidebar(selected: str, snapshot_id: str) -> dict:
             "elements": elements}
 
 
+def settings_live(pane: str, snapshot_id: str, *, wifi: str | None = None,
+                  complete: bool = True, scope: dict | None = None) -> dict:
+    """System Settings as the live probe saw it (2026-11-02): foreground (no
+    window id), each sidebar row holds a cell holding a pressable button,
+    and the Wi-Fi page is partial (~40 nearby networks overflow the cap).
+    Its switch has no name of its own; Swift names it from its row text."""
+    elements = [
+        {"index": 0, "depth": 0, "role": "AXWindow", "label": pane,
+         "frame": _frame(0, 0, 900, 640)},
+        {"index": 1, "parent_index": 0, "depth": 1, "role": "AXOutline",
+         "label": "Sidebar", "frame": _frame(0, 70, 220, 570)},
+    ]
+    index = 2
+    for offset, name in enumerate(("Wi-Fi", "Bluetooth", "Network", "VPN",
+                                   "Battery", "General", "Accessibility",
+                                   "Appearance")):
+        frame = _frame(0, 80 + offset * 28, 220, 28)
+        row = {"index": index, "parent_index": 1, "depth": 2,
+               "role": "AXRow", "label": name, "frame": frame}
+        if name == pane:
+            row["selected"] = True
+        else:
+            row["set"] = ["selected"]
+        elements += [
+            row,
+            {"index": index + 1, "parent_index": index, "depth": 3,
+             "role": "AXCell", "frame": frame},
+            {"index": index + 2, "parent_index": index + 1, "depth": 4,
+             "role": "AXButton", "label": name, "actions": ["AXPress"],
+             "frame": _frame(8, 80 + offset * 28, 200, 28)},
+        ]
+        index += 3
+    if pane == "General":
+        for offset, name in enumerate(("About", "Software Update", "Storage",
+                                       "Date & Time", "Sharing")):
+            elements.append(
+                {"index": 60 + offset, "parent_index": 0, "depth": 1,
+                 "role": "AXButton", "label": name, "actions": ["AXPress"],
+                 "frame": _frame(250, 100 + offset * 40, 600, 36)})
+    if wifi is not None:
+        elements += [
+            {"index": 70, "parent_index": 0, "depth": 1, "role": "AXGroup",
+             "frame": _frame(250, 60, 600, 120)},
+            {"index": 71, "parent_index": 70, "depth": 2,
+             "role": "AXStaticText", "label": "Wi\u2011Fi",
+             "frame": _frame(260, 70, 200, 20)},
+            {"index": 72, "parent_index": 70, "depth": 2,
+             "role": "AXCheckBox", "label": "Wi\u2011Fi",
+             "actions": ["AXPress"], "toggle": wifi,
+             "set": ["off" if wifi == "on" else "on"],
+             "frame": _frame(800, 70, 40, 20)},
+            {"index": 73, "parent_index": 70, "depth": 2,
+             "role": "AXStaticText", "label": "Police",
+             "frame": _frame(260, 110, 200, 20)},
+            {"index": 74, "parent_index": 70, "depth": 2, "role": "AXButton",
+             "label": "Details…", "actions": ["AXPress"],
+             "frame": _frame(760, 110, 80, 24)},
+        ]
+    snap = {"id": snapshot_id, "source": "native", "complete": complete,
+            "app_name": "System Settings",
+            "bundle_id": "com.apple.systempreferences",
+            "window_title": pane, "elements": elements}
+    if scope is not None:
+        snap["scope"] = scope
+    return snap
+
+
 def focus_pane(toggle: str, snapshot_id: str) -> dict:
     opposite = {"on": ["off"], "off": ["on"]}
     switches = (
@@ -287,7 +354,47 @@ def _obs(app: str, snapshot: dict, executed: list[str]) -> dict:
             "failed_step": None}
 
 
+_WIFI_FIND = {"kind": "find", "query": "wi-fi", "matches": 3}
+
 CASES: tuple[dict, ...] = (
+    {
+        # Live failure 2026-11-02: System Settings opened on General; the
+        # press check and reviewer refused the Wi-Fi sidebar press.
+        "name": "settings_turn_on_wifi_already_on",
+        "command": "turn on wifi",
+        "app": "System Settings",
+        "snapshot": settings_live("General", "gen-1"),
+        "turns": [
+            (None, _expect_any(
+                _expect_step("press_ui", label="Wi-Fi"),
+                _expect_step("set_ui", label="Wi-Fi", state="selected"))),
+            (_obs("System Settings",
+                  settings_live("Wi-Fi", "wifi-1", wifi="on",
+                                complete=False),
+                  ["wait_frontmost System Settings", "press_ui Wi-Fi"]),
+             _expect_done),
+        ],
+    },
+    {
+        "name": "settings_turn_on_wifi_when_off",
+        "command": "turn on wifi",
+        "app": "System Settings",
+        "snapshot": settings_live("Wi-Fi", "wifi-1", wifi="off",
+                                  complete=False),
+        "turns": [
+            (None, _expect_step("find_ui")),
+            (_obs("System Settings",
+                  settings_live("Wi-Fi", "find-1", wifi="off",
+                                scope=_WIFI_FIND),
+                  ["find_ui wi-fi"]),
+             _expect_step("set_ui", index=72, state="on")),
+            (_obs("System Settings",
+                  settings_live("Wi-Fi", "find-2", wifi="on",
+                                scope=_WIFI_FIND),
+                  ["wait_frontmost System Settings", "set_ui Wi-Fi on"]),
+             _expect_done),
+        ],
+    },
     {
         "name": "settings_sidebar_select",
         "command": "open Bluetooth settings",
@@ -422,6 +529,13 @@ async def run_turn(engine: CleanupProcess, session: actions.ActionSession,
     direct = session.direct_goal_check_pending
     session.direct_goal_check_pending = False
     snapshot = session.current_ui_snapshot
+    # Server: the named switch already in the asked-for state ends the
+    # action with no model call.
+    if actions.turn_is_observed_toggle_done({"done": True}, session):
+        record["turn"] = session.accept_reply(
+            '{"sends":false,"steps":[],"done":true}')
+        record["path"] = "observed switch state"
+        direct = False
     if (direct and actions.goal_snapshot_can_verify(snapshot)
             and actions.goal_snapshot_has_evidence(
                 snapshot, session.prior_ui_snapshot)):
@@ -457,6 +571,10 @@ async def run_turn(engine: CleanupProcess, session: actions.ActionSession,
         try:
             reply = result.text
             parsed = actions.parse_turn(reply)
+            settled = actions.settle_named_toggle(parsed, session)
+            if settled is not parsed:
+                parsed = settled
+                reply = json.dumps(parsed, ensure_ascii=False)
             bounded = actions.bound_observation_turn(parsed)
             if bounded is not parsed:
                 parsed = bounded
@@ -470,6 +588,12 @@ async def run_turn(engine: CleanupProcess, session: actions.ActionSession,
                 # the exemption only for a confident "goes somewhere".
                 if action_fastpath.presses_may_call(session):
                     needs_review = True
+                elif actions.turn_opens_named_setting(parsed, session):
+                    record["calls"].append({
+                        "kind": "named_setting_page", "wall_ms": 0,
+                        "ttft_ms": None, "decode_ms": None,
+                        "cache_hit": None, "applied": True,
+                        "reason": "rule", "reply": "navigate"})
                 else:
                     check = action_fastpath.press_check(parsed, session)
                     if check is not None:
@@ -623,7 +747,13 @@ async def main() -> int:
                         f"(default: cached {MODEL_ID})")
     parser.add_argument("--json", action="store_true",
                         help="print one JSON record per case")
+    parser.add_argument("--case", action="append", default=[],
+                        help="run only cases whose name contains this "
+                        "(repeatable)")
     args = parser.parse_args()
+    cases = [case for case in CASES
+             if not args.case or any(part in case["name"]
+                                     for part in args.case)]
     path = _resolve(args.model)
     engine = CleanupProcess(MODEL_ID, local_model_path=path)
     started = time.perf_counter()
@@ -631,7 +761,7 @@ async def main() -> int:
     load_ms = int((time.perf_counter() - started) * 1000)
     records = []
     try:
-        for case in CASES:
+        for case in cases:
             record = await run_case(engine, case)
             records.append(record)
             if args.json:

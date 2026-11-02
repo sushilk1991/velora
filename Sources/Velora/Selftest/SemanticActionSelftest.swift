@@ -104,6 +104,67 @@ extension Selftest {
     // MARK: - Capture policy
 
     private static func testSemanticCapturePolicy() {
+        // An unnamed control borrows the first text of the run before it.
+        let text = { (value: String?) in (role: "AXStaticText", value: value) }
+        expect(ActionDerivedLabelPolicy.rowTextLabel(
+                preceding: [text("Set up Wi-Fi to wirelessly connect your "
+                                 + "Mac to the internet."), text("Wi-Fi")])
+                == "Wi-Fi",
+               "a form row's title names it past a prose subtitle")
+        expect(ActionDerivedLabelPolicy.rowTextLabel(
+                preceding: [text("Ask to join networks"), text("Wi-Fi")])
+                == nil,
+               "two short texts (heading above a title?) name nothing")
+        expect(ActionDerivedLabelPolicy.rowTextLabel(
+                preceding: [text("Wi-Fi")]) == "Wi-Fi"
+               && ActionDerivedLabelPolicy.rowTextLabel(preceding: []) == nil,
+               "the text right before a control names it")
+        expect(ActionDerivedLabelPolicy.rowTextLabel(
+                preceding: [(role: "AXPopUpButton", value: nil),
+                            text("Ask to join networks")]) == nil
+               && ActionDerivedLabelPolicy.rowTextLabel(
+                preceding: [text("Hotspots"), (role: "AXCheckBox", value: nil),
+                            text("Wi-Fi")]) == "Hotspots",
+               "another control ends the run: no neighbouring row's text")
+        expect(ActionDerivedLabelPolicy.rowTextLabel(
+                preceding: [text(String(repeating: "long prose ", count: 12))])
+                == nil,
+               "prose is not a name")
+
+        // The app's copy of the engine's toggle command reading.
+        let targets: [(String, String)] = [
+            ("turn on wifi", "wifi"), ("turn on the Wi-Fi", "wifi"),
+            ("enable Wi-Fi", "wifi"), ("turn wi fi off", "wifi"),
+            ("turn the wifi on please", "wifi"),
+            ("please switch wifi on", "wifi"),
+            ("turn on wifi calling", "wificalling"),
+            ("turn on Find My", "findmy"),
+            ("turn on Switch Control", "switchcontrol"),
+            ("turn on Wi-Fi and turn on Bluetooth", "wifiandturnonbluetooth"),
+            ("can you turn on wifi", ""), ("turn it", ""),
+        ]
+        for (command, target) in targets {
+            expect(ActionToggleCommand.target(command) == target,
+                   "toggle target of '\(command)' mirrors the engine")
+        }
+        expect(ActionToggleCommand.requestedState("turn on wifi") == .on
+               && ActionToggleCommand.requestedState("disable wifi") == .off
+               && ActionToggleCommand.requestedState("turn on wifi off") == nil
+               && ActionToggleCommand.requestedState("toggle wifi") == nil,
+               "only one explicit on/off state is a requested state")
+        let wifiOn = ActionObservedToggle(
+            snapshotID: "s", index: 1, label: "Wi‑Fi", state: .on)
+        expect(wifiOn.answers("turn on wifi")
+               && wifiOn.answers("please switch the Wi-Fi on"),
+               "an observed switch answers the command that names it whole")
+        expect(!wifiOn.answers("turn off wifi")
+               && !wifiOn.answers("turn on wifi calling")
+               && !wifiOn.answers("turn on Wi-Fi 以外")
+               && !wifiOn.answers("open wifi")
+               && !ActionObservedToggle(
+                    snapshotID: "s", index: 1, label: "Find", state: .on)
+                    .answers("turn on Find My"),
+               "another state, a longer target, or no toggle is not answered")
         expect(ActionToggleState(axValue: 0) == .off
                && ActionToggleState(axValue: 1) == .on
                && ActionToggleState(axValue: 2) == .mixed

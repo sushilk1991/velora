@@ -2,6 +2,100 @@ import Foundation
 
 /// Current state of a native two/three-state control (AXCheckBox, including
 /// subrole AXSwitch) whose AXValue is numeric 0/1/2 and which exposes AXPress.
+/// The engine's claim that a done needs no step: the one switch an explicit
+/// on/off command names already shows that state in the snapshot it planned
+/// from. The app trusts none of it until `ActionHost.observedToggle` re-reads
+/// that exact element live.
+struct ActionObservedToggle: Equatable {
+    let snapshotID: String
+    let index: Int
+    let label: String
+    let state: ActionToggleState
+
+    init(snapshotID: String, index: Int, label: String,
+         state: ActionToggleState) {
+        self.snapshotID = snapshotID
+        self.index = index
+        self.label = label
+        self.state = state
+    }
+
+    init?(payload: Any?) {
+        guard let object = payload as? [String: Any],
+              let snapshotID = object["snapshot"] as? String,
+              !snapshotID.isEmpty,
+              let index = object["index"] as? Int,
+              let label = object["label"] as? String, !label.isEmpty,
+              let raw = object["state"] as? String,
+              let state = ActionToggleState(rawValue: raw),
+              state != .mixed
+        else { return nil }
+        self.init(snapshotID: snapshotID, index: index, label: label,
+                  state: state)
+    }
+
+    /// The app's own check that this is exactly what the command asks: the
+    /// state it explicitly requests, for a switch whose whole label is its
+    /// target. A done for anything else is not this proof.
+    func answers(_ transcript: String) -> Bool {
+        let target = ActionToggleCommand.target(transcript)
+        return !target.isEmpty
+            && ActionToggleCommand.requestedState(transcript) == state
+            && AppMatcher.normalize(label) == target
+    }
+}
+
+/// The app's copy of the engine's explicit on/off command reading
+/// (`command_requests_toggle` and `_toggle_target` in actions.py).
+enum ActionToggleCommand {
+    static let verbWords: Set<String> = ["turn", "switch", "toggle", "set", "put"]
+    static let intentWords: [ActionToggleState: Set<String>] = [
+        .on: ["enable", "activate"],
+        .off: ["disable", "deactivate", "uncheck"],
+    ]
+
+    private static func words(_ command: String) -> [String] {
+        AppMatcher.words(
+            command.folding(options: .diacriticInsensitive, locale: nil))
+    }
+
+    /// The one state the command asks for: "turn on X", "switch X off",
+    /// "enable X". Both or neither is not explicit.
+    static func requestedState(_ command: String) -> ActionToggleState? {
+        let said = Set(words(command))
+        let asked = [ActionToggleState.on, .off].filter { state in
+            !said.isDisjoint(with: intentWords[state] ?? [])
+                || (!said.isDisjoint(with: verbWords)
+                    && said.contains(state.rawValue))
+        }
+        return asked.count == 1 ? asked[0] : nil
+    }
+
+    /// What it toggles, normalized: only the toggle phrase is removed, every
+    /// other word kept ("turn on Find My" → "findmy"); "" otherwise.
+    static func target(_ command: String) -> String {
+        var said = words(command)
+        while said.first == "please" { said.removeFirst() }
+        while said.last == "please" { said.removeLast() }
+        guard said.count >= 2 else { return "" }
+        let intent = intentWords.values.reduce(Set<String>()) { $0.union($1) }
+        let states: Set<String> = ["on", "off"]
+        var rest: ArraySlice<String>
+        if intent.contains(said[0]) {
+            rest = said[1...]
+        } else if verbWords.contains(said[0]), states.contains(said[1]) {
+            rest = said[2...]
+        } else if verbWords.contains(said[0]), let last = said.last,
+                  states.contains(last) {
+            rest = said[1..<(said.count - 1)]
+        } else {
+            return ""
+        }
+        if rest.first == "the" { rest = rest.dropFirst() }
+        return rest.joined()
+    }
+}
+
 enum ActionToggleState: String, Equatable {
     case on
     case off
@@ -92,6 +186,32 @@ enum ActionDerivedLabelPolicy {
         "AXCheckBox", "AXSlider", "AXPopUpButton",
     ]
 
+    /// Siblings read before a control when nothing else names it.
+    static let rowTextSiblings = 4
+
+    /// The name a control shows beside it when nothing names it: the one
+    /// short static text in the run directly before it (a SwiftUI form row
+    /// is title, optional prose subtitle, control). Any other sibling ends
+    /// the run, so a control never borrows a neighbouring row's text. Two
+    /// short texts name nothing: a section heading above a row title looks
+    /// the same as a title above a short subtitle, and a wrong name flips
+    /// the wrong switch, while no name only leaves it unreachable.
+    /// `preceding` is nearest first. System Settings' Wi-Fi switch
+    /// (`wifi-power`) has no title, description, or title element (live
+    /// probe 2026-11-02); its row is "Wi‑Fi", a prose subtitle, the switch.
+    static func rowTextLabel(
+        preceding: [(role: String, value: String?)]
+    ) -> String? {
+        var names: [String] = []
+        for sibling in preceding.prefix(rowTextSiblings) {
+            guard sibling.role == "AXStaticText" else { break }
+            if let value = sibling.value, isShortName(value) {
+                names.append(value.trimmingCharacters(in: .whitespacesAndNewlines))
+            }
+        }
+        return names.count == 1 ? names[0] : nil
+    }
+
     /// The existing passive-label rule: a name, tab, or status, not prose.
     static func isShortName(_ text: String) -> Bool {
         let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
@@ -124,10 +244,9 @@ struct ActionUIScope: Equatable {
 enum ActionFindPolicy {
     static let minQueryCharacters = 3
     static let maxQueryCharacters = 60
-    static let maxNodes = 6_000
+    /// The walk's bound; the output is the snapshot's own 500 records.
     static let deadline: TimeInterval = 2
-    static let maxMatches = 30
-    /// Cycle/pathology guard only; the node and time bounds are the real cap.
+    /// Cycle/pathology guard only; the deadline is the real bound.
     static let maxDepth = 128
 
     /// The planner's query after the same sanitize and whitespace collapse
@@ -210,9 +329,9 @@ struct ActionMenuBar: Equatable {
 
 /// Menu policy, applied at capture AND at execution. Pure functions only.
 enum ActionMenuPolicy {
-    static let maxItems = 600
-    /// Menu-item levels below the menu bar (path length ≤ 1 + maxDepth).
-    static let maxDepth = 4
+    /// Bounded by `walkDeadline`, not an item count: a 600-leaf cap left a
+    /// big app's later menus unreachable. Only matching paths reach the
+    /// planner prompt (engine MAX_PROMPT_MENU_ITEMS).
     static let maxPathComponents = 5
     static let maxComponentCharacters = 80
     static let walkDeadline: TimeInterval = 0.5

@@ -305,9 +305,11 @@ final class EngineTurnPlanner: ActionTurnPlanner {
     /// Called on the main queue with every engine event; keeps this action's.
     func handle(_ event: EngineEvent) {
         switch event {
-        case .actionTurn(let id, _, let sends, let goal, let steps, let done, _):
+        case .actionTurn(let id, _, let sends, let goal, let steps, let done, _,
+                         let observed):
             guard id == self.id else { return }
-            deliver(.turn(sends: sends, goal: goal, steps: steps, done: done))
+            deliver(.turn(sends: sends, goal: goal, steps: steps, done: done,
+                          observed: observed))
         case .actionFailed(let id, let error, let code):
             guard id == self.id else { return }
             deliver(.failure(reason: error, code: code))
@@ -475,7 +477,8 @@ final class ActionCoordinator {
     /// Feed engine events here. Ignores anything that isn't this action's.
     func handle(_ event: EngineEvent) {
         guard let planner else { return }
-        if case .actionTurn(let id, let turn, let sends, let goal, _, _, let ms) = event,
+        if case .actionTurn(let id, let turn, let sends, let goal, _, _, let ms,
+                            _) = event,
            id == planner.id {
             if executeRequested { executing = true }
             if turn == 1 {
