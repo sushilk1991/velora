@@ -17,11 +17,15 @@
 - `make test`: 3,899 Swift checks, 1,860 engine tests, and all script checks.
 - The signed app passes selftest, including the real Install Update action.
   A disposable copy downloads, verifies, and stages the live 0.30.1 DMG.
+- Homebrew upgraded `/Applications/Velora.app` to 0.30.1. The old bare
+  process quit gracefully; the installed app is running with its engine ready.
+- Native Settings reports "This is the latest version." Developer ID,
+  Gatekeeper, local agent access, and restart readiness checks pass.
 
 ### Next
 
-- Quit the old bare-binary instance, then run `make run`. The running app was
-  left untouched; its window and install/relaunch remain unverified.
+- Native update/relaunch awaits a newer release. The installed 0.30.1 app
+  is current and running; this upgrade used Homebrew.
 
 ## Cleanup latency and model studies (2026-10-29/30)
 
