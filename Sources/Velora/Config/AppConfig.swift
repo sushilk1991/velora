@@ -131,13 +131,15 @@ final class AppConfig {
         engineConfigURL: configFileURL)
 
     /// `.standard`, or the harness's scratch suite: in any debug build, and in
-    /// a release build only under `--selftest`, so a variable leaking in from
-    /// a shell never redirects a release app launch.
+    /// a local release only under `--selftest` or `--sandbox-e2e`, so a
+    /// variable leaking from a shell never redirects a normal release launch.
     private static var sharedDefaults: UserDefaults {
         #if !DEBUG
-        guard CommandLine.arguments.contains("--selftest") else {
-            return .standard
-        }
+        var isHarness = CommandLine.arguments.contains("--selftest")
+        #if !VELORA_DISTRIBUTION
+        isHarness = isHarness || CommandLine.arguments.contains("--sandbox-e2e")
+        #endif
+        guard isHarness else { return .standard }
         #endif
 
         if let suite = ProcessInfo.processInfo.environment[scratchDefaultsKey]

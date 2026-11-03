@@ -226,6 +226,7 @@ enum Selftest {
         testEngineUpdateStatus()
         testEngineStatusFollowsState()
         testEngineReconnectPolling()
+        testEngineCrashOwnership()
         testEngineLogBounds()
         testHomeMicrophoneChooser()
         testHomeMicrophoneRows()
@@ -15157,11 +15158,17 @@ private final class RecordingOutputVolume: OutputVolumeControlling {
         }
     }
 
-    /// An update copies the new engine over the old one but keeps its
-    /// `.venv`, so `uv run` re-syncs dependencies before the socket is up,
-    /// which can outlast `startupWait` on a slow network. The line says the
-    /// engine is updating, not that it is stuck: quitting, as the stuck
-    /// message says, would kill the sync.
+    private static func testEngineCrashOwnership() {
+        let supervisor = EngineSupervisor()
+        expect(!supervisor.crashOwnedProcessForSelftest(),
+               "crash harness refuses a supervisor with no owned child")
+        supervisor.simulateSpawn(firstBootstrap: false, engineRefreshed: false)
+        expect(!supervisor.crashOwnedProcessForSelftest(),
+               "launching state alone never authorizes a process-group kill")
+    }
+
+    /// An update keeps the venv: uv may need longer than startupWait to sync.
+    /// Keep the updating caption instead of recommending quitting during sync.
     private static func testEngineUpdateStatus() {
         let pastWait = Date().addingTimeInterval(EngineStatusLine.startupWait + 1)
         let stalled = "Engine hasn't started. Quit and reopen Velora."

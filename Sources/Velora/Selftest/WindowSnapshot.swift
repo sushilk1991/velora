@@ -34,6 +34,7 @@ enum WindowSnapshot {
     private static let markerName = ".velora-window-snapshot"
     /// This run's scratch home once it checks out; removed at exit.
     private static var scratchHome: URL?
+    private static var scratchParent: URL?
     #if DEBUG
     /// Enough for SwiftUI to swap panes and run their async loads.
     private static let settle: Duration = .milliseconds(900)
@@ -77,9 +78,10 @@ enum WindowSnapshot {
     ///     launch (no homeKey) ── make + mark home ── setenv ── execv ─┐
     ///     same pid (homeKey set) ◀────────────────────────────────────┘
     ///       └ validate ── atexit(remove home) ── return to the command
-    static func enterScratchHome(label: String) {
+    static func enterScratchHome(label: String, temporaryDirectory: URL? = nil) {
+        let parent = temporaryDirectory ?? FileManager.default.temporaryDirectory
         guard let home = ProcessInfo.processInfo.environment[homeKey] else {
-            exit(relaunchInScratchHome(label: label))
+            exit(relaunchInScratchHome(label: label, temporaryDirectory: parent))
         }
 
         // CFFIXED_USER_HOME must have redirected ~ to a fresh home this
@@ -91,7 +93,7 @@ enum WindowSnapshot {
         let expectedDefaults = homeURL.appendingPathComponent("defaults").path
         guard isHarnessHome(
                 homeURL, realHome: realHome,
-                temporaryDirectory: URL(fileURLWithPath: NSTemporaryDirectory()),
+                temporaryDirectory: parent,
                 ownerPID: getpid()),
               resolvedHome.path == homeURL.resolvingSymlinksInPath().path,
               ProcessInfo.processInfo.environment[AppConfig.scratchDefaultsKey] == expectedDefaults else {
@@ -103,6 +105,7 @@ enum WindowSnapshot {
         // removes its own home on any `exit`, failing tests included. A
         // signal or crash leaves it in $TMPDIR.
         scratchHome = homeURL
+        scratchParent = parent
         atexit {
             WindowSnapshot.removeScratchHome()
         }
@@ -112,8 +115,8 @@ enum WindowSnapshot {
     /// directory. Returns only when that fails, after removing the directory:
     /// 2 when a variable cannot be set (without `homeKey` the new image
     /// would re-exec again, leaking a home per pass), 1 otherwise.
-    private static func relaunchInScratchHome(label: String) -> Int32 {
-        let home = FileManager.default.temporaryDirectory
+    private static func relaunchInScratchHome(label: String, temporaryDirectory: URL) -> Int32 {
+        let home = temporaryDirectory
             .appendingPathComponent("\(homePrefix)\(UUID().uuidString)", isDirectory: true)
         defer { try? FileManager.default.removeItem(at: home) }
         do {
@@ -146,10 +149,10 @@ enum WindowSnapshot {
     /// Removes this run's scratch home at exit, after checking again that
     /// this process made it: cleanup must never delete anything else.
     private static func removeScratchHome() {
-        guard let home = scratchHome,
+        guard let home = scratchHome, let parent = scratchParent,
               ownsHome(
                 home, realHome: realHome,
-                temporaryDirectory: URL(fileURLWithPath: NSTemporaryDirectory()),
+                temporaryDirectory: parent,
                 ownerPID: getpid()) else {
             return
         }

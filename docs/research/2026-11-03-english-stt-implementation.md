@@ -113,6 +113,38 @@ Tools lack the SwiftUI macro plugin; use
 changing system configuration. Package a signed development app without a
 version bump using `./scripts/make-app.sh release none` under the same toolchain.
 
+## Sandboxed signed-app end-to-end follow-up
+
+A local optimized, signed `build/Velora.app` passed **33 integration checks**
+using `python3 scripts/test-sandbox-dictation.py` on the same 36 GiB M5 Max.
+
+- Fresh ownership-checked home/defaults, Python download and empty venv bootstrap.
+- English/fast setup committed before engine acquisition; included Bark weights
+  verified and seeded locally, then actually decoded with the FP16 backend.
+- Known 22.05 kHz synthetic speech passed through real 16 kHz conversion,
+  framed socket streaming, finalization, private clipboard delivery and native
+  AppKit text insertion; transcript and audio were archived.
+- SIGKILL of only the supervisor-owned engine process group preserved a third
+  take. Restart recovered it into History without typing it or changing the
+  clipboard. The app acknowledged recovery and the retained spool disappeared.
+- A second restart preserved exactly the same three SQLite row IDs, with no
+  pending spool, duplicate row or additional insertion.
+- Copied app signatures still verified afterward; the private home/venv was
+  removed and no test-engine process remained.
+
+This is **Seatbelt process isolation, not a clean macOS VM**. The real home
+and copied app are write-fenced; reads of live Velora/Hub stores are denied.
+Python/dependency network is allowed; HF SDK offline mode is requested, not
+an OS network fence. Hardware audio, authorization/secure-input probes and
+media controls are fixtures. It does not test first-run UI clicks, real mic
+capture, global hotkeys, external-app insertion or fresh TCC permission grants.
+
+The harness is compiled out of distribution builds; a distribution compile
+passed, the flag returned `EX_USAGE` (64), and test-only symbols were absent.
+Independent Codex reviews hardened process ownership, timeout cleanup and
+recovery assertions; final targeted review `20261103T165349-8d5702cf` found no
+verified blockers. Commands and scope are in [TESTING.md](../TESTING.md).
+
 ## Remaining validation boundaries
 
 - No claim of corpus-level WER, accent robustness, battery benefit, or actual

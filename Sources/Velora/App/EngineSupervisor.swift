@@ -375,6 +375,24 @@ final class EngineSupervisor: NSObject, EngineClientDelegate {
             logURL: logURL, logMaxBytes: logMaxBytes)
     }
 
+    #if !VELORA_DISTRIBUTION
+    var onSpawnForSelftest: (() -> Void)?
+
+    /// Hard-crash only our live child's dedicated process group, including
+    /// uv's Python child. Never select processes from global argv matches.
+    var ownedProcessGroupForSelftest: pid_t? {
+        guard !isQuitting, let process, process.isRunning else { return nil }
+        let pid = process.processIdentifier
+        guard pid > 1, getpgid(pid) == pid, getpgrp() != pid else { return nil }
+        return pid
+    }
+
+    func crashOwnedProcessForSelftest() -> Bool {
+        guard let pid = ownedProcessGroupForSelftest else { return false }
+        return killpg(pid, SIGKILL) == 0
+    }
+    #endif
+
     /// Replace an unresponsive process while keeping normal crash recovery.
     /// The termination handler owns respawn and its connection handshake.
     func restartForStall() {
@@ -516,6 +534,9 @@ final class EngineSupervisor: NSObject, EngineClientDelegate {
             try proc.run()
             process = proc
             processGeneration += 1
+            #if !VELORA_DISTRIBUTION
+            onSpawnForSelftest?()
+            #endif
             state = .launching
             NSLog("Velora: engine spawned (pid %d)", proc.processIdentifier)
         } catch {

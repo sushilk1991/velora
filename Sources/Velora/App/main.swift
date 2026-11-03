@@ -32,6 +32,21 @@ if CommandLine.arguments.contains("--selftest") {
     #endif
 }
 
+// Real bundled-engine integration must enter its fresh home before any
+// preferences or lifecycle objects are created. Never ship this fixture.
+if let index = CommandLine.arguments.firstIndex(of: "--sandbox-e2e") {
+    #if VELORA_DISTRIBUTION
+    exitHarnessUnavailable("--sandbox-e2e")
+    #else
+    guard CommandLine.arguments.count > index + 2 else {
+        print("usage: Velora --sandbox-e2e <speech.wav> <report.json>")
+        exit(EX_USAGE)
+    }
+    exit(DictationE2E.run(audio: CommandLine.arguments[index + 1],
+                         report: CommandLine.arguments[index + 2]))
+    #endif
+}
+
 // Real-window design QA: shows the shell windows, onboarding and the pill on
 // screen without activating, and captures each one. Debug builds only; runs
 // in a scratch home before any path below can touch preferences. A missing

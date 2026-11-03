@@ -29,6 +29,36 @@ not the one `--selftest` ran. It is built from the same sources with the same
 release flags, minus the harness, and `verify-dmg.sh` checks the shipped
 bytes with CLI, MCP, and engine-bootstrap smoke tests.
 
+## Sandboxed bundled-engine dictation
+
+```sh
+./scripts/make-app.sh release none
+python3 scripts/test-sandbox-dictation.py
+```
+
+Requires macOS with `sandbox-exec` and an interactive desktop. The script
+copies the signed local app outside the checkout, denies app/child writes to
+the real home and copied bundle, and denies reads of the live Velora and Hub
+model stores. A writable control verifies the write fence. The harness
+re-execs behind the normal ownership-checked scratch-home/defaults gate
+(with a short `/tmp` parent to fit Darwin's Unix-socket path limit).
+
+It boots the bundled engine into an empty venv, commits English/fast setup,
+verifies local model seeding, and feeds a known synthetic WAV through the
+real audio conversion, socket framing, recognizer, finalization, private
+clipboard, native text field, History and audio archive. It then hard-kills
+only the supervisor-owned engine process group during a take and checks
+restart/reprocessing, exactly-once History and no recovered-text insertion.
+Hardware audio, permission/secure-input probes and media playback are
+controlled fixtures; STT and the app/engine pipeline are real.
+
+This is a local Seatbelt sandbox, **not a clean Mac VM**. Package/Python
+downloads still need network; HF Hub offline mode is requested but is not
+an OS network fence. It does not test first-run UI clicks, physical audio,
+global hotkeys, external-app insertion or fresh TCC grants. Report, app log
+and engine log remain in the printed evidence directory; a normal exit
+removes the private home/venv. All harness code is excluded from DMGs.
+
 ## Hardware and permission gates
 
 Run these when capture, permissions, hotkeys, insertion, meetings, packaging,
