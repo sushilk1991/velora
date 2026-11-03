@@ -1,5 +1,28 @@
 # Progress
 
+## Updater and release notes (2026-11-03)
+
+### Done
+
+- Bare binaries no longer check for app updates. `make run` builds and runs
+  the signed app, with its icon, current version, permissions, and updater.
+- Packaging re-signs stripped bytes before the metadata probe executes them.
+- AGENTS.md, CLAUDE.md, and release guidance require short, user-facing
+  changelogs. Rewrote the 0.30.0 and 0.30.1 notes.
+
+### Verified
+
+- Both regressions failed before their fixes: bare-binary update eligibility
+  and the invalid signature after stripping.
+- `make test`: 3,899 Swift checks, 1,860 engine tests, and all script checks.
+- The signed app passes selftest, including the real Install Update action.
+  A disposable copy downloads, verifies, and stages the live 0.30.1 DMG.
+
+### Next
+
+- Quit the old bare-binary instance, then run `make run`. The running app was
+  left untouched; its window and install/relaunch remain unverified.
+
 ## Cleanup latency and model studies (2026-10-29/30)
 
 ### Done

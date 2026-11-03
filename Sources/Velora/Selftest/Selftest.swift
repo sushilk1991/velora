@@ -887,6 +887,13 @@ enum Selftest {
     }
 
     private static func testUpdateChecker() {
+        // Embedded CLI metadata must not enable updates for a bare binary:
+        // only an app bundle can be replaced by the installer.
+        let isPackaged = Bundle.main.bundleURL.pathExtension == "app"
+        expect(
+            (UpdateChecker.currentVersion != nil) == isPackaged,
+            "only a packaged app participates in update checks")
+
         expect(UpdateChecker.isNewer("0.8.0", than: "0.7.2"), "minor bump is newer")
         expect(UpdateChecker.isNewer("0.10.0", than: "0.9.9"), "numeric not lexicographic")
         expect(UpdateChecker.isNewer("1.0.0", than: "0.99.99"), "major bump is newer")
@@ -1053,6 +1060,17 @@ enum Selftest {
                 UpdateWindowController.shouldPresent(
                     releaseVersion: update.version, currentVersion: "0.7.2"),
                 "the software-update controller accepts a newer release")
+
+            // Use the real bundle eligibility in the window model so a signed
+            // app offers Install Update without a preview overriding its gate.
+            if isPackaged {
+                let model = UpdateWindowModel()
+                model.present(update)
+                expect(
+                    model.primaryAction == .init(title: UpdateCopy.installTitle, disabled: false),
+                    "a packaged app offers Install Update for a newer release")
+            }
+
             expect(
                 SettingsModel.statusAfterSuccessfulUpdateCheck(
                     availableUpdate: nil, currentVersion: "0.7.2")

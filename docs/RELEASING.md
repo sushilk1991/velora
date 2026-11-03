@@ -62,8 +62,11 @@ on `main`.
    `minor`/`major` for bigger rounds. Then write `docs/releases/vX.Y.Z.md` for
    that version. First line must be `# Velora X.Y.Z` — the file becomes the
    GitHub release body verbatim, and users read it in the in-app updater. Keep
-   it in the established voice: one-sentence headline, then short user-facing
-   bullets. No internals.
+   it to 1–5 short bullets on user-facing features, new functionality, and
+   bug fixes. Lead with the changed behavior or fixed symptom. Omit a separate
+   headline, implementation/tooling/build/test details, unchanged behavior,
+   and privacy or data-preservation boilerplate. Use measurements only when
+   verified. Finish with the `no-ai-slop` skill.
 
 3. **Commit the release round and get it onto `main`** through a reviewed PR:
 
