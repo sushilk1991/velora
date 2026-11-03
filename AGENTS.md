@@ -15,6 +15,12 @@ No lint or format target exists. `make test` is the gate: exit 0, Swift prints `
 
 Mic, Accessibility, and Input Monitoring attach to `build/Velora.app`, not `.build/debug/Velora`.
 
+## Release notes
+
+- Write 1–5 short bullets covering user-facing features, new functionality, and bug fixes. Lead with what changed or the symptom fixed.
+- Omit implementation, tooling, build, test, and refactor details; unchanged behavior; privacy or data-preservation boilerplate; marketing headlines. Include measurements only when verified.
+- Keep the required version heading, then the bullets. Run `no-ai-slop` as the final prose pass. See `docs/RELEASING.md`.
+
 ## Guardrails
 
 - Keep TCC grants across rebuilds: sign with this team's Developer ID, or the `Velora Dev Signing` identity from `scripts/make-signing-cert.sh`, and run `build/Velora.app`. Ad-hoc codesign reties Mic / Accessibility / Input Monitoring to a new cdhash every binary.

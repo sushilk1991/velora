@@ -125,16 +125,20 @@ final class UpdateChecker {
         available = restored.available
     }
 
-    /// Marketing version of the running build. Bare `swift build` binaries
-    /// (no Info.plist) return nil and never see update prompts.
+    /// Only app bundles participate in updates. Bare binaries embed version
+    /// metadata for CLI/MCP, but the installer cannot replace them.
     static var currentVersion: String? {
-        Bundle.main.object(forInfoDictionaryKey: "CFBundleShortVersionString") as? String
+        guard Bundle.main.bundleURL.pathExtension == "app" else { return nil }
+        return Bundle.main.object(forInfoDictionaryKey: "CFBundleShortVersionString") as? String
     }
 
     /// The automatic launch-time check plus a slow timer for instances that
     /// stay running for weeks — both gated on the Settings toggle and the
     /// daily interval, so combined they still make at most one request a day.
     func startPeriodicChecks() {
+        // A development binary has no app to replace; do not schedule checks
+        // that can only produce an unusable update prompt.
+        guard Self.currentVersion != nil else { return }
         checkAfterLaunch()
         guard periodicTimer == nil else { return }
         let timer = Timer(timeInterval: 6 * 60 * 60, repeats: true) { [weak self] _ in
@@ -173,7 +177,7 @@ final class UpdateChecker {
     ) {
         dispatchPrecondition(condition: .onQueue(.main))
         guard let current = Self.currentVersion else {
-            completion(.failed("Development build. Updates need the packaged app."))
+            completion(.failed("Open Velora.app to check for and install updates."))
             return
         }
         guard let apiURL = Self.apiURL else {

@@ -22,8 +22,8 @@ that skipped the tap (or vice versa) is a bug, not a partial success.
   `minor` for a notable feature round, `major` for a genuinely
   better/rewritten build. If the session's work obviously matches one,
   proceed; ask only when it is genuinely ambiguous.
-- **Notes voice.** Read the two most recent `docs/releases/` files before
-  writing the new one and match them.
+- **Notes voice.** Follow AGENTS.md's release-note rules: 1–5 short bullets on
+  user-facing features and fixes, with a final `no-ai-slop` pass.
 - **Done gate report.** After the checks in RELEASING.md pass, report with
   evidence: the tag, the DMG sha256, the tap commit, and anything skipped.
 

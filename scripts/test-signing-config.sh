@@ -229,6 +229,17 @@ expect_failure "unreadable distribution executable" \
   validate_distribution_executable "$TMP_DIR/fixture.c"
 grep -q 'cannot read the symbol table' "$TMP_DIR/failure.log"
 validate_distribution_executable "$TMP_DIR/stripped"
+
+# Exercise the real strip-to-probe steps: changing signed Mach-O bytes must
+# leave a valid signature before the metadata check executes the binary.
+SHIPPED_BIN="$TMP_DIR/runnable"
+IDENTITY="-"
+cp "$TMP_DIR/unstripped" "$SHIPPED_BIN"
+codesign --force --sign "$IDENTITY" "$SHIPPED_BIN"
+eval "$(sed -n '/^strip -x "\$SHIPPED_BIN"$/,/^DSYM_UUID=/{ /^DSYM_UUID=/d; p; }' scripts/make-app.sh)"
+codesign --verify --strict "$SHIPPED_BIN"
+"$SHIPPED_BIN"
+
 grep -Fq 'SWIFT_BUILD_ARGS+=(-Xswiftc -DVELORA_DISTRIBUTION)' scripts/make-app.sh
 grep -Fq 'strip -x "$SHIPPED_BIN"' scripts/make-app.sh
 grep -Fq 'dsymutil "$BIN" -o "$DSYM"' scripts/make-app.sh

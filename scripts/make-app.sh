@@ -116,6 +116,11 @@ rm -rf "$APP" "$DSYM"
 dsymutil "$BIN" -o "$DSYM"
 cp "$BIN" "$SHIPPED_BIN"
 strip -x "$SHIPPED_BIN"
+
+# Stripping invalidates Swift's signature. Re-sign before executing the bare
+# metadata probe; the app receives its entitlements and final seal below.
+codesign --force --sign "$IDENTITY" "$SHIPPED_BIN"
+
 DSYM_UUID="$(dwarfdump --uuid "$DSYM" | awk '{print $2}')"
 SHIPPED_UUID="$(dwarfdump --uuid "$SHIPPED_BIN" | awk '{print $2}')"
 if [[ -z "$SHIPPED_UUID" || "$DSYM_UUID" != "$SHIPPED_UUID" ]]; then
