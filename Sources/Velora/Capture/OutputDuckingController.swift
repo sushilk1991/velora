@@ -1,35 +1,20 @@
 import CoreAudio
+import AudioToolbox
 import Foundation
 
-/// Lowers the system output volume while foreground dictation records, then
-/// restores it — for audio MediaPlaybackCoordinator can't pause (video, calls,
-/// browsers). Opt-in, off by default; the pause-and-restore behavior for
-/// Music/Spotify is independent and keeps applying.
-///
-/// The duck multiplies the current volume by 1/3 (quiet enough to hear
-/// yourself speak, loud enough not to feel broken) and restores the exact
-/// previous scalar on release. Muted or silent outputs are left alone: a
-/// muted device has nothing to duck, and a user-set silence must not become
-/// a restored blare. Only outputs the macOS volume slider controls (a
-/// settable master volume) are ducked — HDMI/DP displays that route volume
-/// to their own hardware fail the capability probe and are skipped. Ducking
-/// is best-effort, never an error.
+/// Access is explicitly device-bound: a route change during recording must
+/// never restore one device's volume onto another device.
 protocol OutputVolumeControlling {
-    /// Current output volume scalar 0...1 of the default output device, or
-    /// nil when it can't be read (no device, no hardware volume support).
-    func readVolume() -> Float?
-    /// Set the scalar; returns false when the device has no settable volume.
+    func defaultDevice() -> AudioObjectID?
+    func readVolume(device: AudioObjectID) -> Float?
     @discardableResult
-    func writeVolume(_ scalar: Float) -> Bool
-    /// Whether the default output device is muted (or nil when unknown).
-    func isMuted() -> Bool?
+    func writeVolume(_ scalar: Float, device: AudioObjectID) -> Bool
+    func isMuted(device: AudioObjectID) -> Bool?
 }
 
-/// CoreAudio-backed volume control for the default output device's master
-/// channel — the volume the macOS slider moves.
 struct SystemOutputVolume: OutputVolumeControlling {
-    private var defaultOutputDevice: AudioObjectID? {
-        var id = AudioObjectID(0)
+    func defaultDevice() -> AudioObjectID? {
+        var id = AudioObjectID(kAudioObjectUnknown)
         var size = UInt32(MemoryLayout<AudioObjectID>.size)
         var address = AudioObjectPropertyAddress(
             mSelector: kAudioHardwarePropertyDefaultOutputDevice,
@@ -37,54 +22,40 @@ struct SystemOutputVolume: OutputVolumeControlling {
             mElement: kAudioObjectPropertyElementMain)
         guard AudioObjectGetPropertyData(
             AudioObjectID(kAudioObjectSystemObject), &address, 0, nil, &size, &id
-        ) == noErr else { return nil }
+        ) == noErr, id != kAudioObjectUnknown else { return nil }
         return id
     }
 
-    /// The device and element whose scalar is the system volume, when the
-    /// output actually has one macOS can set.
-    private var volumeAddress: (device: AudioObjectID, element: AudioObjectPropertyElement)? {
-        guard let device = defaultOutputDevice else { return nil }
-        var address = AudioObjectPropertyAddress(
-            mSelector: kAudioDevicePropertyVolumeScalar,
+    private func volumeAddress() -> AudioObjectPropertyAddress {
+        AudioObjectPropertyAddress(
+            mSelector: kAudioHardwareServiceDeviceProperty_VirtualMainVolume,
             mScope: kAudioDevicePropertyScopeOutput,
             mElement: kAudioObjectPropertyElementMain)
-        var settable = DarwinBoolean(false)
-        guard AudioObjectIsPropertySettable(device, &address, &settable) == noErr,
-              settable.boolValue
-        else { return nil }
-        return (device, address.mElement)
     }
 
-    func readVolume() -> Float? {
-        guard let device = defaultOutputDevice else { return nil }
+    func readVolume(device: AudioObjectID) -> Float? {
         var scalar = Float32(0)
         var size = UInt32(MemoryLayout<Float32>.size)
-        var address = AudioObjectPropertyAddress(
-            mSelector: kAudioDevicePropertyVolumeScalar,
-            mScope: kAudioDevicePropertyScopeOutput,
-            mElement: kAudioObjectPropertyElementMain)
-        guard AudioObjectGetPropertyData(
-            device, &address, 0, nil, &size, &scalar) == noErr
+        var address = volumeAddress()
+        guard AudioHardwareServiceGetPropertyData(
+            device, &address, 0, nil, &size, &scalar) == noErr,
+              scalar.isFinite, (0...1).contains(scalar)
         else { return nil }
         return scalar
     }
 
-    func writeVolume(_ scalar: Float) -> Bool {
-        guard let device = defaultOutputDevice,
-              volumeAddress != nil
-        else { return false }
+    func writeVolume(_ scalar: Float, device: AudioObjectID) -> Bool {
+        guard scalar.isFinite else { return false }
+        var address = volumeAddress()
+        var settable = DarwinBoolean(false)
+        guard AudioHardwareServiceIsPropertySettable(device, &address, &settable) == noErr,
+              settable.boolValue else { return false }
         var value = Float32(max(0, min(1, scalar)))
-        var address = AudioObjectPropertyAddress(
-            mSelector: kAudioDevicePropertyVolumeScalar,
-            mScope: kAudioDevicePropertyScopeOutput,
-            mElement: kAudioObjectPropertyElementMain)
-        return AudioObjectSetPropertyData(
+        return AudioHardwareServiceSetPropertyData(
             device, &address, 0, nil, UInt32(MemoryLayout<Float32>.size), &value) == noErr
     }
 
-    func isMuted() -> Bool? {
-        guard let device = defaultOutputDevice else { return nil }
+    func isMuted(device: AudioObjectID) -> Bool? {
         var muted = UInt32(0)
         var size = UInt32(MemoryLayout<UInt32>.size)
         var address = AudioObjectPropertyAddress(
@@ -92,53 +63,51 @@ struct SystemOutputVolume: OutputVolumeControlling {
             mScope: kAudioDevicePropertyScopeOutput,
             mElement: kAudioObjectPropertyElementMain)
         guard AudioObjectGetPropertyData(
-            device, &address, 0, nil, &size, &muted) == noErr
-        else { return nil }
+            device, &address, 0, nil, &size, &muted) == noErr else { return nil }
         return muted != 0
     }
 }
 
-/// Ducked-volume lifecycle, mirrored on MediaPlaybackCoordinator's: duck at
-/// capture start, restore at every release point (stop, cancel, failure,
-/// termination). Idempotent in both directions, so overlapping session
-/// lifecycles can never wedge the volume down or restore twice.
+/// Opt-in, best-effort output ducking for foreground dictation only.
+/// Muted/silent outputs and devices without a settable master volume are
+/// left alone. Restore targets the original device and respects any volume
+/// adjustment the user made while recording. Calls belong to the main queue.
 final class OutputDuckingController {
-    /// Duck to this fraction of the current volume while recording.
     static let duckFraction: Float = 1.0 / 3.0
 
-    private let volume: OutputVolumeControlling
-    private var previousVolume: Float?
+    private struct Lease {
+        let device: AudioObjectID
+        let original: Float
+        let ducked: Float
+    }
 
-    /// True while a duck is active (exposed for tests and logging).
-    var isDucked: Bool { previousVolume != nil }
+    private let volume: OutputVolumeControlling
+    private var lease: Lease?
+    var isDucked: Bool { lease != nil }
 
     init(volume: OutputVolumeControlling = SystemOutputVolume()) {
         self.volume = volume
     }
 
     func duckForDictation() {
-        guard previousVolume == nil else { return }  // already ducked
-        // A muted or silent output has nothing to lower — and restoring
-        // into "not muted" is a behavior change the user never asked for.
-        if volume.isMuted() == true { return }
-        guard let current = volume.readVolume(), current > 0 else { return }
-        guard volume.writeVolume(current * Self.duckFraction) else { return }
-        previousVolume = current
+        guard lease == nil, let device = volume.defaultDevice(),
+              volume.isMuted(device: device) != true,
+              let current = volume.readVolume(device: device),
+              current.isFinite, current > 0, current <= 1 else { return }
+        let ducked = current * Self.duckFraction
+        guard volume.writeVolume(ducked, device: device) else { return }
+        lease = Lease(device: device, original: current, ducked: ducked)
     }
 
-    func restoreAfterDictation() {
-        restore()
-    }
-
-    /// Termination path: restore synchronously and never leave a ducked
-    /// volume behind; the remembered level is dropped either way.
-    func restoreImmediatelyForTermination() {
-        restore()
-    }
+    func restoreAfterDictation() { restore() }
+    func restoreImmediatelyForTermination() { restore() }
 
     private func restore() {
-        guard let previous = previousVolume else { return }
-        previousVolume = nil
-        volume.writeVolume(previous)
+        guard let previous = lease else { return }
+        lease = nil
+        // Do not undo a manual volume change, or act on a vanished device.
+        guard let current = volume.readVolume(device: previous.device),
+              abs(current - previous.ducked) < 0.005 else { return }
+        volume.writeVolume(previous.original, device: previous.device)
     }
 }

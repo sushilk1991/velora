@@ -26,6 +26,9 @@ packed integers — so this module owns the load path too
 from __future__ import annotations
 
 import fcntl
+import functools
+import hashlib
+import importlib.metadata
 import json
 import logging
 import os
@@ -40,7 +43,7 @@ from .config import velora_home
 log = logging.getLogger("velora.quant_cache")
 
 QUANT_GROUP_SIZE = 64
-CACHE_FORMAT_VERSION = 1
+CACHE_FORMAT_VERSION = 2
 MANIFEST_NAME = "velora-quant.json"
 REQUIRED_FILES = ("config.json", "model.safetensors", MANIFEST_NAME)
 
@@ -56,12 +59,45 @@ def cache_path(model_id: str, bits: int, home: Path | None = None) -> Path:
     return root / f"{_sanitize(model_id)}--int{bits}--v{CACHE_FORMAT_VERSION}"
 
 
+def _file_identity(path: Path) -> dict[str, Any] | None:
+    try:
+        stat = path.stat()
+        return {"path": str(path.resolve()), "size": stat.st_size,
+                "mtime_ns": stat.st_mtime_ns, "inode": stat.st_ino}
+    except OSError:
+        return None
+
+
+@functools.lru_cache(maxsize=32)
+def _digest(path: str, size: int, mtime_ns: int) -> str:
+    digest = hashlib.sha256()
+    with Path(path).open("rb") as handle:
+        for chunk in iter(lambda: handle.read(1024 * 1024), b""):
+            digest.update(chunk)
+    return digest.hexdigest()
+
+
+def _artifact_identity(path: Path) -> dict[str, Any]:
+    stat = path.stat()
+    return {"size": stat.st_size,
+            "sha256": _digest(str(path), stat.st_size, stat.st_mtime_ns)}
+
+
 def expected_manifest(model_id: str, source_dir: Path, bits: int) -> dict[str, Any]:
+    versions = {}
+    for package in ("mlx", "parakeet-mlx"):
+        try:
+            versions[package] = importlib.metadata.version(package)
+        except importlib.metadata.PackageNotFoundError:
+            versions[package] = None
     return {
         "format": "velora-quant",
         "version": CACHE_FORMAT_VERSION,
         "model_id": model_id,
-        "source": str(source_dir),
+        "source": str(source_dir.resolve()),
+        "source_files": {name: _file_identity(source_dir / name)
+                         for name in ("config.json", "model.safetensors")},
+        "libraries": versions,
         "bits": bits,
         "group_size": QUANT_GROUP_SIZE,
         "mode": "affine",
@@ -75,9 +111,16 @@ def manifest_matches(cache_dir: Path, model_id: str, source_dir: Path, bits: int
         manifest = json.loads((cache_dir / MANIFEST_NAME).read_text())
     except (OSError, ValueError):
         return False
-    if manifest != expected_manifest(model_id, source_dir, bits):
+    expected = expected_manifest(model_id, source_dir, bits)
+    if not isinstance(manifest, dict) or any(manifest.get(k) != v for k, v in expected.items()):
         return False
-    return all((cache_dir / name).is_file() for name in REQUIRED_FILES)
+    try:
+        return all((cache_dir / name).is_file() and not (cache_dir / name).is_symlink()
+                   for name in REQUIRED_FILES) and manifest.get("artifacts") == {
+                       name: _artifact_identity(cache_dir / name)
+                       for name in ("config.json", "model.safetensors")}
+    except OSError:
+        return False
 
 
 def _build_quantized(source_dir: Path, destination: Path, bits: int) -> None:
@@ -90,6 +133,9 @@ def _build_quantized(source_dir: Path, destination: Path, bits: int) -> None:
     config = json.loads((source_dir / "config.json").read_text())
     model = from_config(config)
     model.load_weights(str(source_dir / "model.safetensors"))
+    # Some Hub Parakeet artifacts store FP32. Retained convolution/LSTM
+    # weights and quantization scales should not silently stay FP32.
+    model.set_dtype(mx.float16)
     nn.quantize(model, group_size=QUANT_GROUP_SIZE, bits=bits)
     mx.eval(model.parameters())
     mx.save_safetensors(
@@ -113,7 +159,8 @@ def ensure_quantized(source_dir: Path, model_id: str, bits: int) -> Path:
     """Return a validated int`bits` cache directory for `model_id`, building
     it from `source_dir` when missing or stale.
 
-    Raises on a build failure (the caller falls back to the fp16 original).
+    Raises on a build failure. Never silently load the larger model into a
+    small-RAM machine; the acquisition UI can offer Retry or another model.
     Concurrency: two processes (engine restart racing a reprocess load)
     serialize on an advisory lock; a stale temporary directory from a killed
     build is removed before a new build starts.
@@ -122,9 +169,6 @@ def ensure_quantized(source_dir: Path, model_id: str, bits: int) -> Path:
         raise ValueError(f"unsupported quantization bits {bits!r}")
     source_dir = Path(source_dir)
     cache_dir = cache_path(model_id, bits)
-    if manifest_matches(cache_dir, model_id, source_dir, bits):
-        return cache_dir
-
     cache_dir.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
     with (cache_dir.parent / ".build.lock").open("a") as lock:
         fcntl.flock(lock.fileno(), fcntl.LOCK_EX)
@@ -139,9 +183,14 @@ def ensure_quantized(source_dir: Path, model_id: str, bits: int) -> Path:
                 prefix=f".{cache_dir.name}.tmp-", dir=cache_dir.parent))
             try:
                 os.chmod(temp, 0o700)
+                expected = expected_manifest(model_id, source_dir, bits)
                 _build_quantized(source_dir, temp, bits)
-                (temp / MANIFEST_NAME).write_text(json.dumps(
-                    expected_manifest(model_id, source_dir, bits), indent=2) + "\n")
+                if expected_manifest(model_id, source_dir, bits) != expected:
+                    raise OSError("source model changed during quantization")
+                expected["artifacts"] = {
+                    name: _artifact_identity(temp / name)
+                    for name in ("config.json", "model.safetensors")}
+                (temp / MANIFEST_NAME).write_text(json.dumps(expected, indent=2) + "\n")
                 if not _reload_validates(temp):
                     raise OSError(
                         f"quantized cache for {model_id} int{bits} failed reload validation")

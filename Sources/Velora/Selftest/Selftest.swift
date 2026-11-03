@@ -202,6 +202,7 @@ enum Selftest {
         testHUDAccessibilityTree()
         testOnboardingReturn()
         testLanguageScopeAndSTTDefaults()
+        testScopeSelectionUsesNewAnswer()
         testOutputDucking()
         testStatsAverageKey()
         testWindowShellGeometry()
@@ -2660,7 +2661,7 @@ enum Selftest {
         expect(state.pending[.stt] == "example/candidate", "selection stays pending")
         expect(state.protectedModels.contains("example/candidate")
                && state.protectedModels.contains("example/speech"), "pending and transfer caches are protected")
-        expect(!ModelStorage.removalAvailable, "cache removal is unavailable while engine owns acquisition")
+        expect(ModelStorage.removalAvailable, "cache removal is delegated to the engine coordinator")
         state.request(snapshot.downloads[0], .retry)
         let retry = commands.first { $0["cmd"] as? String == "retry_download" }
         expect(retry?["model"] as? String == "example/speech"
@@ -3150,14 +3151,14 @@ enum Selftest {
         let lock = owned.appendingPathComponent("owner.lock")
         try! Data().write(to: lock)
         let scanned = ModelStorage.scan(at: hub).filter { $0.id == "example/dedup" }
-        expect(scanned.count == 2, "owned SHA identity and legacy repo both accounted")
+        expect(scanned.count == 1, "owned and shared storage group under one model identity")
         expect(scanned.reduce(Int64(0)) { $0 + $1.bytes } == 100 + Int64(manifest.count),
                "hardlink and symlink snapshots count a unique storage object once")
-        guard let managed = scanned.first(where: { $0.engineManaged }),
-              let cached = scanned.first(where: { !$0.engineManaged }) else { return }
-        expect(!ModelStorage.canRemove(managed, protected: []), "owned cache never offered for Swift deletion")
-        expect(!ModelStorage.canRemove(cached, protected: [cached.id]), "active/pending legacy cache protected")
-        expect(!ModelStorage.canRemove(cached, protected: []), "even unused legacy caches cannot race acquisition")
+        guard let managed = scanned.first else { return }
+        expect(ModelStorage.canRemove(managed, protected: []), "owned model copies can be removed through the engine")
+        expect(!ModelStorage.canRemove(managed, protected: [managed.id]), "active/pending model copies stay protected")
+        let shared = ModelStorage.CachedModel(id: "shared/model", directory: legacy, bytes: 100)
+        expect(!ModelStorage.canRemove(shared, protected: []), "shared legacy caches are never offered for deletion")
         expect(FileManager.default.fileExists(atPath: lock.path)
                && (try? Data(contentsOf: blob))?.count == 100,
                "owned owner.lock and completed bytes remain untouched")
@@ -13366,10 +13367,10 @@ enum Selftest {
 /// copy serves onboarding, which runs before the first status reply.
 private static func testLanguageScopeAndSTTDefaults() {
     expect(STTModel.recommended(languageScope: "english", ramGB: 8)
-           == "mlx-community/parakeet-tdt-0.6b-v2",
+           == "ConwayResearch/Underdog-Bark-3.0",
            "the english scope picks the fast English tier at every RAM size")
     expect(STTModel.recommended(languageScope: "english", ramGB: 128)
-           == "mlx-community/parakeet-tdt-0.6b-v2",
+           == "ConwayResearch/Underdog-Bark-3.0",
            "the english scope has no smaller RAM tier below parakeet")
     expect(STTModel.recommended(languageScope: "multilingual", ramGB: 36)
            == "mlx-community/whisper-large-v3-turbo",
@@ -13450,19 +13451,82 @@ private static func testLanguageScopeAndSTTDefaults() {
         expect(model.languageScope == "english",
                "the languages step preselects the persisted scope")
         model.languageScope = "multilingual"
+        model.commitLanguageChoice()
         expect(config.languageScope == "multilingual"
                && config.sttModel == "mlx-community/whisper-large-v3-turbo",
                "answering multilingual keeps the multilingual default")
-        model.languageScope = "english"
+        let englishModel = OnboardingModel(now: Date.init, config: config)
+        englishModel.languageScope = "english"
+        englishModel.smartWriting = false
+        englishModel.commitLanguageChoice()
+        expect(!config.cleanupEnabled, "declining smart writing persists the no-writing-model startup path")
         expect(config.languageScope == "english"
-               && config.sttModel == "mlx-community/parakeet-tdt-0.6b-v2",
+               && config.sttModel == "ConwayResearch/Underdog-Bark-3.0",
                "answering english switches to the recommended English model")
+
+        // A portable settings document on a new Mac has no local onboarding
+        // flag. It must still retain its deliberate language/model choices.
+        var copied = SettingsDocument.defaults
+        copied.settings.models.languageScope = "multilingual"
+        copied.settings.models.speech = "example/custom-multilingual"
+        copied.settings.engine.cleanupEnabled = false
+        let copiedSettings = directory.appendingPathComponent("copied-settings.json")
+        try SettingsDocumentCodec.encode(copied).write(to: copiedSettings)
+        let copiedConfig = AppConfig(
+            defaults: UserDefaults(suiteName: "velora-copied-\(UUID().uuidString)")!,
+            settingsFileURL: copiedSettings,
+            engineConfigURL: directory.appendingPathComponent("copied-config.json"),
+            registerDefaults: false)
+        let copiedOnboarding = OnboardingModel(config: copiedConfig)
+        expect(copiedOnboarding.languageScope == "multilingual"
+               && !copiedOnboarding.smartWriting,
+               "first-run onboarding preselects imported portable choices")
+        var launchedModel: String?
+        copiedOnboarding.onSpeechModelChosen = { launchedModel = $0 }
+        copiedOnboarding.commitLanguageChoice()
+        expect(copiedConfig.sttModel == "example/custom-multilingual"
+               && launchedModel == copiedConfig.sttModel,
+               "continuing or closing first-run setup preserves a copied custom model")
     } catch {
         expect(false, "language-scope config check threw: \(error)")
     }
 }
 
 // MARK: - Output ducking
+
+private static func testScopeSelectionUsesNewAnswer() {
+    let config = AppConfig.shared
+    let originalScope = config.languageScope
+    let originalModel = config.sttModel
+    defer {
+        config.languageScope = originalScope
+        config.sttModel = originalModel
+    }
+    config.languageScope = "multilingual"
+    config.sttModel = "example/custom-speech"
+    var commands: [[String: Any]] = []
+    let supervisor = EngineSupervisor.forSelftest(
+        commandSink: { commands.append($0) }, readyOverride: { false }, restartSink: {})
+    supervisor.simulateState(.connecting)
+    let item = recoveryItem(state: "ready", model: "example/custom-speech")
+    supervisor.engineClient(supervisor.client, didReceive: .downloadStatus(
+        DownloadSnapshot.parse(recoveryWire([item], boot: "scope-switch"))!))
+    let fixture = DictionaryRepositoryFixture()
+    defer { fixture.remove(); supervisor.downloads.disconnect() }
+    let repository = makeSyncRepository(fixture)
+    let sync = ICloudDictionarySync(repository: repository, transport: FakeDictionarySyncTransport(),
+                                    identityURL: fixture.directory.appendingPathComponent("identity"))
+    let settings = SettingsModel(supervisor: supervisor, dictionary: repository, dictionarySync: sync)
+    supervisor.engineClient(supervisor.client, didReceive: .status([
+        "recommended_stt_model": "mlx-community/whisper-large-v3-turbo",
+        "language_scope": "multilingual",
+    ]))
+    settings.languageScope = "english"
+    expect(commands.contains {
+        $0["cmd"] as? String == "set_model"
+            && $0["model"] as? String == "ConwayResearch/Underdog-Bark-3.0"
+    }, "a new English answer ignores the previous multilingual recommendation")
+}
 
 private static func testOutputDucking() {
     // Duck lowers to a third and restore puts the exact level back.
@@ -13511,6 +13575,22 @@ private static func testOutputDucking() {
     unsettableDuck.duckForDictation()
     expect(!unsettableDuck.isDucked, "an output without hardware volume skips ducking")
 
+    // Route changes restore only the device we ducked, never the new output.
+    let routed = RecordingOutputVolume(scalar: 0.9)
+    let routedDuck = OutputDuckingController(volume: routed)
+    routedDuck.duckForDictation()
+    routed.device = 2
+    routedDuck.restoreAfterDictation()
+    expect(routed.writeDevices == [1, 1],
+           "route change restores the original device only")
+    routedDuck.duckForDictation()
+    expect(routed.writeDevices.last == 2, "a later capture binds the new output")
+    routed.scalar = 0.7
+    let writesBeforeRestore = routed.writes.count
+    routedDuck.restoreAfterDictation()
+    expect(routed.writes.count == writesBeforeRestore && routed.scalar == 0.7,
+           "restore respects a manual volume adjustment")
+
     // Restore without a duck never writes.
     let fresh = RecordingOutputVolume(scalar: 0.5)
     let freshDuck = OutputDuckingController(volume: fresh)
@@ -13524,6 +13604,8 @@ private final class RecordingOutputVolume: OutputVolumeControlling {
     var muted: Bool
     var settable: Bool
     private(set) var writes: [Float] = []
+    private(set) var writeDevices: [AudioObjectID] = []
+    var device: AudioObjectID = 1
 
     init(scalar: Float?, muted: Bool = false, settable: Bool = true) {
         self.scalar = scalar
@@ -13531,14 +13613,16 @@ private final class RecordingOutputVolume: OutputVolumeControlling {
         self.settable = settable
     }
 
-    func readVolume() -> Float? { scalar }
-    func writeVolume(_ value: Float) -> Bool {
+    func defaultDevice() -> AudioObjectID? { device }
+    func readVolume(device: AudioObjectID) -> Float? { scalar }
+    func writeVolume(_ value: Float, device: AudioObjectID) -> Bool {
         guard settable else { return false }
         scalar = value
         writes.append(value)
+        writeDevices.append(device)
         return true
     }
-    func isMuted() -> Bool? { muted }
+    func isMuted(device: AudioObjectID) -> Bool? { muted }
 
     var lastWritten: Float? { writes.last }
 }

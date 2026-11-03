@@ -1,0 +1,44 @@
+{
+  "repo": "ConwayResearch/Underdog-Bark-3.0",
+  "revision": "85db2ad18ab41e534a222ee253c29191d77ed919",
+  "license": "CC-BY-4.0",
+  "license_url": "https://creativecommons.org/licenses/by/4.0/",
+  "modified": false,
+  "files": [
+    {
+      "path": "bark_loader.py",
+      "upstream_path": "bark_loader.py",
+      "size": 5820,
+      "sha256": "e86b7f130bec1a8fa14dd315cfce95785b890dbd30000f6ceb2597fdd4312b02",
+      "git_blob": "72c340cfe6074b9857e2a0e4025179f82dcd5183"
+    },
+    {
+      "path": "bark_mlx.py",
+      "upstream_path": "bark_mlx.py",
+      "size": 5011,
+      "sha256": "79b976c8711a0a16a6d013d7ff365db73af05edabe0c8fb297e39ad7a54b92a1",
+      "git_blob": "0cf543b75a7a5d62e95064e9d10b475f94ed9130"
+    },
+    {
+      "path": "bark_coreml.py",
+      "upstream_path": "coreml/ane/bark_coreml.py",
+      "size": 8247,
+      "sha256": "0762909e4a3fb10b3836826a8fb94fbe915a93b3189bf43488899b88d43e9fdb",
+      "git_blob": "915b25fa6843e748e5a0bb0b3bb2d36941e15fdb"
+    },
+    {
+      "path": "LICENSE",
+      "upstream_path": "coreml/LICENSE",
+      "size": 18657,
+      "sha256": "9ba9550ad48438d0836ddab3da480b3b69ffa0aac7b7878b5a0039e7ab429411",
+      "git_blob": "da6ab6cc8f333d7e89a99812866df8f24374d47c"
+    },
+    {
+      "path": "NOTICE",
+      "upstream_path": "NOTICE",
+      "size": 603,
+      "sha256": "7760825e72004ccf97f7a8b63a75e2890105a7cae8ca875b70d4df78cff9abcd",
+      "git_blob": "a2baabfd6a84b4fe3a60ceb517f9e9c47b270380"
+    }
+  ]
+}

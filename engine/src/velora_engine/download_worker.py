@@ -163,11 +163,16 @@ def _transfer_file(cache, spec, file, url, etag, emit):
 def _resolve_manifest(model: str, revision: str | None) -> _Manifest:
     from huggingface_hub import HfApi
     from .models import (_SINGLE_FILE_MODELS, _SINGLE_FILE_REVISIONS,
-                         TRANSCRIBE_CPP_Q8_MODEL, TRANSCRIBE_CPP_Q8_SHA256)
+                         _SINGLE_FILE_SHA256, hub_repo, bark_spec)
+
+    pinned = bark_spec(model)
+    if pinned is not None:
+        return _Manifest(model, pinned.revision, tuple(
+            _File(file.path, file.size, file.sha256, "sha256") for file in pinned.files))
 
     # Public Hub API provides immutable commit and both Git and LFS digests.
     revision = _SINGLE_FILE_REVISIONS.get(model, revision)
-    info = HfApi().model_info(model, revision=revision, files_metadata=True, timeout=_METADATA_S)
+    info = HfApi().model_info(hub_repo(model), revision=revision, files_metadata=True, timeout=_METADATA_S)
     files = []
     selected = _SINGLE_FILE_MODELS.get(model)
     for sibling in info.siblings:
@@ -177,8 +182,9 @@ def _resolve_manifest(model: str, revision: str | None) -> _Manifest:
             raise ValueError("missing file size")
         digest = sibling.lfs.sha256 if sibling.lfs else sibling.blob_id
         algorithm = "sha256" if sibling.lfs else "git-sha1"
-        if model == TRANSCRIBE_CPP_Q8_MODEL and digest != TRANSCRIBE_CPP_Q8_SHA256:
-            raise ValueError("pinned Q8 digest mismatch")
+        expected = _SINGLE_FILE_SHA256.get(model)
+        if expected is not None and (algorithm != "sha256" or digest != expected):
+            raise ValueError("pinned artifact digest mismatch")
         files.append(_File(sibling.rfilename, sibling.size, digest, algorithm))
     return _Manifest(model, info.sha, tuple(files))
 
@@ -186,15 +192,15 @@ def _resolve_manifest(model: str, revision: str | None) -> _Manifest:
 def _import_hub(cache, spec, emit):
     from huggingface_hub import hf_hub_download, snapshot_download
     from huggingface_hub.errors import LocalEntryNotFoundError
-    from .models import _SINGLE_FILE_MODELS
+    from .models import _SINGLE_FILE_MODELS, hub_repo
 
     # Import verified completed legacy files, without deleting/replacing Hub state.
     try:
         filename = _SINGLE_FILE_MODELS.get(spec.model)
         if filename:
-            source = Path(hf_hub_download(spec.model, filename, revision=spec.revision, local_files_only=True)).parent
+            source = Path(hf_hub_download(hub_repo(spec.model), filename, revision=spec.revision, local_files_only=True)).parent
         else:
-            source = Path(snapshot_download(spec.model, revision=spec.revision, local_files_only=True))
+            source = Path(snapshot_download(hub_repo(spec.model), revision=spec.revision, local_files_only=True))
     except LocalEntryNotFoundError:
         return
     for file in spec.files:
@@ -229,7 +235,7 @@ def _local_bytes(path: Path) -> int:
 
 def _run(model: str, root: Path, restart: bool, emit):
     from huggingface_hub import get_hf_file_metadata, hf_hub_url
-    from .models import _legacy_cached, _SINGLE_FILE_REVISIONS
+    from .models import _legacy_cached, _SINGLE_FILE_REVISIONS, hub_repo
 
     # Explicit user paths retain their existing loading semantics, not Hub trust.
     local = Path(model).expanduser()
@@ -298,7 +304,7 @@ def _run(model: str, root: Path, restart: bool, emit):
                 _progress(cache, spec, emit, resume="completed_files")
                 continue
             emit({"event": "phase", "state": "metadata"})
-            url = hf_hub_url(model, file.name, revision=spec.revision)
+            url = hf_hub_url(hub_repo(model), file.name, revision=spec.revision)
             metadata = get_hf_file_metadata(url, timeout=_METADATA_S)
             if metadata.commit_hash != spec.revision or metadata.size != file.size:
                 raise ValueError("metadata identity changed")

@@ -538,6 +538,9 @@ class ParakeetBackend:
 
     def __init__(self, model_id: str) -> None:
         self.model_id = model_id
+        # Coordinator temporarily substitutes a verified local path while
+        # loading. Cache keys must keep the short logical catalog identity.
+        self._quant_cache_id = model_id
         self._model: Any = None
         # Segmenting surface (see STTBackend). Parakeet has no prompt input,
         # so the whisper glossary is ignored.
@@ -589,21 +592,15 @@ class ParakeetBackend:
         source = ensure_downloaded(self.model_id)
         bits = parakeet_quant_bits()
         if bits is not None:
-            # One fp16 download serves every RAM tier: derive an int8/int4
-            # cache locally (validated, atomically published) and serve the
-            # quantized weights. Any failure falls back to the full-precision
-            # original — dictation must never wait on cache tooling.
-            try:
-                from .quant_cache import ensure_quantized, load_quantized_parakeet
+            # Keep the RAM contract even if a derived cache fails: surface a
+            # recoverable load error, never silently allocate the fp16 model.
+            from .quant_cache import ensure_quantized, load_quantized_parakeet
 
-                cache_dir = ensure_quantized(Path(source), self.model_id, bits)
-                self._model = load_quantized_parakeet(cache_dir)
-                log.info("parakeet loaded %s int%d in %.2fs",
-                         self.model_id, bits, time.perf_counter() - t0)
-                return
-            except Exception as exc:  # noqa: BLE001
-                log.warning("int%d quantized cache for %s unavailable (%s); "
-                            "loading full precision", bits, self.model_id, exc)
+            cache_dir = ensure_quantized(Path(source), self._quant_cache_id, bits)
+            self._model = load_quantized_parakeet(cache_dir)
+            log.info("parakeet loaded %s int%d in %.2fs",
+                     self.model_id, bits, time.perf_counter() - t0)
+            return
         self._model = from_pretrained(source)
         log.info("parakeet loaded %s in %.2fs", self.model_id, time.perf_counter() - t0)
 
@@ -1878,6 +1875,53 @@ class WhisperBackend:
         _clear_mlx_cache()
 
 
+class BarkBackend(ParakeetBackend):
+    """Pinned compact English STT using the existing pause/preview lifecycle.
+
+    The adapter owns bounded decode windows and never drops the tail; this
+    class retains Velora's empty-speech retry, final fallback, and batching
+    contracts rather than exposing a second capture protocol to Swift.
+    """
+    def __init__(self, model_id: str, *, coreml: bool = False) -> None:
+        super().__init__(model_id)
+        self.coreml = coreml
+        # First-time ANE compilation is much slower than a cached load. Keep
+        # it bounded, but do not kill a healthy 3-minute compile after 60 s.
+        self.load_timeout_s = 600.0
+        import threading
+        self._load_cancel = threading.Event()
+
+    def load(self) -> None:
+        from .bark import load_bark, load_bark_coreml
+        from .models import ensure_downloaded, parakeet_quant_bits
+        from .config import velora_home
+
+        source = Path(ensure_downloaded(self.model_id))
+        if self.coreml:
+            self._model = load_bark_coreml(source, velora_home() / "bark-coreml-cache",
+                                          cancel=self._load_cancel)
+        else:
+            self._model = load_bark(source, bits=parakeet_quant_bits() or 16,
+                                    cancel=self._load_cancel)
+        # Readiness includes the first real inference, not just loaded bytes.
+        self._model.decode(np.zeros(SAMPLE_RATE, dtype=np.float32))
+
+    def _transcribe(self, audio: np.ndarray) -> str:
+        if len(audio) < MIN_FINAL_AUDIO_S * SAMPLE_RATE:
+            return ""
+        if self._model is None:
+            raise RuntimeError("Bark speech model is not loaded")
+        return self._model.decode(np.ascontiguousarray(audio, dtype=np.float32)).strip()
+
+    def cancel_load(self) -> None:
+        self._load_cancel.set()
+
+    def close(self) -> None:
+        self.cancel_load()
+        self._model = None
+        _clear_mlx_cache()
+
+
 class TranscribeCppWhisperBackend(WhisperBackend):
     """Whisper Q8 through transcribe.cpp, retaining Velora's session logic."""
 
@@ -1943,7 +1987,9 @@ class TranscribeCppWhisperBackend(WhisperBackend):
         # for auto/hi/… would make whisper.cpp log a warning per window and
         # some builds mis-decode. "en" is the only language the model has.
         language = whisper_language(self.language)
-        if ".en" in self.model_id.lower() or ".en" in str(self._model_path).lower():
+        from .models import WHISPER_CPP_BASE_EN, WHISPER_CPP_SMALL_EN
+        if (self.model_id in (WHISPER_CPP_BASE_EN, WHISPER_CPP_SMALL_EN)
+                or Path(str(self._model_path)).name.lower().endswith(".en.bin")):
             language = "en"
         result = self._native_session.run(
             np.ascontiguousarray(audio, dtype=np.float32),
@@ -2077,7 +2123,16 @@ def create_backend(model_id: str, language: str = "auto") -> STTBackend:
     from .models import lookup
 
     info = lookup(model_id)
+    if info is not None and info.backend in ("bark", "bark-coreml"):
+        return BarkBackend(model_id, coreml=info.backend == "bark-coreml")
     if info is not None and info.backend == "transcribe-cpp":
+        return TranscribeCppWhisperBackend(model_id, language)
+    path = Path(model_id).expanduser()
+    if path.is_file() and path.suffix.lower() in (".bin", ".gguf"):
+        with path.open("rb") as handle:
+            magic = handle.read(4)
+        if magic not in (b"lmgg", b"GGUF"):
+            raise ValueError("Choose whisper.cpp ggml .bin or GGUF weights, not .pt or MLX files")
         return TranscribeCppWhisperBackend(model_id, language)
     if "whisper" in model_id.lower():
         return WhisperBackend(model_id, language)

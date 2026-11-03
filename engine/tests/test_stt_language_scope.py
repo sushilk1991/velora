@@ -35,9 +35,9 @@ def _mlx_importable() -> bool:
 # ---- language-scope defaults -----------------------------------------------
 
 
-def test_recommended_stt_english_is_parakeet_at_every_ram():
+def test_recommended_stt_english_is_bundled_bark_at_every_ram():
     for ram in (4, 8, 16, 36, 128):
-        assert recommended_stt_model("english", ram) == "mlx-community/parakeet-tdt-0.6b-v2"
+        assert recommended_stt_model("english", ram) == "ConwayResearch/Underdog-Bark-3.0"
 
 
 def test_recommended_stt_multilingual_tiers_by_ram():
@@ -156,7 +156,7 @@ def _fake_model_dir(tmp_path: Path) -> Path:
 def test_cache_path_is_sanitized_and_tiered(tmp_path: Path):
     path = quant_cache.cache_path("mlx-community/parakeet-tdt-0.6b-v2", 8, home=tmp_path)
     assert path.parent.name == "quant-cache"
-    assert "mlx-community--parakeet-tdt-0.6b-v2--int8--v1" == path.name
+    assert "mlx-community--parakeet-tdt-0.6b-v2--int8--v2" == path.name
     # Ids that contain filesystem-hostile characters stay inside the root.
     weird = quant_cache.cache_path("a/b c:parakeet", 4, home=tmp_path)
     assert weird.parent.parent == tmp_path
@@ -174,8 +174,10 @@ def test_manifest_matches_requires_complete_exact_cache(tmp_path: Path):
     (cache / "model.safetensors").write_bytes(b"q")
     # Missing manifest → invalid.
     assert not quant_cache.manifest_matches(cache, "m", source, 8)
-    (cache / quant_cache.MANIFEST_NAME).write_text(json.dumps(
-        quant_cache.expected_manifest("m", source, 8)))
+    manifest = quant_cache.expected_manifest("m", source, 8)
+    manifest["artifacts"] = {name: quant_cache._artifact_identity(cache / name)
+                             for name in ("config.json", "model.safetensors")}
+    (cache / quant_cache.MANIFEST_NAME).write_text(json.dumps(manifest))
     assert quant_cache.manifest_matches(cache, "m", source, 8)
     # A different source snapshot (upstream model updated) invalidates.
     other = tmp_path / "source2"
@@ -206,8 +208,9 @@ def test_ensure_quantized_builds_validates_and_publishes(tmp_path, monkeypatch):
     cache = quant_cache.ensure_quantized(source, "m", 8)
     assert cache == quant_cache.cache_path("m", 8, home=tmp_path)
     assert calls == {"build": 1, "validate": 1}
-    assert json.loads((cache / quant_cache.MANIFEST_NAME).read_text()) == (
-        quant_cache.expected_manifest("m", source, 8))
+    manifest = json.loads((cache / quant_cache.MANIFEST_NAME).read_text())
+    assert manifest.pop("artifacts")
+    assert manifest == quant_cache.expected_manifest("m", source, 8)
 
     # A second call is a no-op: the published manifest matches.
     quant_cache.ensure_quantized(source, "m", 8)

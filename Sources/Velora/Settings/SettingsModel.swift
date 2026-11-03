@@ -327,6 +327,13 @@ final class SettingsModel: ObservableObject {
     /// RAM (from the `status` reply). Empty until the first status lands.
     @Published var cleanupModel: String = ""
     @Published var recommendedCleanupModel: String = ""
+    @Published private(set) var storageRevision = 0
+    @Published private(set) var storageError: String?
+
+    func removeModelCopies(_ id: String) {
+        storageError = nil
+        supervisor?.send(["cmd": "remove_model", "model": id])
+    }
 
     /// STT models the engine offers, in advertised order.
     var sttEngineModels: [EngineModel] { engineModels.filter { $0.kind == "stt" } }
@@ -381,6 +388,7 @@ final class SettingsModel: ObservableObject {
         hudVisible = config.hudVisible
         appearance = config.appearance
         language = config.language
+        cleanupEnabled = config.cleanupEnabled
         languageScope = config.languageScope
         duckOtherAudio = config.duckOtherAudio
         autoPunctuation = config.autoPunctuation
@@ -547,6 +555,7 @@ final class SettingsModel: ObservableObject {
         hotkeyMode = imported.shortcuts.behavior
 
         language = imported.dictation.language
+        cleanupEnabled = imported.engine.cleanupEnabled
         autoPunctuation = imported.dictation.autoPunctuation
         saveAudio = imported.dictation.saveAudio
         duckOtherAudio = imported.dictation.duckOtherAudio
@@ -581,6 +590,10 @@ final class SettingsModel: ObservableObject {
 
     private func applyStatus(_ payload: [String: Any]?) {
         guard let payload else { return }
+        if payload.keys.contains("storage_error") {
+            storageError = payload["storage_error"] as? String
+            storageRevision += 1
+        }
         let models = EngineModel.parse(payload["models"])
         if !models.isEmpty { engineModels = models }
         if let days = payload["audio_retention_days"] as? NSNumber {
@@ -721,6 +734,19 @@ final class SettingsModel: ObservableObject {
             guard !applyingImportedSettings else { return }
             config.language = language
             supervisor?.send(["cmd": "reload_config"])
+        }
+    }
+
+    @Published var cleanupEnabled: Bool = true {
+        didSet {
+            guard !applyingImportedSettings, cleanupEnabled != oldValue else { return }
+            config.cleanupEnabled = cleanupEnabled
+            supervisor?.send(["cmd": "reload_config"])
+            if cleanupEnabled {
+                // Opting back into writing also acquires/loads its weights.
+                downloads.select(model: config.cleanupModel
+                    ?? recommendedCleanupModel, kind: .cleanup)
+            }
         }
     }
 
@@ -1024,8 +1050,9 @@ final class SettingsModel: ObservableObject {
             guard !applyingImportedSettings, languageScope != oldValue else { return }
             config.languageScope = languageScope
             let ramGB = Double(ProcessInfo.processInfo.physicalMemory) / 1_073_741_824
-            let recommended = recommendedSTTModel
-                ?? STTModel.recommended(languageScope: languageScope, ramGB: ramGB)
+            // The last status recommendation belongs to the OLD scope.
+            // Compute for the new answer, never reuse that stale status.
+            let recommended = STTModel.recommended(languageScope: languageScope, ramGB: ramGB)
             if sttModel != recommended {
                 setSpeechModel(recommended)
             }

@@ -12,6 +12,9 @@ final class OnboardingWindowController: NSWindowController, NSWindowDelegate {
 
     /// Called when onboarding finishes or the window closes.
     var onComplete: (() -> Void)?
+    var onSpeechModelChosen: ((String) -> Void)? {
+        didSet { model.onSpeechModelChosen = onSpeechModelChosen }
+    }
 
     init() {
         let window = NSWindow(
@@ -53,6 +56,9 @@ final class OnboardingWindowController: NSWindowController, NSWindowDelegate {
     }
 
     func windowWillClose(_ notification: Notification) {
+        // Closing early still commits the selected/default answer before
+        // the composition root launches the engine.
+        if !AppConfig.shared.onboardingComplete { model.commitLanguageChoice() }
         AppConfig.shared.onboardingComplete = true
         if holdsActivation {
             holdsActivation = false

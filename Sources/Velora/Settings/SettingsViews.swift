@@ -345,7 +345,18 @@ struct DictationSettingsView: View {
                 SettingsFooter("Velora keeps using this microphone when AirPods or another input connect.")
             }
             Section("Writing") {
+                Toggle(isOn: Binding(
+                    get: { !model.cleanupEnabled },
+                    set: { model.cleanupEnabled = !$0 })) {
+                    VStack(alignment: .leading, spacing: 2) {
+                        Text("Fast dictation")
+                        Text("Skip AI rewriting and the writing-model download at startup. Voice Edit and Action Mode need a writing model.")
+                            .font(.caption)
+                            .foregroundStyle(.secondary)
+                    }
+                }
                 Toggle("Automatic punctuation", isOn: $model.autoPunctuation)
+                    .disabled(!model.cleanupEnabled)
                 Toggle(isOn: $model.voiceCommands) {
                     VStack(alignment: .leading, spacing: 2) {
                         Text("Voice commands")
@@ -436,6 +447,7 @@ struct ModelSettingsView: View {
     @State private var storageUsed: String = Self.calculating
     @State private var cachedModels: [ModelStorage.CachedModel] = []
     @State private var changing: Slot?
+    @State private var removalCandidate: String?
 
     /// Which "Change…" is unfolded (at most one at a time).
     private enum Slot { case speech, cleanup }
@@ -472,6 +484,17 @@ struct ModelSettingsView: View {
         }
     }
 
+    private func chooseWhisperModel() {
+        let panel = NSOpenPanel()
+        panel.canChooseDirectories = false
+        panel.allowsMultipleSelection = false
+        panel.message = "Choose whisper.cpp .bin or .gguf weights. Velora uses the original file in place. It never copies, changes, or deletes it. OpenAI .pt and MLX weights use different formats."
+        panel.begin { response in
+            guard response == .OK, let url = panel.url else { return }
+            model.setSpeechModel(url.path)
+        }
+    }
+
     /// Cleanup models the engine advertises (smallest first).
     private var cleanupChoices: [Choice] {
         model.cleanupEngineModels.map {
@@ -503,6 +526,7 @@ struct ModelSettingsView: View {
                 slotRow(
                     title: "Speech to text", slot: .speech, choices: speechChoices,
                     selection: speechBinding)
+                Button("Use an Existing Whisper Model…") { chooseWhisperModel() }
                 if !cleanupChoices.isEmpty {
                     slotRow(
                         title: "Cleanup", slot: .cleanup, choices: cleanupChoices,
@@ -541,25 +565,46 @@ struct ModelSettingsView: View {
                         }
                     }
                 }
-                LabeledContent("Unused downloads") {
-                    HStack(spacing: VeloraSpacing.m) {
-                        Text(Self.sizeLabel(unusedModels, empty: "None"))
-                            .foregroundStyle(.secondary)
-                        Text("Removal unavailable")
-                            .font(.caption)
-                            .foregroundStyle(.secondary)
+                ForEach(cachedModels) { item in
+                    LabeledContent(shortName(item.id)) {
+                        HStack(spacing: VeloraSpacing.m) {
+                            Text(ByteCountFormatter.string(fromByteCount: item.bytes, countStyle: .file))
+                                .foregroundStyle(.secondary)
+                            if ModelStorage.canRemove(item, protected: activeModelIDs) {
+                                Button("Remove Velora Copies…") { removalCandidate = item.id }
+                                    .disabled(!model.downloads.isCurrent)
+                            } else if activeModelIDs.contains(item.id) {
+                                Text("In use").font(.caption).foregroundStyle(.secondary)
+                            } else {
+                                Text("Shared or included").font(.caption).foregroundStyle(.secondary)
+                            }
+                        }
                     }
+                }
+                if let error = model.storageError {
+                    Text(error).font(.caption).foregroundStyle(.secondary)
                 }
             } header: {
                 Text("Storage")
             } footer: {
-                SettingsFooter("Cache removal is unavailable while the engine manages model acquisition. Restart Download discards only owned incomplete files, not completed models.")
+                SettingsFooter("Sizes include downloaded weights and prepared caches, but not the app bundle. macOS may share disk blocks between copies. Removal goes through the engine and never deletes shared Hub files, included resources, or your imported model files.")
             }
         }
         .formStyle(.grouped)
         .scrollContentBackground(.hidden)
-        .task { await refreshStorage() }
+        .task(id: model.storageRevision) { await refreshStorage() }
         .onAppear { model.requestStatus() }
+        .alert("Remove Velora model copies?", isPresented: Binding(
+            get: { removalCandidate != nil },
+            set: { if !$0 { removalCandidate = nil } })) {
+                Button("Cancel", role: .cancel) { removalCandidate = nil }
+                Button("Remove", role: .destructive) {
+                    if let id = removalCandidate { model.removeModelCopies(id) }
+                    removalCandidate = nil
+                }
+            } message: {
+                Text("Only inactive copies managed by Velora are removed. Shared Hub files and imported models stay on your Mac. You can download the model again later.")
+            }
     }
 
     // MARK: Slot rows

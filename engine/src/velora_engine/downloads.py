@@ -75,6 +75,7 @@ class DownloadCoordinator:
         self._active: dict[str, str] = {}
         self._control = asyncio.Lock()
         self._closed = False
+        self._removals: dict[str, asyncio.Task] = {}
 
     def snapshot(self) -> dict:
         # Full detached snapshots make reconnects authoritative; callers cannot
@@ -130,13 +131,13 @@ class DownloadCoordinator:
             raise _error("cancelled", "coordinator_closed", "Download coordinator is closed.")
         if kind not in ("stt", "cleanup") or not model:
             raise ValueError("invalid model download key")
-        from .models import lookup
+        from .models import lookup, hub_repo
         from huggingface_hub.utils import validate_repo_id
 
         # Reject URLs/tokens before publishing or persisting a model key. Explicit
         # local paths keep the compatibility behavior of ensure_downloaded.
         if not Path(model).expanduser().exists():
-            validate_repo_id(model)
+            validate_repo_id(hub_repo(model))
         # A model has one kind/owner even if a malformed client submits both keys.
         info = lookup(model)
         conflicting = any(key[0] == model and key[1] != kind for key in self._entries)
@@ -153,6 +154,8 @@ class DownloadCoordinator:
         return entry
 
     async def ensure(self, model_id: str, kind: str) -> DownloadResult:
+        if model_id in self._removals:
+            raise _error("command", "model_removing", "Model files are being removed. Try again shortly.")
         if self._closed:
             raise _error("cancelled", "coordinator_closed", "Download coordinator is closed.")
         entry = self._entries.get((model_id, kind))
@@ -166,6 +169,30 @@ class DownloadCoordinator:
             return entry.result
         # A caller's cancellation must not cancel the shared transfer for others.
         return await asyncio.shield(entry.task)
+
+    async def remove(self, model: str) -> int:
+        if self._closed or model in self._removals:
+            raise _error("command", "model_removing", "Model storage is busy. Try again shortly.")
+        if model in self._active.values() or any(
+            key[0] == model and entry.task is not None and not entry.task.done()
+            for key, entry in self._entries.items()
+        ):
+            raise _error("command", "model_in_use", "Choose another model before removing these files.")
+        from .model_storage import remove_owned
+        task = asyncio.create_task(asyncio.to_thread(remove_owned, model, self._root))
+        self._removals[model] = task
+
+        def completed(done):
+            self._removals.pop(model, None)
+            if not done.cancelled() and done.exception() is None:
+                for key in list(self._entries):
+                    if key[0] == model:
+                        self._entries.pop(key)
+                self._notify_changed()
+
+        task.add_done_callback(completed)
+        # Caller cancellation must not reopen acquisition until disk work stops.
+        return await asyncio.shield(task)
 
     def _matching(self, model, kind, attempt):
         entry = self._entries.get((model, kind))
@@ -285,6 +312,8 @@ class DownloadCoordinator:
     async def close(self) -> None:
         async with self._control:
             self._closed = True
+            if self._removals:
+                await asyncio.gather(*self._removals.values(), return_exceptions=True)
             for entry in self._entries.values():
                 await self._stop_entry(entry)
                 if entry.item["state"] in ("queued", "downloading", "verifying", "retry_wait"):

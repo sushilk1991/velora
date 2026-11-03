@@ -200,6 +200,16 @@ rsync -a \
   "$BUNDLED_ENGINE/"
 cp LICENSE "$BUNDLED_ENGINE/LICENSE"
 
+# Ship one compact pinned English model. Weights stay in ignored build/
+# state, never Git. The manifest and CC BY attribution travel with them.
+# Verification runs before signing, so corrupt assets cannot enter a bundle.
+python3 scripts/prepare-bundled-model.py --output build/bundled-models --model bark-3.0
+mkdir -p "$APP/Contents/Resources/Models"
+rsync -a build/bundled-models/bark-3.0 "$APP/Contents/Resources/Models/"
+if [[ -d Resources/ModelNotices ]]; then
+  rsync -a Resources/ModelNotices "$APP/Contents/Resources/"
+fi
+
 # Build stamp: lets the app detect a new engine version and re-sync it to
 # Application Support (preserving the existing venv).
 GIT_REV="$(git rev-parse HEAD 2>/dev/null || echo unknown)"

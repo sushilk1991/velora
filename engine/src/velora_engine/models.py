@@ -57,13 +57,30 @@ _SINGLE_FILE_SHA256 = {
 # language, and they should not download a multilingual model to get it.
 LANGUAGE_SCOPES = ("multilingual", "english")
 
+BARK_MODEL = "ConwayResearch/Underdog-Bark-3.0"
+BARK_CLEAN_MODEL = "ConwayResearch/Underdog-Bark-3.0-Clean"
+BARK_ANE_MODEL = BARK_MODEL + ":coreml-ane"
+_BARK_KEYS = {
+    BARK_MODEL: "bark-3.0",
+    BARK_CLEAN_MODEL: "bark-3.0-clean",
+    BARK_ANE_MODEL: "bark-3.0-ane",
+}
+
+
+def bark_spec(model_id: str):
+    key = _BARK_KEYS.get(model_id)
+    if key is None:
+        return None
+    from .bundled_models import lookup as bundled_lookup
+    return bundled_lookup(key)
+
 
 @dataclass(frozen=True)
 class ModelInfo:
     id: str
     name: str  # short title for the Models pane ("Whisper Turbo")
     kind: str  # "stt" | "cleanup"
-    backend: str  # "parakeet" | "whisper" | "transcribe-cpp" | "mlx-lm"
+    backend: str  # parakeet | whisper | transcribe-cpp | bark | bark-coreml | mlx-lm
     size: str  # human-readable download size
     description: str
 
@@ -161,6 +178,21 @@ REGISTRY: list[ModelInfo] = [
         size="0.5 GB",
         description="Smallest download, 99 languages. Less accurate.",
     ),
+    ModelInfo(
+        id=BARK_MODEL, name="Bark English", kind="stt", backend="bark",
+        size="0.16 GB",
+        description="Compact English recognition. Included with the app. Precision fits this Mac's memory.",
+    ),
+    ModelInfo(
+        id=BARK_CLEAN_MODEL, name="Bark Clean", kind="stt", backend="bark",
+        size="0.18 GB",
+        description="English recognition trained to remove fillers and false starts. Works with Fast dictation.",
+    ),
+    ModelInfo(
+        id=BARK_ANE_MODEL, name="Bark Neural Engine", kind="stt", backend="bark-coreml",
+        size="0.20 GB",
+        description="English on the Apple Neural Engine, leaving the GPU free. First preparation can take several minutes. Requires Python 3.12 or 3.13.",
+    ),
     # --- cleanup / formatting LLMs, smallest first ---
     ModelInfo(
         id="mlx-community/Qwen3.5-2B-MLX-4bit",
@@ -242,12 +274,12 @@ def recommended_cleanup_model(ram_gb: float | None = None) -> str:
 
 
 # STT defaults by language scope, tiered by RAM (GB), best-that-fits first.
-# "english" is one tier: Parakeet v2 is the smallest RAM footprint of the
-# English options once locally quantized (~0.4-0.7 GB resident), so no RAM
-# tier is needed below it. "multilingual" keeps Whisper Turbo, dropping to
+# "english" uses the included compact Bark model; its derived precision
+# (4/8/16 bits) fits RAM without downloading a second source artifact.
+# "multilingual" keeps Whisper Turbo, dropping to
 # its Q4 build on small-RAM Macs (0.5 GB download instead of 1.6 GB).
 _STT_TIERS: dict[str, list[tuple[int, str]]] = {
-    "english": [(0, "mlx-community/parakeet-tdt-0.6b-v2")],
+    "english": [(0, BARK_MODEL)],
     "multilingual": [
         (10, "mlx-community/whisper-large-v3-turbo"),
         (0, "mlx-community/whisper-large-v3-turbo-q4"),
@@ -278,12 +310,12 @@ def parakeet_quant_bits(ram_gb: float | None = None) -> int | None:
 
     One fp16 download serves every Mac: the engine derives an int8 (or int4)
     cache locally instead of asking the user to download a separate variant.
-    Measured on Apple silicon (2026-11, M4/M5): the int8 cache is ~2.7×
-    smaller in resident weights (2.47 GB → 0.93 GB for parakeet v2) with
-    byte-identical transcripts, at ~1.6× slower decode — a bargain on
-    small-RAM Macs where the cleanup model competes for the same memory,
-    a pure loss on large ones. Full precision stays on Macs with RAM to
-    spare; int4 is the floor for 8 GB machines.
+    With retained floating parameters converted to FP16 first, the derived
+    int8 Parakeet v2 artifact measured 734 MB versus the 2.47 GB Hub source.
+    This is a disk-size comparison, not an RSS claim: from_pretrained also
+    casts the original source at load time. Speed depends on the backend
+    and hardware. Full precision stays on Macs with RAM to spare; int4 is
+    the floor for 8 GB machines.
     """
     ram = ram_gb if ram_gb is not None else physical_ram_gb()
     if ram >= 24:
@@ -299,6 +331,17 @@ def registry_payload() -> list[dict[str, str]]:
 
 def lookup(model_id: str) -> ModelInfo | None:
     return _BY_ID.get(model_id)
+
+
+def hub_repo(model_id: str) -> str:
+    """Resolve a catalog file selector to its real Hub repository.
+
+    Only registered aliases are mapped; arbitrary colon IDs still fail Hub
+    validation. Owned cache identity remains the catalog ID, not this repo.
+    """
+    if model_id == BARK_ANE_MODEL:
+        return BARK_MODEL
+    return _SINGLE_FILE_REPOS.get(model_id, model_id)
 
 
 @functools.lru_cache(maxsize=8)
@@ -474,9 +517,32 @@ def _legacy_cached(model_id: str) -> str | None:
     from huggingface_hub.errors import LocalEntryNotFoundError
 
     try:
+        spec = bark_spec(model_id)
+        if spec is not None:
+            from .bundled_models import (bundled_import_root, import_dir_name,
+                                         import_bundled_model, verify_tree, BundleIntegrityError)
+            imported = bundled_import_root() / import_dir_name(spec)
+            if imported.is_dir():
+                try:
+                    verify_tree(imported, spec)
+                    return str(imported)
+                except BundleIntegrityError:
+                    pass
+            import os
+            bundle_root = os.environ.get("VELORA_BUNDLED_MODELS_DIR")
+            if bundle_root:
+                bundled = Path(bundle_root) / spec.key
+                if bundled.is_dir():
+                    return str(import_bundled_model(bundled, spec.key))
+            path = snapshot_download(repo_id=spec.repo, revision=spec.revision, local_files_only=True)
+            try:
+                verify_tree(Path(path), spec, follow_symlinks=True)
+            except BundleIntegrityError as error:
+                raise ValueError("legacy Bark artifact integrity failed") from error
+            return path
         filename = _SINGLE_FILE_MODELS.get(model_id)
         if filename:
-            path = hf_hub_download(repo_id=model_id, filename=filename,
+            path = hf_hub_download(repo_id=hub_repo(model_id), filename=filename,
                                    revision=_SINGLE_FILE_REVISIONS[model_id], local_files_only=True)
             if not _single_file_is_valid(model_id, path):
                 raise ValueError("legacy pinned artifact integrity failed")
@@ -506,13 +572,20 @@ def ensure_downloaded(model_id: str) -> str:
     if owned is not None:
         return owned
 
+    if bark_spec(model_id) is not None:
+        # Reuse the pinned, bounded worker pipeline instead of fetching the
+        # entire repository (which contains other runtimes and large weights).
+        from .download_worker import _run
+        from .download_cache import _cache_root
+        return _run(model_id, _cache_root(), False, lambda _: None)[0]
+
     from huggingface_hub import hf_hub_download, snapshot_download
     from huggingface_hub.errors import LocalEntryNotFoundError
 
     filename = _SINGLE_FILE_MODELS.get(model_id)
     if filename is not None:
         revision = _SINGLE_FILE_REVISIONS[model_id]
-        repo = _SINGLE_FILE_REPOS.get(model_id, model_id)
+        repo = hub_repo(model_id)
         try:
             path = hf_hub_download(
                 repo_id=repo,

@@ -47,16 +47,28 @@ def _check_manifest(spec: _Manifest) -> None:
     # Immutable commit ids and relative file names bound every filesystem operation.
     if not _REVISION_RE.fullmatch(spec.revision) or not spec.files:
         raise ValueError("invalid manifest revision or empty files")
-    from .models import (TRANSCRIBE_CPP_Q8_MODEL, TRANSCRIBE_CPP_Q8_REVISION,
-                         TRANSCRIBE_CPP_Q8_SHA256, _SINGLE_FILE_MODELS)
+    from .models import (_SINGLE_FILE_MODELS, _SINGLE_FILE_REVISIONS,
+                         _SINGLE_FILE_SHA256, bark_spec)
 
-    # The experimental artifact keeps its audited digest even in owned manifests.
-    if spec.model == TRANSCRIBE_CPP_Q8_MODEL:
+    pinned = bark_spec(spec.model)
+    if pinned is not None:
+        expected = {file.path: (file.size, file.sha256, "sha256") for file in pinned.files}
+        actual = {file.name: (file.size, file.digest, file.algorithm) for file in spec.files}
+        if spec.revision != pinned.revision or any(
+                name not in expected or expected[name] != identity
+                for name, identity in actual.items()):
+            raise ValueError("pinned Bark manifest mismatch")
+        # Per-file path methods also validate a one-file submanifest. The
+        # persisted/full inventory must be checked at resolve/save boundaries.
+
+    # Every single-file catalog entry keeps its audited identity offline too;
+    # a modified owned manifest must never weaken the shipped SHA-256 pin.
+    if spec.model in _SINGLE_FILE_MODELS:
         expected = _SINGLE_FILE_MODELS[spec.model]
-        if (spec.revision != TRANSCRIBE_CPP_Q8_REVISION or len(spec.files) != 1
+        if (spec.revision != _SINGLE_FILE_REVISIONS[spec.model] or len(spec.files) != 1
                 or spec.files[0].name != expected or spec.files[0].algorithm != "sha256"
-                or spec.files[0].digest != TRANSCRIBE_CPP_Q8_SHA256):
-            raise ValueError("pinned Q8 manifest mismatch")
+                or spec.files[0].digest != _SINGLE_FILE_SHA256[spec.model]):
+            raise ValueError("pinned artifact manifest mismatch")
     names = set()
     for file in spec.files:
         path = PurePosixPath(file.name)
@@ -127,6 +139,10 @@ class _Cache:
         _check_manifest(spec)
         if spec.model != self._model:
             raise ValueError("manifest model mismatch")
+        from .models import bark_spec
+        pinned = bark_spec(spec.model)
+        if pinned is not None and {file.name for file in spec.files} != {file.path for file in pinned.files}:
+            raise ValueError("incomplete Bark manifest")
         path = self._guard(self._base / "manifests" / (spec.revision + ".json"))
         value = asdict(spec)
         # Round trip normalizes the tuple before comparing immutable identities.
@@ -153,6 +169,10 @@ class _Cache:
             spec = _Manifest(value["model"], value["revision"], tuple(
                 _File(**item) for item in value["files"]))
             _check_manifest(spec)
+            from .models import bark_spec
+            pinned = bark_spec(spec.model)
+            if pinned is not None and {file.name for file in spec.files} != {file.path for file in pinned.files}:
+                raise ValueError("incomplete Bark manifest")
             if spec.model != self._model or spec.revision != revision:
                 raise ValueError("manifest identity mismatch")
             return spec

@@ -470,6 +470,12 @@ final class EngineSupervisor: NSObject, EngineClientDelegate {
             env["UV_CACHE_DIR"] = support.appendingPathComponent("uv-cache").path
             env["UV_PYTHON_INSTALL_DIR"] = support.appendingPathComponent("python").path
         }
+        if let resources = Bundle.main.resourceURL {
+            let models = resources.appendingPathComponent("Models", isDirectory: true)
+            if FileManager.default.fileExists(atPath: models.path) {
+                env["VELORA_BUNDLED_MODELS_DIR"] = models.path
+            }
+        }
         proc.environment = env
 
         // First run on a fresh machine: `uv run` creates the venv and

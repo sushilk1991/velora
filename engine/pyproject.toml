@@ -25,6 +25,8 @@ dependencies = [
     "soundfile>=0.12",
     "sherpa-onnx>=1.13.4",
     "sherpa-onnx-core>=1.13.4",
+    "constriction==0.5.0",
+    "coremltools==9.0 ; python_full_version < '3.14'",
 ]
 
 [project.scripts]

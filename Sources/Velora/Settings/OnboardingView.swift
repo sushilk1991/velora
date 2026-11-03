@@ -25,9 +25,11 @@ final class OnboardingModel: ObservableObject {
 
     /// Dictation language choice ("english" / "multilingual"), preselected
     /// from the current setting so the step reflects a re-run.
-    @Published var languageScope: String = AppConfig.shared.languageScope {
-        didSet { chooseLanguageScopeIfNeeded(languageScope) }
-    }
+    @Published var languageScope: String = "english"
+    @Published var smartWriting: Bool = true
+    /// The composition root starts acquisition only after this answer lands.
+    var onSpeechModelChosen: ((String) -> Void)?
+    private var languageChoiceCommitted = false
 
     let downloads: DownloadState
     private var downloadObserver: AnyCancellable?
@@ -79,7 +81,11 @@ final class OnboardingModel: ObservableObject {
     init(now: @escaping () -> Date = Date.init, config: AppConfig = .shared) {
         self.now = now
         self.appConfig = config
-        _languageScope = Published(initialValue: config.languageScope)
+        _languageScope = Published(initialValue: (config.onboardingComplete || config.preservesSetupModelChoice)
+            ? config.languageScope : "english")
+        _smartWriting = Published(initialValue: (config.onboardingComplete || config.preservesSetupModelChoice)
+            ? config.cleanupEnabled
+            : (config.cleanupEnabled && ProcessInfo.processInfo.physicalMemory >= 12 * 1_073_741_824))
         downloads = EngineSupervisor.latestDownloads ?? DownloadState()
         speechReady = downloads.speechReady
         downloadObserver = downloads.objectWillChange.sink { [weak self] _ in
@@ -149,6 +155,7 @@ final class OnboardingModel: ObservableObject {
     }
 
     func advance() {
+        if step == .languages { commitLanguageChoice() }
         guard let next = Step(rawValue: step.rawValue + 1) else {
             onFinish?()
             return
@@ -229,16 +236,32 @@ final class OnboardingModel: ObservableObject {
     /// Applies the onboarding language choice: persists the scope, and when
     /// the recommended model for it differs from the one already selected,
     /// switches to it. Runs before the user can touch the model picker, so
-    /// the switch is the first-run default adoption, not an override of a
-    /// deliberate choice. The engine is mid-start (it began downloading the
-    /// default model); `select(model:)` redirects that download.
-    private func chooseLanguageScopeIfNeeded(_ scope: String) {
-        appConfig.languageScope = scope
+    /// the switch is the first-run default adoption. The composition root
+    /// starts the engine only after this answer is committed; a permission
+    /// repair re-run preserves an unchanged custom model choice.
+    func commitLanguageChoice() {
+        guard !languageChoiceCommitted,
+              ["english", "multilingual"].contains(languageScope) else { return }
+        languageChoiceCommitted = true
+        appConfig.cleanupEnabled = smartWriting
+        // Portable settings copied to a new Mac are deliberate choices too,
+        // even though that Mac has never completed onboarding.
+        if (appConfig.onboardingComplete || appConfig.preservesSetupModelChoice)
+            && appConfig.languageScope == languageScope {
+            if !appConfig.onboardingComplete { onSpeechModelChosen?(appConfig.sttModel) }
+            return
+        }
+        appConfig.languageScope = languageScope
         let ramGB = Double(ProcessInfo.processInfo.physicalMemory) / 1_073_741_824
-        let recommended = STTModel.recommended(languageScope: scope, ramGB: ramGB)
-        guard appConfig.sttModel != recommended else { return }
-        appConfig.sttModel = recommended
-        downloads.select(model: recommended, kind: .stt)
+        let recommended = STTModel.recommended(languageScope: languageScope, ramGB: ramGB)
+        if let onSpeechModelChosen {
+            onSpeechModelChosen(recommended)
+        } else if !appConfig.onboardingComplete {
+            // A first-run config is committed before the engine launches.
+            appConfig.sttModel = recommended
+        } else {
+            downloads.select(model: recommended, kind: .stt)
+        }
     }
 }
 
@@ -380,19 +403,30 @@ struct OnboardingView: View {
     /// because the answer changes what downloads next, and that consequence
     /// deserves more than a dropdown.
     private var languagesStep: some View {
-        stepLayout(title: "Which languages do you dictate?") {
+        stepLayout(title: "Choose your dictation languages") {
             LanguageChoiceCard(
                 title: "English only",
-                detail: "Velora downloads a small, fast English model.",
+                detail: "Use a compact English model. Add other languages later.",
                 selected: model.languageScope == "english") {
                     model.languageScope = "english"
                 }
             LanguageChoiceCard(
                 title: "English and other languages",
-                detail: "Velora keeps its multilingual model — Hindi, Indian English, and 97 more.",
+                detail: "Download support for 99 languages, including Hindi. Choose this if you mix languages.",
                 selected: model.languageScope == "multilingual") {
                     model.languageScope = "multilingual"
                 }
+            Toggle(isOn: $model.smartWriting) {
+                VStack(alignment: .leading, spacing: VeloraSpacing.xs) {
+                    Text("Add smart writing")
+                    Text("Optional AI rewriting downloads a separate model. Leave this off for fast dictation with less memory.")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                        .fixedSize(horizontal: false, vertical: true)
+                }
+            }
+            .toggleStyle(.switch)
+            .frame(width: 480)
         } button: {
             Button("Continue") { model.pressContinue(isRepeat: Self.pressIsRepeat) }
                 .buttonStyle(.primaryCapsule)
@@ -607,6 +641,7 @@ private struct LanguageChoiceCard: View {
     let detail: String
     let selected: Bool
     let action: () -> Void
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
 
     var body: some View {
         Button(action: action) {
@@ -636,7 +671,8 @@ private struct LanguageChoiceCard: View {
                         lineWidth: 1.5))
         }
         .buttonStyle(.plain)
-        .animation(VeloraMotion.quick, value: selected)
+        .accessibilityAddTraits(selected ? .isSelected : [])
+        .animation(reduceMotion ? nil : VeloraMotion.quick, value: selected)
     }
 }
 

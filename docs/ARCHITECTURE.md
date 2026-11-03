@@ -61,9 +61,10 @@ private MediaRemote APIs. Meeting capture does not use this policy.
 
 Opt-in "Quiet other audio while recording" (Dictation › Input, default off)
 complements the pause with `OutputDuckingController`: it lowers the default
-output device's master volume to a third while recording and restores the
-exact previous level at every release point (stop, cancel, failure,
-termination). Muted or silent outputs are never touched, and devices without
+output device's virtual main volume to a third while recording and restores
+the previous level on that same device at every release point (stop, cancel,
+failure, termination). Manual volume changes are respected. Muted or silent
+outputs are never touched, and devices without
 a macOS-controlled volume (some displays) fail the capability probe and skip.
 Duck and restore are idempotent, so overlapping session lifecycles can never
 wedge the volume; restores are unconditional, so toggling the setting
@@ -136,8 +137,13 @@ Settings and onboarding share the supervisor's snapshots. Recovery actions
 stay disabled until a reply snapshot. The wire has no recovery-command
 correlation: an unrelated equal-sequence read can reenable controls before the
 decision completes. Engine serialization still prevents competing workers.
-Direct UI cache deletion is unavailable until removal is engine-coordinated;
-Settings counts owned and legacy model storage without deleting locks.
+Settings groups source weights and derived caches per model, with APFS/shared
+storage caveats. `remove_model` is engine-coordinated: serving/configured,
+pending, and cached reprocess models are protected; inference and acquisition
+must be idle. The coordinator fences reacquisition until removal's disk work
+really finishes, even after cancellation. Writer locks survive deletion.
+Only marked Velora-owned copies are removed, never shared Hub files, signed
+bundle resources, or imported external model files.
 
 Selection accepts an optional nonempty `request_id` of at most 128 characters.
 `model_set` echoes it; selection errors include `command:"set_model"`, model,
@@ -527,21 +533,37 @@ A model different from the live one is loaded once and cached across reprocess c
 
 **STT models.** The default is chosen by the dictation **language scope** —
 the question onboarding asks (English only, or English and other languages).
-"English" installs `parakeet-tdt-0.6b-v2` (the smallest, fastest English
-tier); "multilingual" keeps `whisper-large-v3-turbo` (Hindi, Indian English,
-and the top world languages; batch decode on stop), dropping to its Q4 build
-on Macs under 10 GB of RAM (`models.recommended_stt_model` is the single
-table; the engine mirrors it to Swift for the pre-status onboarding step,
-and a standalone engine adopts it on first run). The picker also offers
-full `whisper-large-v3` (highest accuracy), a Hindi/Hinglish specialist,
-the parakeet models, and two English-only whisper.cpp weights pinned to the
-upstream `ggerganov/whisper.cpp` revision (Base 0.15 GB, Small 0.47 GB;
-single-file downloads with SHA-256 verification). **Parakeet quantization
-tiers:** one fp16 download serves every Mac — on small-RAM machines the
-engine derives an int8 (or int4) cache locally (affine, group_size 64) into
-`~/.velora/quant-cache`, published atomically only after the saved weights
-reload (`quant_cache.py`; ~2.7× smaller resident weights at ~1.6× decode
-cost, measured M4/M5). Any cache failure falls back to full precision.
+"English" uses the included **Bark English** source weights (0.16 GB,
+Conway Research's English-specialized Parakeet derivative). Packaging verifies
+pinned SHA-256s and ships CC BY 4.0 attribution; the local importer seeds it
+via APFS clonefile with a copy fallback. MLX caches are derived locally:
+int4 below 12 GB RAM, int8 below 24 GB, FP16 otherwise. No separate source
+model download is needed for another precision. First-run acquisition waits
+until this language answer is committed; existing/imported custom model
+choices are preserved. Python dependencies still need first-run setup.
+"Multilingual" keeps `whisper-large-v3-turbo`, dropping to Q4 below 10 GB.
+The engine reports its recommendation in status; Swift mirrors the table
+for pre-engine onboarding. Existing installs keep their saved speech model.
+
+The picker also offers **Bark Clean** (removes fillers and false starts in
+recognition), **Bark Neural Engine** (CoreML encoder, NumPy TDT decoder),
+Whisper Large, a Hindi/Hinglish specialist, Parakeet, and pinned English-only
+whisper.cpp Base/Small weights (0.15/0.47 GB). Existing ggml/GGUF files can
+be used in place: no copy, mutation, or deletion of the user's file. ANE
+compilation uses a stable verified compiled path and warms both 8/15-second
+windows before readiness; first preparation can take several minutes, with
+a separate bounded load budget. The optional CoreML backend requires Python
+3.12/3.13 and Apple silicon; MLX remains the default. Both Bark runtimes cut
+bounded windows at quiet spans and fail rather than silently dropping an
+empty audible interior piece. Derived cache identities include dependency
+versions and source identities, with reload validation and hash checks on
+reuse. Low-RAM cache failures never silently allocate full-precision weights.
+
+"Add smart writing" during setup is optional (off by default below 12 GB).
+Settings › Dictation › Fast dictation uses the existing `cleanup_enabled`
+preference: no generative rewrite or transliteration, no startup writing-model
+acquisition, and an idle loaded writer is hibernated. Explicit dictionary
+replacements still apply. Advanced writing features need a writing model.
 Cleanup uses
 the same meaning-preserving prompt for Latin and non-Latin transcripts, retains
 the input language and script, and applies list/structure cues semantically.
@@ -606,6 +628,8 @@ Concurrency: Swift 5 language mode (`.swiftLanguageMode(.v5)`) to avoid strict-c
 | `formatting.py` | deterministic gate, mode resolution, prompt assembly, replacements |
 | `models.py` | HF download/verify, model registry (user-selectable), language-scope + RAM-tied defaults |
 | `quant_cache.py` | locally derived int8/int4 parakeet caches: build → reload-validate → atomic publish under a lock |
+| `bark.py`, `bundled_models.py` | pinned compact English MLX/ANE adapters, verified local model seeding, warm/compiled caches |
+| `model_storage.py` | writer-locked removal of inactive Velora-owned model copies |
 | `config.py` | modes/vocab loading shared with app via ~/.velora/ |
 | `media.py` | audio decode and exact-coverage meeting chunk planning |
 | `meeting_notes.py` | schema-checked chunk/map-reduce meeting summaries, decisions, and actions |

@@ -949,6 +949,9 @@ class Engine:
             log.debug("mlx cache clear failed", exc_info=True)
 
     async def _close_stt_backend(self, backend: STTBackend) -> None:
+        cancel_load = getattr(backend, "cancel_load", None)
+        if callable(cancel_load):
+            cancel_load()
         close = getattr(backend, "close", None)
         if callable(close):
             try:
@@ -1263,8 +1266,15 @@ class Engine:
                 backend.model_id = model
 
         try:
-            await asyncio.wait_for(self._stt_call(load), _STT_LOAD_S)
+            # A pinned CoreML backend may need a one-time ANE compile.
+            # Only trusted backend code supplies this bound, never the wire.
+            bound = getattr(backend, "load_timeout_s", _STT_LOAD_S)
+            bound = min(600.0, max(_STT_LOAD_S, float(bound)))
+            await asyncio.wait_for(self._stt_call(load), bound)
         except (asyncio.TimeoutError, asyncio.CancelledError):
+            cancel_load = getattr(backend, "cancel_load", None)
+            if callable(cancel_load):
+                cancel_load()
             self._stt_quarantined = bool(self._stt_pending)
             raise
 
@@ -2129,9 +2139,13 @@ class Engine:
                 # (possibly changed) setting without reloading the backend.
                 if hasattr(self.stt, "language"):
                     self.stt.language = self.config.language
+                if not self.config.cleanup_enabled:
+                    self._schedule_action_cleanup()
                 await self._send({"event": "config_reloaded"})
             elif cmd == "download_status":
                 await self._publish_downloads(force=True)
+            elif cmd == "remove_model":
+                await self._cmd_remove_model(msg)
             elif cmd in ("retry_download", "restart_download"):
                 # Retry can await worker reaping; it must not hold the reader.
                 task = asyncio.create_task(self._cmd_download_retry(msg))
@@ -4178,6 +4192,7 @@ class Engine:
                     or self._action_session is not None
                     or not (self.cleanup is not None and self.cleanup.loaded)
                     or not self.config.vocab_mining
+                    or not self.config.cleanup_enabled
                 ):
                     return
                 # Keep the history cursor untouched while memory is pressured.
@@ -4286,6 +4301,30 @@ class Engine:
                 "version": __version__,
             }
         )
+
+    async def _cmd_remove_model(self, msg: dict[str, Any]) -> None:
+        model = msg.get("model")
+        protected = {self.stt.model_id, self.config.stt_model, self.config.cleanup_model}
+        if self._reprocess_backend is not None:
+            protected.add(self._reprocess_backend.model_id)
+        protected.update(self._model_targets.values())
+        error = None
+        if not isinstance(model, str) or models.lookup(model) is None:
+            error = "Only Velora-managed model copies can be removed."
+        elif (model in protected or not self._cleanup_model_is_idle()
+              or self._stt_pending or self._adopting
+              or any(not job.done() for job in self._model_jobs.values())):
+            error = "Model files are in use. Wait for current work and choose another model."
+        else:
+            try:
+                await self._downloads.remove(model)
+                await self._publish_downloads(force=True)
+            except (OSError, ValueError, DownloadError):
+                error = "Model files could not be removed. Another process may be using them."
+        await self._send({
+            "event": "status", "removed_model": model if error is None else None,
+            "storage_error": error,
+        })
 
     async def _cmd_set_model(self, msg: dict[str, Any], *, wait: bool = True) -> None:
         model = msg.get("model")
@@ -4674,7 +4713,7 @@ class Engine:
         if not callable(hibernate):
             return
         pressure = await asyncio.to_thread(_memory_pressure_level)
-        if pressure < 2:
+        if pressure < 2 and self.config.cleanup_enabled:
             return
         try:
             if await hibernate():

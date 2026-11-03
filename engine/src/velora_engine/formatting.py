@@ -1032,6 +1032,15 @@ def run_gate(
 
     text = raw.strip()
 
+    # Fast dictation is an explicit no-writing-model contract, including
+    # romanization and smart Terminal prose. Keep the recognizer output and
+    # explicit dictionary replacements, with no generative rewrite.
+    if not getattr(config, "cleanup_enabled", True):
+        return GateResult(
+            Mode(name="Raw", formatting="off"), category, False,
+            "cleanup_disabled", text, replacements=replacements,
+            auto_punctuation=False)
+
     # Romanization is explicit SCRIPT intent, not cleanup, so it outranks
     # every formatting decision below — including formatting-off modes. It
     # used to live after the off-branch return, which meant dictating Hindi

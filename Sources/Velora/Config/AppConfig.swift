@@ -82,6 +82,21 @@ struct STTModel: Identifiable, Equatable {
             displayName: "Whisper Turbo Small",
             size: "0.5 GB", speed: "Fast", languages: "99 languages, smallest"
         ),
+        STTModel(
+            id: "ConwayResearch/Underdog-Bark-3.0",
+            displayName: "Bark English", size: "0.16 GB",
+            speed: "Fast", languages: "English only. Included with the app"
+        ),
+        STTModel(
+            id: "ConwayResearch/Underdog-Bark-3.0-Clean",
+            displayName: "Bark Clean", size: "0.18 GB",
+            speed: "Fast", languages: "English only. Removes fillers and false starts"
+        ),
+        STTModel(
+            id: "ConwayResearch/Underdog-Bark-3.0:coreml-ane",
+            displayName: "Bark Neural Engine", size: "0.20 GB",
+            speed: "Fast", languages: "English only. First preparation takes several minutes"
+        ),
     ]
 
     /// The speech model a fresh install gets for a dictation language scope,
@@ -94,7 +109,7 @@ struct STTModel: Identifiable, Equatable {
         let scope = ["english", "multilingual"].contains(languageScope) ? languageScope : "multilingual"
         switch scope {
         case "english":
-            return "mlx-community/parakeet-tdt-0.6b-v2"
+            return "ConwayResearch/Underdog-Bark-3.0"
         default:
             return ramGB >= 10
                 ? "mlx-community/whisper-large-v3-turbo"
@@ -152,6 +167,9 @@ final class AppConfig {
     private var settingsDocument = SettingsDocument.defaults
     private var localSettings = SettingsDocument.MachineLocalSettings.defaults
     private var settingsWriteBlockError: SettingsDocumentError?
+    /// Existing or imported speech choices outrank a new machine\'s setup
+    /// default. Captured before migration creates the first settings file.
+    private(set) var preservesSetupModelChoice: Bool = false
     private static let engineConfigLock = NSLock()
 
     /// `~/.velora` — shared home for socket, config, modes, history.
@@ -289,6 +307,11 @@ final class AppConfig {
         self.defaults = defaults
         settingsStorageURL = settingsFileURL
         engineConfigStorageURL = engineConfigURL
+        let existingEngine = (try? Data(contentsOf: engineConfigURL))
+            .flatMap { try? JSONSerialization.jsonObject(with: $0) as? [String: Any] }
+        preservesSetupModelChoice = FileManager.default.fileExists(atPath: settingsFileURL.path)
+            || (existingEngine?["stt_model"] as? String)?.isEmpty == false
+            || (defaults.object(forKey: Key.sttModel) as? String)?.isEmpty == false
         if registerDefaults {
             defaults.register(defaults: [
                 Key.hotkeyMode: HotkeyMode.hold.rawValue,
@@ -981,7 +1004,11 @@ final class AppConfig {
 
     var sttModel: String {
         get { readSetting(\.models.speech) }
-        set { updateSettings { $0.models.speech = newValue }; writeEngineConfig() }
+        set {
+            updateSettings { $0.models.speech = newValue }
+            preservesSetupModelChoice = true
+            writeEngineConfig()
+        }
     }
 
     /// Which languages the user dictates ("english" / "multilingual") —
@@ -1025,6 +1052,11 @@ final class AppConfig {
 
     var portableEngineSettings: SettingsDocument.Engine {
         readSetting(\.engine)
+    }
+
+    var cleanupEnabled: Bool {
+        get { readSetting(\.engine.cleanupEnabled) }
+        set { updateSettings { $0.engine.cleanupEnabled = newValue }; writeEngineConfig() }
     }
 
     /// Whether the engine archives each dictation's audio clip under
@@ -1320,6 +1352,7 @@ final class AppConfig {
             _ = writeEngineConfig()
             throw SettingsDocumentError.engineProjectionFailed
         }
+        preservesSetupModelChoice = true
         try? FileManager.default.removeItem(at: recoveryURL)
     }
 

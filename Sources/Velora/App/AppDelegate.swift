@@ -179,6 +179,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     private var aboutController: AboutWindowController?
     private var meetingNotesController: MeetingNotesWindowController?
     private var onboardingController: OnboardingWindowController?
+    private var engineStarted = false
     private var hotkeyObserver: NSObjectProtocol?
     private var updateCheckObserver: NSObjectProtocol?
     private var accessibilityObserver: NSObjectProtocol?
@@ -726,7 +727,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         // Repair unreadable interrupted rows even if engine startup later
         // degrades. Valid rows are queued now and begin once `.ready` arrives.
         meetingProcessor.resumeRecoverable()
-        supervisor.start()
+        // Do not download the old multilingual default while the user is
+        // still answering the first-run language question.
+        if config.onboardingComplete { startEngineIfNeeded() }
         dictionarySync.start()
         meetingCoordinator.start()
 
@@ -945,11 +948,27 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
     // MARK: - Windows
 
+    private func startEngineIfNeeded() {
+        guard !engineStarted else { return }
+        engineStarted = true
+        supervisor.start()
+    }
+
     private func showOnboarding(startingAt step: OnboardingModel.Step? = nil) {
         if onboardingController == nil {
             let controller = OnboardingWindowController()
+            controller.onSpeechModelChosen = { [weak self] model in
+                guard let self else { return }
+                if !self.engineStarted {
+                    self.config.sttModel = model
+                    self.startEngineIfNeeded()
+                } else {
+                    self.supervisor.downloads.select(model: model, kind: .stt)
+                }
+            }
             controller.onComplete = { [weak self] in
                 guard let self else { return }
+                self.startEngineIfNeeded()
                 // Permissions may have just been granted; reinstall listeners
                 // so the event tap picks up the new grant.
                 self.hotkeyMonitor.restart()
