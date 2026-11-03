@@ -25,6 +25,7 @@ import time
 import zlib
 from collections.abc import Iterator
 from dataclasses import dataclass
+from pathlib import Path
 from typing import Any, Protocol
 
 import numpy as np
@@ -580,12 +581,30 @@ class ParakeetBackend:
     def load(self) -> None:
         from parakeet_mlx import from_pretrained
 
-        from .models import ensure_downloaded
+        from .models import ensure_downloaded, parakeet_quant_bits
 
         t0 = time.perf_counter()
         # Resolve to the local snapshot so a cached model loads with zero
         # network requests (local-first).
-        self._model = from_pretrained(ensure_downloaded(self.model_id))
+        source = ensure_downloaded(self.model_id)
+        bits = parakeet_quant_bits()
+        if bits is not None:
+            # One fp16 download serves every RAM tier: derive an int8/int4
+            # cache locally (validated, atomically published) and serve the
+            # quantized weights. Any failure falls back to the full-precision
+            # original — dictation must never wait on cache tooling.
+            try:
+                from .quant_cache import ensure_quantized, load_quantized_parakeet
+
+                cache_dir = ensure_quantized(Path(source), self.model_id, bits)
+                self._model = load_quantized_parakeet(cache_dir)
+                log.info("parakeet loaded %s int%d in %.2fs",
+                         self.model_id, bits, time.perf_counter() - t0)
+                return
+            except Exception as exc:  # noqa: BLE001
+                log.warning("int%d quantized cache for %s unavailable (%s); "
+                            "loading full precision", bits, self.model_id, exc)
+        self._model = from_pretrained(source)
         log.info("parakeet loaded %s in %.2fs", self.model_id, time.perf_counter() - t0)
 
     def start_session(self) -> None:
@@ -1920,9 +1939,15 @@ class TranscribeCppWhisperBackend(WhisperBackend):
             # Shared prompt recovery requests deterministic temperature zero.
             # transcribe.cpp otherwise keeps its default +0.2 fallback ladder.
             options["temperature_inc"] = 0.0
+        # English-only ggml weights have no other language to detect; asking
+        # for auto/hi/… would make whisper.cpp log a warning per window and
+        # some builds mis-decode. "en" is the only language the model has.
+        language = whisper_language(self.language)
+        if ".en" in self.model_id.lower() or ".en" in str(self._model_path).lower():
+            language = "en"
         result = self._native_session.run(
             np.ascontiguousarray(audio, dtype=np.float32),
-            language=whisper_language(self.language),
+            language=language,
             timestamps="segment",
             family=WhisperRunOptions(**options),
         )

@@ -94,6 +94,9 @@ extension SettingsDocument {
         var vocabularyMining: Bool
         var smartTerminal: Bool
         var voiceCommands: Bool
+        /// Lower the system output volume to a third while recording, then
+        /// restore it (opt-in; Music/Spotify pause handling is independent).
+        var duckOtherAudio: Bool
         var typingFallbackApps: [String]
         var typingWordsPerMinute: Int
 
@@ -106,14 +109,77 @@ extension SettingsDocument {
             vocabularyMining: true,
             smartTerminal: true,
             voiceCommands: true,
+            duckOtherAudio: false,
             typingFallbackApps: AppConfig.defaultTypingFallbackApps,
             typingWordsPerMinute: 40)
+
+        // `duckOtherAudio` arrived after 0.30 — settings.json files written by
+        // older builds lack the key and must keep importing as off.
+        init(
+            language: String,
+            autoPunctuation: Bool,
+            saveAudio: Bool,
+            romanizeOutput: Bool,
+            learnFromEdits: Bool,
+            vocabularyMining: Bool,
+            smartTerminal: Bool,
+            voiceCommands: Bool,
+            duckOtherAudio: Bool,
+            typingFallbackApps: [String],
+            typingWordsPerMinute: Int
+        ) {
+            self.language = language
+            self.autoPunctuation = autoPunctuation
+            self.saveAudio = saveAudio
+            self.romanizeOutput = romanizeOutput
+            self.learnFromEdits = learnFromEdits
+            self.vocabularyMining = vocabularyMining
+            self.smartTerminal = smartTerminal
+            self.voiceCommands = voiceCommands
+            self.duckOtherAudio = duckOtherAudio
+            self.typingFallbackApps = typingFallbackApps
+            self.typingWordsPerMinute = typingWordsPerMinute
+        }
+
+        init(from decoder: Decoder) throws {
+            let container = try decoder.container(keyedBy: CodingKeys.self)
+            language = try container.decode(String.self, forKey: .language)
+            autoPunctuation = try container.decode(Bool.self, forKey: .autoPunctuation)
+            saveAudio = try container.decode(Bool.self, forKey: .saveAudio)
+            romanizeOutput = try container.decode(Bool.self, forKey: .romanizeOutput)
+            learnFromEdits = try container.decode(Bool.self, forKey: .learnFromEdits)
+            vocabularyMining = try container.decode(Bool.self, forKey: .vocabularyMining)
+            smartTerminal = try container.decode(Bool.self, forKey: .smartTerminal)
+            voiceCommands = try container.decode(Bool.self, forKey: .voiceCommands)
+            duckOtherAudio = try container.decodeIfPresent(Bool.self, forKey: .duckOtherAudio) ?? false
+            typingFallbackApps = try container.decode([String].self, forKey: .typingFallbackApps)
+            typingWordsPerMinute = try container.decode(Int.self, forKey: .typingWordsPerMinute)
+        }
     }
 
     struct Models: Codable, Equatable {
         var speech: String
+        /// Which languages the user dictates — picked at onboarding, drives
+        /// the recommended speech model ("english" → the small fast English
+        /// tier; "multilingual" → Whisper Turbo).
+        var languageScope: String
 
-        static let defaults = Models(speech: STTModel.all[0].id)
+        static let defaults = Models(
+            speech: STTModel.all[0].id, languageScope: "multilingual")
+
+        // `languageScope` arrived after 0.30 — older files decode as
+        // "multilingual", which is the behavior they were written with.
+        init(speech: String, languageScope: String = "multilingual") {
+            self.speech = speech
+            self.languageScope = languageScope
+        }
+
+        init(from decoder: Decoder) throws {
+            let container = try decoder.container(keyedBy: CodingKeys.self)
+            speech = try container.decode(String.self, forKey: .speech)
+            languageScope = try container.decodeIfPresent(
+                String.self, forKey: .languageScope) ?? "multilingual"
+        }
     }
 
     /// User-tunable engine values that already lived in config.json even when
@@ -442,6 +508,9 @@ enum SettingsDocumentCodec {
 
         guard isPrintableNonempty(value.dictation.language, maximumLength: 32) else {
             throw SettingsDocumentError.invalidValue("dictation language")
+        }
+        guard ["english", "multilingual"].contains(value.models.languageScope) else {
+            throw SettingsDocumentError.invalidValue("model language scope")
         }
         guard (1...1_000).contains(value.dictation.typingWordsPerMinute) else {
             throw SettingsDocumentError.invalidValue("typing speed")

@@ -20,7 +20,13 @@ struct OnboardingSetupState: Equatable {
 /// try-it completion.
 final class OnboardingModel: ObservableObject {
     enum Step: Int, CaseIterable {
-        case welcome, privacy, microphone, inputMonitoring, accessibility, hotkey, tryIt
+        case welcome, privacy, languages, microphone, inputMonitoring, accessibility, hotkey, tryIt
+    }
+
+    /// Dictation language choice ("english" / "multilingual"), preselected
+    /// from the current setting so the step reflects a re-run.
+    @Published var languageScope: String = AppConfig.shared.languageScope {
+        didSet { chooseLanguageScopeIfNeeded(languageScope) }
     }
 
     let downloads: DownloadState
@@ -66,8 +72,14 @@ final class OnboardingModel: ObservableObject {
     /// own, so the gate doesn't depend on how loaded the machine is.
     private let now: () -> Date
 
-    init(now: @escaping () -> Date = Date.init) {
+    /// Config store the language choice lands in. Injected so the selftest
+    /// can drive the real flow without touching `~/.velora`.
+    private let appConfig: AppConfig
+
+    init(now: @escaping () -> Date = Date.init, config: AppConfig = .shared) {
         self.now = now
+        self.appConfig = config
+        _languageScope = Published(initialValue: config.languageScope)
         downloads = EngineSupervisor.latestDownloads ?? DownloadState()
         speechReady = downloads.speechReady
         downloadObserver = downloads.objectWillChange.sink { [weak self] _ in
@@ -213,6 +225,21 @@ final class OnboardingModel: ObservableObject {
         Permissions.promptAccessibility()
         Permissions.openAccessibilitySettings()
     }
+
+    /// Applies the onboarding language choice: persists the scope, and when
+    /// the recommended model for it differs from the one already selected,
+    /// switches to it. Runs before the user can touch the model picker, so
+    /// the switch is the first-run default adoption, not an override of a
+    /// deliberate choice. The engine is mid-start (it began downloading the
+    /// default model); `select(model:)` redirects that download.
+    private func chooseLanguageScopeIfNeeded(_ scope: String) {
+        appConfig.languageScope = scope
+        let ramGB = Double(ProcessInfo.processInfo.physicalMemory) / 1_073_741_824
+        let recommended = STTModel.recommended(languageScope: scope, ramGB: ramGB)
+        guard appConfig.sttModel != recommended else { return }
+        appConfig.sttModel = recommended
+        downloads.select(model: recommended, kind: .stt)
+    }
 }
 
 /// Fixed vertical rhythm shared by every onboarding step: title pinned
@@ -226,9 +253,12 @@ private enum OnboardingLayout {
     static let welcomeIconSide: CGFloat = 96
 }
 
-/// Seven-step onboarding flow (design brief §4.2): welcome → privacy →
-/// microphone → input monitoring → accessibility → hotkey → try it. 640×520,
-/// dot page indicator, push transitions, Skip on every step after welcome.
+/// Eight-step onboarding flow (design brief §4.2): welcome → privacy →
+/// languages → microphone → input monitoring → accessibility → hotkey → try
+/// it. 640×520, dot page indicator, push transitions, Skip on every step
+/// after welcome. The languages step asks whether the user dictates English
+/// only, or English and other languages: the answer picks the default speech
+/// model (small and fast for English, multilingual Whisper otherwise).
 struct OnboardingView: View {
     @ObservedObject var model: OnboardingModel
 
@@ -238,6 +268,7 @@ struct OnboardingView: View {
                 switch model.step {
                 case .welcome: welcomeStep.transition(.push(from: .trailing))
                 case .privacy: privacyStep.transition(.push(from: .trailing))
+                case .languages: languagesStep.transition(.push(from: .trailing))
                 case .microphone: microphoneStep.transition(.push(from: .trailing))
                 case .inputMonitoring: inputMonitoringStep.transition(.push(from: .trailing))
                 case .accessibility: accessibilityStep.transition(.push(from: .trailing))
@@ -335,6 +366,33 @@ struct OnboardingView: View {
                 .foregroundStyle(.tertiary)
                 .multilineTextAlignment(.center)
                 .frame(width: 440)
+        } button: {
+            Button("Continue") { model.pressContinue(isRepeat: Self.pressIsRepeat) }
+                .buttonStyle(.primaryCapsule)
+                .keyboardShortcut(.defaultAction)
+        }
+    }
+
+    /// The languages step asks the one question that decides the default
+    /// model. English-only users get the smallest, fastest tier and never
+    /// download a multilingual model; everyone else keeps Whisper Turbo.
+    /// A radio-style pair of cards — the only choice control in onboarding —
+    /// because the answer changes what downloads next, and that consequence
+    /// deserves more than a dropdown.
+    private var languagesStep: some View {
+        stepLayout(title: "Which languages do you dictate?") {
+            LanguageChoiceCard(
+                title: "English only",
+                detail: "Velora downloads a small, fast English model.",
+                selected: model.languageScope == "english") {
+                    model.languageScope = "english"
+                }
+            LanguageChoiceCard(
+                title: "English and other languages",
+                detail: "Velora keeps its multilingual model — Hindi, Indian English, and 97 more.",
+                selected: model.languageScope == "multilingual") {
+                    model.languageScope = "multilingual"
+                }
         } button: {
             Button("Continue") { model.pressContinue(isRepeat: Self.pressIsRepeat) }
                 .buttonStyle(.primaryCapsule)
@@ -536,6 +594,49 @@ struct OnboardingView: View {
         }
         .frame(height: 44)
         .padding(.bottom, VeloraSpacing.s)
+    }
+}
+
+// MARK: - Language choice card (onboarding)
+
+/// One selectable answer on the languages step: a card with a radio
+/// selection state, not a toggle — the two scopes are answers to one
+/// question, not independent switches.
+private struct LanguageChoiceCard: View {
+    let title: String
+    let detail: String
+    let selected: Bool
+    let action: () -> Void
+
+    var body: some View {
+        Button(action: action) {
+            HStack(spacing: VeloraSpacing.m) {
+                Image(systemName: selected ? "checkmark.circle.fill" : "circle")
+                    .font(.system(size: 20))
+                    .foregroundStyle(selected ? VeloraStatus.success : Color.secondary)
+                VStack(alignment: .leading, spacing: 2) {
+                    Text(title)
+                        .font(.system(size: 15, weight: .semibold))
+                    Text(detail)
+                        .font(.system(size: 13))
+                        .foregroundStyle(.secondary)
+                        .fixedSize(horizontal: false, vertical: true)
+                }
+                Spacer()
+            }
+            .padding(VeloraSpacing.l)
+            .frame(width: 480)
+            .background(
+                VeloraPanel.groupFill,
+                in: RoundedRectangle(cornerRadius: VeloraRadius.card, style: .continuous))
+            .overlay(
+                RoundedRectangle(cornerRadius: VeloraRadius.card, style: .continuous)
+                    .strokeBorder(
+                        selected ? VeloraBrand.sky.color.opacity(0.6) : Color.clear,
+                        lineWidth: 1.5))
+        }
+        .buttonStyle(.plain)
+        .animation(VeloraMotion.quick, value: selected)
     }
 }
 

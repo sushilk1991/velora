@@ -201,6 +201,8 @@ enum Selftest {
         testShellMenus()
         testHUDAccessibilityTree()
         testOnboardingReturn()
+        testLanguageScopeAndSTTDefaults()
+        testOutputDucking()
         testStatsAverageKey()
         testWindowShellGeometry()
         testShellWindowKeepsSize()
@@ -13355,6 +13357,192 @@ enum Selftest {
         window.contentView = nil
     }
 
+// MARK: - Language-scope STT defaults (onboarding languages step)
+
+/// The languages step answers one question — English only, or English and
+/// other languages — and the answer picks the default speech model. The
+/// Swift table mirrors the engine's `recommended_stt_model`; the engine is
+/// the authority (its status reply carries `recommended_stt_model`), this
+/// copy serves onboarding, which runs before the first status reply.
+private static func testLanguageScopeAndSTTDefaults() {
+    expect(STTModel.recommended(languageScope: "english", ramGB: 8)
+           == "mlx-community/parakeet-tdt-0.6b-v2",
+           "the english scope picks the fast English tier at every RAM size")
+    expect(STTModel.recommended(languageScope: "english", ramGB: 128)
+           == "mlx-community/parakeet-tdt-0.6b-v2",
+           "the english scope has no smaller RAM tier below parakeet")
+    expect(STTModel.recommended(languageScope: "multilingual", ramGB: 36)
+           == "mlx-community/whisper-large-v3-turbo",
+           "the multilingual scope keeps Whisper Turbo on roomy Macs")
+    expect(STTModel.recommended(languageScope: "multilingual", ramGB: 8)
+           == "mlx-community/whisper-large-v3-turbo-q4",
+           "a small-RAM multilingual install drops to the 0.5 GB Q4 download")
+    expect(STTModel.recommended(languageScope: "martian", ramGB: 36)
+           == "mlx-community/whisper-large-v3-turbo",
+           "an unknown scope falls back to the multilingual default")
+
+    do {
+        // New keys round-trip through the portable document.
+        var document = SettingsDocument.defaults
+        document.settings.models.languageScope = "english"
+        document.settings.dictation.duckOtherAudio = true
+        let data = try SettingsDocumentCodec.encode(document)
+        let decoded = try SettingsDocumentCodec.decode(data)
+        expect(decoded.settings.models.languageScope == "english"
+               && decoded.settings.dictation.duckOtherAudio,
+               "language scope and audio ducking round-trip the settings document")
+
+        // Files written before these keys existed decode with the behavior
+        // they were written with: multilingual, ducking off.
+        var root = try JSONSerialization.jsonObject(with: data) as? [String: Any] ?? [:]
+        var settings = root["settings"] as? [String: Any] ?? [:]
+        var models = settings["models"] as? [String: Any] ?? [:]
+        var dictation = settings["dictation"] as? [String: Any] ?? [:]
+        models.removeValue(forKey: "language_scope")
+        dictation.removeValue(forKey: "duck_other_audio")
+        settings["models"] = models
+        settings["dictation"] = dictation
+        root["settings"] = settings
+        let legacy = try SettingsDocumentCodec.decode(
+            JSONSerialization.data(withJSONObject: root))
+        expect(legacy.settings.models.languageScope == "multilingual"
+               && !legacy.settings.dictation.duckOtherAudio,
+               "older settings files decode as multilingual with ducking off")
+
+        // An invalid scope never imports.
+        models["language_scope"] = "martian"
+        settings["models"] = models
+        root["settings"] = settings
+        do {
+            _ = try SettingsDocumentCodec.decode(
+                JSONSerialization.data(withJSONObject: root))
+            expect(false, "an invalid language scope is rejected on import")
+        } catch SettingsDocumentError.invalidValue {}
+    } catch {
+        expect(false, "settings codec threw: \(error)")
+    }
+
+    // The scope is projected to the engine config like the other app-owned
+    // keys; ducking is app-side behavior and never projected.
+    do {
+        let directory = FileManager.default.temporaryDirectory
+            .appendingPathComponent("velora-selftest-scope-\(UUID().uuidString)")
+        let defaults = UserDefaults(suiteName: "velora-selftest-scope-\(UUID().uuidString)")!
+        let settingsURL = directory.appendingPathComponent("settings.json")
+        let engineURL = directory.appendingPathComponent("config.json")
+        let config = AppConfig(
+            defaults: defaults, settingsFileURL: settingsURL,
+            engineConfigURL: engineURL, registerDefaults: false)
+        config.languageScope = "english"
+        config.duckOtherAudio = true
+        expect(config.writeEngineConfig(), "engine config write succeeds")
+        let payload = try JSONSerialization.jsonObject(
+            with: Data(contentsOf: engineURL)) as? [String: Any]
+        expect(payload?["language_scope"] as? String == "english",
+               "the language scope is projected into config.json")
+        expect(payload?["duck_other_audio"] == nil,
+               "audio ducking stays app-side — it never reaches the engine config")
+
+        // The onboarding choice runs through the same store: the scope is
+        // persisted and the recommended model adopted (fresh install: the
+        // default Turbo is not what an English-only user should download).
+        let model = OnboardingModel(now: Date.init, config: config)
+        expect(model.languageScope == "english",
+               "the languages step preselects the persisted scope")
+        model.languageScope = "multilingual"
+        expect(config.languageScope == "multilingual"
+               && config.sttModel == "mlx-community/whisper-large-v3-turbo",
+               "answering multilingual keeps the multilingual default")
+        model.languageScope = "english"
+        expect(config.languageScope == "english"
+               && config.sttModel == "mlx-community/parakeet-tdt-0.6b-v2",
+               "answering english switches to the recommended English model")
+    } catch {
+        expect(false, "language-scope config check threw: \(error)")
+    }
+}
+
+// MARK: - Output ducking
+
+private static func testOutputDucking() {
+    // Duck lowers to a third and restore puts the exact level back.
+    // RecordingOutputVolume is a class so the controller's writes to the
+    // protocol witness stay observable.
+    let recording = RecordingOutputVolume(scalar: 0.9)
+    let duck = OutputDuckingController(volume: recording)
+    duck.duckForDictation()
+    expect(recording.lastWritten != nil
+           && abs(recording.lastWritten! - 0.3) < 0.001,
+           "ducking lowers the volume to a third")
+    expect(duck.isDucked, "the duck is active")
+    duck.restoreAfterDictation()
+    expect(abs(recording.lastWritten! - 0.9) < 0.001,
+           "restore returns the exact previous volume")
+    expect(!duck.isDucked, "the duck cleared")
+
+    // Idempotent in both directions: double duck doesn't halve twice,
+    // double restore doesn't climb.
+    duck.duckForDictation()
+    duck.duckForDictation()
+    expect(abs(recording.lastWritten! - 0.3) < 0.001
+           && recording.writes.count == 3,
+           "a second duck while ducked is a no-op")
+    duck.restoreAfterDictation()
+    duck.restoreAfterDictation()
+    expect(abs(recording.lastWritten! - 0.9) < 0.001,
+           "a second restore without a duck is a no-op")
+
+    // Muted and silent outputs are left alone.
+    let muted = RecordingOutputVolume(scalar: 0.9, muted: true)
+    let mutedDuck = OutputDuckingController(volume: muted)
+    mutedDuck.duckForDictation()
+    expect(!mutedDuck.isDucked && muted.writes.isEmpty,
+           "a muted output is never ducked")
+    let silent = RecordingOutputVolume(scalar: 0.0)
+    let silentDuck = OutputDuckingController(volume: silent)
+    silentDuck.duckForDictation()
+    expect(!silentDuck.isDucked && silent.writes.isEmpty,
+           "a silent output is never ducked")
+
+    // A device without settable volume fails the probe and skips silently.
+    let unsettable = RecordingOutputVolume(scalar: 0.9)
+    unsettable.settable = false
+    let unsettableDuck = OutputDuckingController(volume: unsettable)
+    unsettableDuck.duckForDictation()
+    expect(!unsettableDuck.isDucked, "an output without hardware volume skips ducking")
+
+    // Restore without a duck never writes.
+    let fresh = RecordingOutputVolume(scalar: 0.5)
+    let freshDuck = OutputDuckingController(volume: fresh)
+    freshDuck.restoreAfterDictation()
+    expect(fresh.writes.isEmpty, "restoring without a duck writes nothing")
+}
+
+/// Reference-type fake so the controller's writes are observable.
+private final class RecordingOutputVolume: OutputVolumeControlling {
+    var scalar: Float?
+    var muted: Bool
+    var settable: Bool
+    private(set) var writes: [Float] = []
+
+    init(scalar: Float?, muted: Bool = false, settable: Bool = true) {
+        self.scalar = scalar
+        self.muted = muted
+        self.settable = settable
+    }
+
+    func readVolume() -> Float? { scalar }
+    func writeVolume(_ value: Float) -> Bool {
+        guard settable else { return false }
+        scalar = value
+        writes.append(value)
+        return true
+    }
+    func isMuted() -> Bool? { muted }
+
+    var lastWritten: Float? { writes.last }
+}
+
     /// Which onboarding buttons answer Return, and that one press moves one
     /// step. Return goes through the hosting view's key equivalents, the
     /// path a real keypress takes to a `.defaultAction` button.
@@ -13374,7 +13562,7 @@ enum Selftest {
         expect(model.step == .privacy, "a second Return right after the first is dropped")
         clock += OnboardingModel.stepSettleInterval
         model.pressContinue(isRepeat: false)
-        expect(model.step == .microphone, "a Return once the step has settled advances")
+        expect(model.step == .languages, "a Return once the step has settled advances")
         model.microphoneGranted = false
         clock += 10
         model.pressContinue(isRepeat: false)
@@ -13389,12 +13577,12 @@ enum Selftest {
         skipper.pressContinue(isRepeat: false)
         clock += 0.2
         skipper.pressSkip(isRepeat: false)
-        expect(skipper.step == .microphone, "a Skip right after Continue is dropped")
+        expect(skipper.step == .languages, "a Skip right after Continue is dropped")
         clock += 5
         skipper.pressSkip(isRepeat: true)
-        expect(skipper.step == .microphone, "a held Skip's autorepeat does not advance")
+        expect(skipper.step == .languages, "a held Skip's autorepeat does not advance")
         skipper.pressSkip(isRepeat: false)
-        expect(skipper.step == .inputMonitoring, "a settled Skip passes a missing grant")
+        expect(skipper.step == .microphone, "a settled Skip passes a missing grant")
 
         // The wiring: host the real view on a step, press Return, see where
         // it lands. Input Monitoring is never hosted: its onAppear raises
@@ -13434,7 +13622,8 @@ enum Selftest {
         }
 
         expect(afterReturn(on: .welcome).step == .privacy, "Return on the welcome step is Get Started")
-        expect(afterReturn(on: .privacy).step == .microphone, "Return on the privacy step is Continue")
+        expect(afterReturn(on: .privacy).step == .languages, "Return on the privacy step is Continue")
+        expect(afterReturn(on: .languages).step == .microphone, "Return on the languages step is Continue")
         expect(afterReturn(on: .welcome, presses: 2).step == .privacy,
                "a double Return on the welcome step moves one step, not two")
         expect(afterReturn(on: .microphone) { $0.microphoneGranted = false }.step == .microphone,

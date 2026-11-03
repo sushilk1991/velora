@@ -68,11 +68,39 @@ struct STTModel: Identifiable, Equatable {
             size: "2.5 GB", speed: "Fastest (live streaming)", languages: "English only"
         ),
         STTModel(
+            id: "ggerganov/whisper.cpp:ggml-base.en",
+            displayName: "Whisper Base (English)",
+            size: "0.15 GB", speed: "Fast", languages: "English only, smallest download"
+        ),
+        STTModel(
+            id: "ggerganov/whisper.cpp:ggml-small.en",
+            displayName: "Whisper Small (English)",
+            size: "0.47 GB", speed: "Fast", languages: "English only, more accurate than Base"
+        ),
+        STTModel(
             id: "mlx-community/whisper-large-v3-turbo-q4",
             displayName: "Whisper Turbo Small",
             size: "0.5 GB", speed: "Fast", languages: "99 languages, smallest"
         ),
     ]
+
+    /// The speech model a fresh install gets for a dictation language scope,
+    /// tiered by RAM. Mirrors `models.recommended_stt_model` in the engine —
+    /// the same duplication contract as `all` above: the engine is the
+    /// authority (its status reply carries `recommended_stt_model`); this
+    /// copy serves the onboarding step, which runs before the first status
+    /// reply lands.
+    static func recommended(languageScope: String, ramGB: Double) -> String {
+        let scope = ["english", "multilingual"].contains(languageScope) ? languageScope : "multilingual"
+        switch scope {
+        case "english":
+            return "mlx-community/parakeet-tdt-0.6b-v2"
+        default:
+            return ramGB >= 10
+                ? "mlx-community/whisper-large-v3-turbo"
+                : "mlx-community/whisper-large-v3-turbo-q4"
+        }
+    }
 }
 
 /// Central app configuration.
@@ -956,6 +984,21 @@ final class AppConfig {
         set { updateSettings { $0.models.speech = newValue }; writeEngineConfig() }
     }
 
+    /// Which languages the user dictates ("english" / "multilingual") —
+    /// answered at onboarding; drives the recommended speech model and is
+    /// projected into the engine's config as `language_scope`.
+    var languageScope: String {
+        get { readSetting(\.models.languageScope) }
+        set { updateSettings { $0.models.languageScope = newValue }; writeEngineConfig() }
+    }
+
+    /// Lower the system output volume to a third while recording (opt-in).
+    /// Pure app-side behavior — no engine config projection.
+    var duckOtherAudio: Bool {
+        get { readSetting(\.dictation.duckOtherAudio) }
+        set { updateSettings { $0.dictation.duckOtherAudio = newValue } }
+    }
+
     /// The engine's selected cleanup model. Nil only before its first RAM-based
     /// recommendation; status/model-set events fill it in thereafter.
     var cleanupModel: String? {
@@ -1351,6 +1394,7 @@ final class AppConfig {
     func writeEngineConfig() -> Bool {
         return Self.updateEngineConfig(at: engineConfigStorageURL) { payload in
             payload["stt_model"] = self.sttModel
+            payload["language_scope"] = self.languageScope
             payload["language"] = self.language
             payload["auto_punctuation"] = self.autoPunctuation
             payload["save_audio"] = self.saveAudio

@@ -381,6 +381,8 @@ final class SettingsModel: ObservableObject {
         hudVisible = config.hudVisible
         appearance = config.appearance
         language = config.language
+        languageScope = config.languageScope
+        duckOtherAudio = config.duckOtherAudio
         autoPunctuation = config.autoPunctuation
         romanizeOutput = config.romanizeOutput
         learnFromEdits = config.learnFromEdits
@@ -547,6 +549,8 @@ final class SettingsModel: ObservableObject {
         language = imported.dictation.language
         autoPunctuation = imported.dictation.autoPunctuation
         saveAudio = imported.dictation.saveAudio
+        duckOtherAudio = imported.dictation.duckOtherAudio
+        languageScope = imported.models.languageScope
         romanizeOutput = imported.dictation.romanizeOutput
         learnFromEdits = imported.dictation.learnFromEdits
         vocabMining = imported.dictation.vocabularyMining
@@ -593,6 +597,9 @@ final class SettingsModel: ObservableObject {
         }
         if let rec = payload["recommended_cleanup_model"] as? String {
             recommendedCleanupModel = rec
+        }
+        if let rec = payload["recommended_stt_model"] as? String, !rec.isEmpty {
+            recommendedSTTModel = rec
         }
         // The engine is the authority on the ACTIVE STT model: a set_model it
         // refused (busy dictating/reprocessing) must not leave the picker and
@@ -1004,6 +1011,37 @@ final class SettingsModel: ObservableObject {
             guard !applyingImportedSettings, saveAudio != oldValue else { return }
             config.saveAudio = saveAudio
             supervisor?.send(["cmd": "reload_config"])
+        }
+    }
+
+    /// Which languages the user dictates. Changing it re-selects the scope's
+    /// recommended speech model — the setting answers “what should the
+    /// default be”, so the model follows it (a user can pick any model in
+    /// Models afterwards; the engine's status reply is the authoritative
+    /// recommendation source, this mirrors it for the first-run case).
+    @Published var languageScope: String = "multilingual" {
+        didSet {
+            guard !applyingImportedSettings, languageScope != oldValue else { return }
+            config.languageScope = languageScope
+            let ramGB = Double(ProcessInfo.processInfo.physicalMemory) / 1_073_741_824
+            let recommended = recommendedSTTModel
+                ?? STTModel.recommended(languageScope: languageScope, ramGB: ramGB)
+            if sttModel != recommended {
+                setSpeechModel(recommended)
+            }
+            supervisor?.send(["cmd": "reload_config"])
+        }
+    }
+
+    /// The engine's scope-fitted STT recommendation from its latest status
+    /// reply (nil before the first reply lands).
+    @Published private(set) var recommendedSTTModel: String?
+
+    /// Lower the system output volume while recording (opt-in).
+    @Published var duckOtherAudio: Bool = false {
+        didSet {
+            guard !applyingImportedSettings, duckOtherAudio != oldValue else { return }
+            config.duckOtherAudio = duckOtherAudio
         }
     }
 

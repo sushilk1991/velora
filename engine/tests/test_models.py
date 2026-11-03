@@ -32,8 +32,9 @@ def test_ensure_downloaded_accepts_an_exact_local_snapshot(monkeypatch, tmp_path
 def _write_valid_q8(monkeypatch, path: Path) -> None:
     payload = b"test q8 artifact"
     path.write_bytes(payload)
-    monkeypatch.setattr(
-        models, "TRANSCRIBE_CPP_Q8_SHA256", hashlib.sha256(payload).hexdigest())
+    monkeypatch.setitem(
+        models._SINGLE_FILE_SHA256, models.TRANSCRIBE_CPP_Q8_MODEL,
+        hashlib.sha256(payload).hexdigest())
     models._verified_sha256.cache_clear()
 
 
@@ -125,7 +126,8 @@ def test_transcribe_cpp_cache_probe_rejects_corrupt_artifact(monkeypatch, tmp_pa
     cached.write_bytes(b"corrupt")
     monkeypatch.setattr(
         huggingface_hub, "hf_hub_download", lambda **_kwargs: str(cached))
-    monkeypatch.setattr(models, "TRANSCRIBE_CPP_Q8_SHA256", "0" * 64)
+    monkeypatch.setitem(
+        models._SINGLE_FILE_SHA256, models.TRANSCRIBE_CPP_Q8_MODEL, "0" * 64)
     models._verified_sha256.cache_clear()
 
     assert models.is_cached(models.TRANSCRIBE_CPP_Q8_MODEL) is False
@@ -151,7 +153,8 @@ def test_transcribe_cpp_replaces_a_corrupt_cached_artifact(monkeypatch, tmp_path
 def test_transcribe_cpp_rejects_a_corrupt_download(monkeypatch, tmp_path):
     downloaded = tmp_path / "corrupt.gguf"
     downloaded.write_bytes(b"corrupt")
-    monkeypatch.setattr(models, "TRANSCRIBE_CPP_Q8_SHA256", "0" * 64)
+    monkeypatch.setitem(
+        models._SINGLE_FILE_SHA256, models.TRANSCRIBE_CPP_Q8_MODEL, "0" * 64)
     models._verified_sha256.cache_clear()
 
     def fake_download(**kwargs):

@@ -27,6 +27,10 @@ DEFAULT_CLEANUP_MODEL = "mlx-community/Qwen3.5-4B-MLX-8bit"
 
 DEFAULT_CONFIG: dict[str, Any] = {
     "stt_model": DEFAULT_STT_MODEL,
+    # Dictation language scope picked at onboarding: "multilingual" (the
+    # historical default) or "english". Drives the recommended STT model;
+    # see models.recommended_stt_model.
+    "language_scope": "multilingual",
     "cleanup_model": DEFAULT_CLEANUP_MODEL,
     "cleanup_enabled": True,
     "default_mode": "Default",
@@ -327,6 +331,12 @@ class Config:
         return str(self.data.get("stt_model") or DEFAULT_STT_MODEL)
 
     @property
+    def language_scope(self) -> str:
+        """Dictation scope: "multilingual" (default) or "english"."""
+        scope = str(self.data.get("language_scope") or "multilingual").strip().lower()
+        return scope if scope in ("english", "multilingual") else "multilingual"
+
+    @property
     def cleanup_model(self) -> str:
         return str(self.data.get("cleanup_model") or DEFAULT_CLEANUP_MODEL)
 
@@ -593,6 +603,12 @@ class Config:
                 if "cleanup_model" not in on_disk:
                     self.data["cleanup_model"] = self._auto_cleanup_model()
                     self.save(keys={"cleanup_model"})
+                # A standalone engine (no app projection yet) gets the
+                # scope+RAM-appropriate STT default; the app's config write
+                # normally carries an explicit choice already.
+                if "stt_model" not in on_disk:
+                    self.data["stt_model"] = self._auto_stt_model()
+                    self.save(keys={"stt_model"})
                 return
             except Exception as exc:  # noqa: BLE001 — corrupt config must not kill the engine
                 log.warning("config.json unreadable (%s); using defaults in memory", exc)
@@ -603,8 +619,9 @@ class Config:
                 return
         self.data = dict(DEFAULT_CONFIG)
         self.data["cleanup_model"] = self._auto_cleanup_model()
+        self.data["stt_model"] = self._auto_stt_model()
         self.save()
-        log.info("wrote default config to %s (cleanup=%s)", self.config_path, self.data["cleanup_model"])
+        log.info("wrote default config to %s (cleanup=%s, stt=%s)", self.config_path, self.data["cleanup_model"], self.data["stt_model"])
 
     def _auto_cleanup_model(self) -> str:
         """RAM-fitted cleanup model, falling back to the static default if
@@ -616,6 +633,16 @@ class Config:
         except Exception as exc:  # noqa: BLE001
             log.warning("cleanup-model auto-select failed (%s); using default", exc)
             return DEFAULT_CLEANUP_MODEL
+
+    def _auto_stt_model(self) -> str:
+        """Scope+RAM-fitted STT model for first runs; never blocks startup."""
+        try:
+            from .models import recommended_stt_model
+
+            return recommended_stt_model(self.language_scope)
+        except Exception as exc:  # noqa: BLE001
+            log.warning("stt-model auto-select failed (%s); using default", exc)
+            return DEFAULT_STT_MODEL
 
     def _ensure_builtin_modes(self) -> None:
         """Write built-in mode files on first run (never overwrite user edits)."""

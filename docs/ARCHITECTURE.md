@@ -59,6 +59,16 @@ resumed, and permission-denied cases never receive a matching toggle. This uses
 the existing Accessibility grant and the system media key, not Apple Events or
 private MediaRemote APIs. Meeting capture does not use this policy.
 
+Opt-in "Quiet other audio while recording" (Dictation › Input, default off)
+complements the pause with `OutputDuckingController`: it lowers the default
+output device's master volume to a third while recording and restores the
+exact previous level at every release point (stop, cancel, failure,
+termination). Muted or silent outputs are never touched, and devices without
+a macOS-controlled volume (some displays) fail the capability probe and skip.
+Duck and restore are idempotent, so overlapping session lifecycles can never
+wedge the volume; restores are unconditional, so toggling the setting
+mid-recording cannot leave a ducked level behind.
+
 ## Wire protocol (unix socket, length-prefixed frames)
 
 The Swift app owns the engine's single active control connection. Additional
@@ -515,10 +525,24 @@ engine → app  {"event":"reprocessed","id":42,"audio":"uuid.flac","raw":"...","
 ```
 A model different from the live one is loaded once and cached across reprocess calls.
 
-**STT models.** Default is `whisper-large-v3-turbo` (multilingual — Hindi, Indian
-English, and the top world languages; batch decode on stop). The picker also
-offers full `whisper-large-v3` (highest accuracy), a Hindi/Hinglish specialist,
-and the parakeet models (English/European, fast final transcription). Cleanup uses
+**STT models.** The default is chosen by the dictation **language scope** —
+the question onboarding asks (English only, or English and other languages).
+"English" installs `parakeet-tdt-0.6b-v2` (the smallest, fastest English
+tier); "multilingual" keeps `whisper-large-v3-turbo` (Hindi, Indian English,
+and the top world languages; batch decode on stop), dropping to its Q4 build
+on Macs under 10 GB of RAM (`models.recommended_stt_model` is the single
+table; the engine mirrors it to Swift for the pre-status onboarding step,
+and a standalone engine adopts it on first run). The picker also offers
+full `whisper-large-v3` (highest accuracy), a Hindi/Hinglish specialist,
+the parakeet models, and two English-only whisper.cpp weights pinned to the
+upstream `ggerganov/whisper.cpp` revision (Base 0.15 GB, Small 0.47 GB;
+single-file downloads with SHA-256 verification). **Parakeet quantization
+tiers:** one fp16 download serves every Mac — on small-RAM machines the
+engine derives an int8 (or int4) cache locally (affine, group_size 64) into
+`~/.velora/quant-cache`, published atomically only after the saved weights
+reload (`quant_cache.py`; ~2.7× smaller resident weights at ~1.6× decode
+cost, measured M4/M5). Any cache failure falls back to full precision.
+Cleanup uses
 the same meaning-preserving prompt for Latin and non-Latin transcripts, retains
 the input language and script, and applies list/structure cues semantically.
 Opt-in `romanize_output` instead transliterates non-Latin text into the Latin
@@ -577,10 +601,11 @@ Concurrency: Swift 5 language mode (`.swiftLanguageMode(.v5)`) to avoid strict-c
 | Module | Responsibility |
 |---|---|
 | `server.py` | asyncio unix-socket server, framing, session state machine |
-| `stt.py` | mlx-whisper and parakeet-mlx backends behind one interface; both decode pause-bounded segments during recording and serve Stream Typing previews (see Streaming segment pipeline) |
+| `stt.py` | mlx-whisper, parakeet-mlx and whisper.cpp (transcribe-cpp) backends behind one interface; both decode pause-bounded segments during recording and serve Stream Typing previews (see Streaming segment pipeline) |
 | `cleanup.py` | mlx-lm load/generate, immutable prefix snapshot/fork, cancellation, TTFT-aware deadline, divergence guard |
 | `formatting.py` | deterministic gate, mode resolution, prompt assembly, replacements |
-| `models.py` | HF download/verify, model registry (user-selectable) |
+| `models.py` | HF download/verify, model registry (user-selectable), language-scope + RAM-tied defaults |
+| `quant_cache.py` | locally derived int8/int4 parakeet caches: build → reload-validate → atomic publish under a lock |
 | `config.py` | modes/vocab loading shared with app via ~/.velora/ |
 | `media.py` | audio decode and exact-coverage meeting chunk planning |
 | `meeting_notes.py` | schema-checked chunk/map-reduce meeting summaries, decisions, and actions |

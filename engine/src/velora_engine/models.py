@@ -19,14 +19,43 @@ log = logging.getLogger("velora.models")
 TRANSCRIBE_CPP_Q8_MODEL = "handy-computer/whisper-large-v3-turbo-gguf"
 TRANSCRIBE_CPP_Q8_REVISION = "d222c9f621c1128299248f2ded4d8a1820519780"
 TRANSCRIBE_CPP_Q8_SHA256 = "d5e65f2b0828802ae2c231673d31982cebe3a778c95d9494a9f3efee6bd17448"
+# English-only whisper.cpp ggml weights, pinned to the upstream repo revision.
+# SHA-256s verified against the pinned revision (2026-11-03).
+WHISPER_CPP_REPO = "ggerganov/whisper.cpp"
+WHISPER_CPP_REVISION = "5359861c739e955e79d9a303bcbc70fb988958b1"
+WHISPER_CPP_BASE_EN = "ggerganov/whisper.cpp:ggml-base.en"
+WHISPER_CPP_SMALL_EN = "ggerganov/whisper.cpp:ggml-small.en"
+WHISPER_CPP_BASE_EN_SHA256 = "a03779c86df3323075f5e796cb2ce5029f00ec8869eee3fdfb897afe36c6d002"
+WHISPER_CPP_SMALL_EN_SHA256 = "c6138d6d58ecc8322097e0f987c32f1be8bb0a18532a3f88f734d1bbf9c41e5d"
 # Registry sizes are decimal gigabytes of download (Hub byte counts).
 _BYTES_PER_GB = 10**9
 _SINGLE_FILE_MODELS = {
     TRANSCRIBE_CPP_Q8_MODEL: "whisper-large-v3-turbo-Q8_0.gguf",
+    WHISPER_CPP_BASE_EN: "ggml-base.en.bin",
+    WHISPER_CPP_SMALL_EN: "ggml-small.en.bin",
+}
+# Model ids that are not themselves Hub repo ids (a colon selects one file
+# out of a many-model repository); ensure_downloaded downloads from here.
+_SINGLE_FILE_REPOS = {
+    WHISPER_CPP_BASE_EN: WHISPER_CPP_REPO,
+    WHISPER_CPP_SMALL_EN: WHISPER_CPP_REPO,
 }
 _SINGLE_FILE_REVISIONS = {
     TRANSCRIBE_CPP_Q8_MODEL: TRANSCRIBE_CPP_Q8_REVISION,
+    WHISPER_CPP_BASE_EN: WHISPER_CPP_REVISION,
+    WHISPER_CPP_SMALL_EN: WHISPER_CPP_REVISION,
 }
+_SINGLE_FILE_SHA256 = {
+    TRANSCRIBE_CPP_Q8_MODEL: TRANSCRIBE_CPP_Q8_SHA256,
+    WHISPER_CPP_BASE_EN: WHISPER_CPP_BASE_EN_SHA256,
+    WHISPER_CPP_SMALL_EN: WHISPER_CPP_SMALL_EN_SHA256,
+}
+
+# Dictation language scopes. "multilingual" keeps the historical default
+# (Whisper Turbo: 99 languages). "english" is the lightweight tier: the
+# smallest, fastest models, chosen at onboarding — most users dictate one
+# language, and they should not download a multilingual model to get it.
+LANGUAGE_SCOPES = ("multilingual", "english")
 
 
 @dataclass(frozen=True)
@@ -102,6 +131,27 @@ REGISTRY: list[ModelInfo] = [
         backend="parakeet",
         size="2.5 GB",
         description="Fastest for English. English only.",
+    ),
+    ModelInfo(
+        id=WHISPER_CPP_BASE_EN,
+        name="Whisper Base (English)",
+        kind="stt",
+        backend="transcribe-cpp",
+        size="0.15 GB",
+        description=(
+            "Smallest download for English dictation. Instant to load, "
+            "less accurate on noise and accents."
+        ),
+    ),
+    ModelInfo(
+        id=WHISPER_CPP_SMALL_EN,
+        name="Whisper Small (English)",
+        kind="stt",
+        backend="transcribe-cpp",
+        size="0.47 GB",
+        description=(
+            "English only. More accurate than Base, still small and fast."
+        ),
     ),
     ModelInfo(
         id="mlx-community/whisper-large-v3-turbo-q4",
@@ -191,6 +241,58 @@ def recommended_cleanup_model(ram_gb: float | None = None) -> str:
     return _CLEANUP_TIERS[-1][1]
 
 
+# STT defaults by language scope, tiered by RAM (GB), best-that-fits first.
+# "english" is one tier: Parakeet v2 is the smallest RAM footprint of the
+# English options once locally quantized (~0.4-0.7 GB resident), so no RAM
+# tier is needed below it. "multilingual" keeps Whisper Turbo, dropping to
+# its Q4 build on small-RAM Macs (0.5 GB download instead of 1.6 GB).
+_STT_TIERS: dict[str, list[tuple[int, str]]] = {
+    "english": [(0, "mlx-community/parakeet-tdt-0.6b-v2")],
+    "multilingual": [
+        (10, "mlx-community/whisper-large-v3-turbo"),
+        (0, "mlx-community/whisper-large-v3-turbo-q4"),
+    ],
+}
+
+
+def recommended_stt_model(
+    language_scope: str = "multilingual", ram_gb: float | None = None
+) -> str:
+    """Default STT model for a dictation language scope on this Mac.
+
+    The onboarding flow asks whether the user dictates English or other
+    languages too; the answer picks the scope. An unrecognized scope falls
+    back to the historical multilingual default rather than refusing to
+    start.
+    """
+    scope = language_scope if language_scope in LANGUAGE_SCOPES else "multilingual"
+    ram = ram_gb if ram_gb is not None else physical_ram_gb()
+    for min_gb, model_id in _STT_TIERS[scope]:
+        if ram >= min_gb:
+            return model_id
+    return _STT_TIERS[scope][-1][1]
+
+
+def parakeet_quant_bits(ram_gb: float | None = None) -> int | None:
+    """Affine-quantization tier for parakeet models; None = full precision.
+
+    One fp16 download serves every Mac: the engine derives an int8 (or int4)
+    cache locally instead of asking the user to download a separate variant.
+    Measured on Apple silicon (2026-11, M4/M5): the int8 cache is ~2.7×
+    smaller in resident weights (2.47 GB → 0.93 GB for parakeet v2) with
+    byte-identical transcripts, at ~1.6× slower decode — a bargain on
+    small-RAM Macs where the cleanup model competes for the same memory,
+    a pure loss on large ones. Full precision stays on Macs with RAM to
+    spare; int4 is the floor for 8 GB machines.
+    """
+    ram = ram_gb if ram_gb is not None else physical_ram_gb()
+    if ram >= 24:
+        return None
+    if ram >= 12:
+        return 8
+    return 4
+
+
 def registry_payload() -> list[dict[str, str]]:
     return [asdict(m) for m in REGISTRY]
 
@@ -211,13 +313,14 @@ def _verified_sha256(path: str, size: int, mtime_ns: int, expected: str) -> bool
 
 
 def _single_file_is_valid(model_id: str, path: str) -> bool:
-    if model_id != TRANSCRIBE_CPP_Q8_MODEL:
+    expected = _SINGLE_FILE_SHA256.get(model_id)
+    if expected is None:
         return True
     try:
         stat = Path(path).stat()
         return _verified_sha256(
             str(Path(path).resolve()), stat.st_size, stat.st_mtime_ns,
-            TRANSCRIBE_CPP_Q8_SHA256,
+            expected,
         )
     except OSError:
         return False
@@ -409,9 +512,10 @@ def ensure_downloaded(model_id: str) -> str:
     filename = _SINGLE_FILE_MODELS.get(model_id)
     if filename is not None:
         revision = _SINGLE_FILE_REVISIONS[model_id]
+        repo = _SINGLE_FILE_REPOS.get(model_id, model_id)
         try:
             path = hf_hub_download(
-                repo_id=model_id,
+                repo_id=repo,
                 filename=filename,
                 revision=revision,
                 local_files_only=True,
@@ -425,7 +529,7 @@ def ensure_downloaded(model_id: str) -> str:
         log.info("downloading model %s artifact %s ...", model_id, filename)
         t0 = time.perf_counter()
         path = hf_hub_download(
-            repo_id=model_id, filename=filename, revision=revision,
+            repo_id=repo, filename=filename, revision=revision,
             force_download=True,
         )
         if not _single_file_is_valid(model_id, path):

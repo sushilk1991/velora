@@ -4273,6 +4273,9 @@ class Engine:
                 "stt_model": self.stt.model_id,
                 "cleanup_model": self.config.cleanup_model,
                 "recommended_cleanup_model": models.recommended_cleanup_model(),
+                "language_scope": self.config.language_scope,
+                "recommended_stt_model": models.recommended_stt_model(
+                    self.config.language_scope),
                 "cleanup_enabled": self.config.cleanup_enabled,
                 "cleanup_loaded": bool(self.cleanup and self.cleanup.loaded),
                 "save_audio": self.config.save_audio,

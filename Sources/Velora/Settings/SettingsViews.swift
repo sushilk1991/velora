@@ -331,6 +331,14 @@ struct DictationSettingsView: View {
                         Text(name).tag(code)
                     }
                 }
+                Toggle(isOn: $model.duckOtherAudio) {
+                    VStack(alignment: .leading, spacing: 2) {
+                        Text("Quiet other audio while recording")
+                        Text("Lowers the system volume to a third, then restores it. Music and Spotify still pause.")
+                            .font(.caption)
+                            .foregroundStyle(.secondary)
+                    }
+                }
             } header: {
                 Text("Input")
             } footer: {
@@ -448,9 +456,15 @@ struct ModelSettingsView: View {
 
     private var speechChoices: [Choice] {
         let engine = model.sttEngineModels
+        let recommended = model.recommendedSTTModel
         if !engine.isEmpty {
             return engine.map {
-                Choice(id: $0.id, name: $0.displayName, detail: $0.description, size: $0.size)
+                Choice(
+                    id: $0.id, name: $0.displayName,
+                    detail: $0.id == recommended
+                        ? "Recommended for your language choice. \($0.description)"
+                        : $0.description,
+                    size: $0.size)
             }
         }
         return STTModel.all.map {
@@ -482,6 +496,10 @@ struct ModelSettingsView: View {
     var body: some View {
         Form {
             Section {
+                Picker("Languages you dictate", selection: $model.languageScope) {
+                    Text("English only").tag("english")
+                    Text("English and other languages").tag("multilingual")
+                }
                 slotRow(
                     title: "Speech to text", slot: .speech, choices: speechChoices,
                     selection: speechBinding)
@@ -493,7 +511,7 @@ struct ModelSettingsView: View {
             } header: {
                 Text("On this Mac")
             } footer: {
-                SettingsFooter("Models download once, then run on this Mac. Your voice never leaves this Mac.")
+                SettingsFooter("Changing the language choice re-selects the recommended speech model for it. Models download once, then run on this Mac. Your voice never leaves this Mac.")
             }
             Section("Download status") {
                 DownloadRecoveryView(state: model.downloads)

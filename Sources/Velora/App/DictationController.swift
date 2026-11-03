@@ -407,6 +407,7 @@ final class DictationController: NSObject {
     /// The session whose audio `capture.lastTakeLevel` measures.
     private var takeLevelSession: String?
     private let mediaPlayback: MediaPlaybackCoordinator
+    private let outputDucking: OutputDuckingController
     private let contextTracker: AppContextTracker
     private let hud: HUDPanel
     private let inserter: TextInserter
@@ -685,6 +686,7 @@ final class DictationController: NSObject {
         pasteboard: NSPasteboard = .general,
         capture: AudioCapture = AudioCapture(),
         mediaPlayback: MediaPlaybackCoordinator = MediaPlaybackCoordinator(),
+        outputDucking: OutputDuckingController = OutputDuckingController(),
         micAuthorized: @escaping () -> Bool = {
             AVCaptureDevice.authorizationStatus(for: .audio) == .authorized
         },
@@ -707,6 +709,7 @@ final class DictationController: NSObject {
         self.dictionary = dictionary
         self.capture = capture
         self.mediaPlayback = mediaPlayback
+        self.outputDucking = outputDucking
         self.micAuthorized = micAuthorized
         self.secureInputActive = secureInputActive
         self.recordingLimit = recordingLimit
@@ -866,6 +869,7 @@ final class DictationController: NSObject {
                 return
             }
             mediaPlayback.restoreBeforeAction()
+            outputDucking.restoreAfterDictation()
         }
         let frontmost = contextTracker.frontmost ?? NSWorkspace.shared.frontmostApplication
         let context = ActionContextSnapshot.capture(
@@ -1012,6 +1016,7 @@ final class DictationController: NSObject {
             return
         }
         mediaPlayback.restoreBeforeAction()
+        outputDucking.restoreAfterDictation()
         let names = actionScreenNames
         actionScreenNames = []
         let context = ActionContextSnapshot.capture(
@@ -1185,6 +1190,7 @@ final class DictationController: NSObject {
 
         guard phase != .idle else {
             mediaPlayback.restoreImmediatelyForTermination()
+            outputDucking.restoreImmediatelyForTermination()
             guard history.hasPendingWrites else {
                 completion()
                 return
@@ -1213,6 +1219,7 @@ final class DictationController: NSObject {
         // tail. Arm the bounded wait only after that callback enqueues stop.
         guard phase != .transcribing else {
             mediaPlayback.restoreImmediatelyForTermination()
+            outputDucking.restoreImmediatelyForTermination()
             if stopEnqueuedSession == terminatingSession {
                 armTerminationTimer()
             }
@@ -1224,6 +1231,7 @@ final class DictationController: NSObject {
             DispatchQueue.main.async {
                 guard let self, self.terminationSession == interruptedSession else { return }
                 self.mediaPlayback.restoreImmediatelyForTermination()
+                self.outputDucking.restoreImmediatelyForTermination()
                 self.supervisor.send([
                     "cmd": "interrupt", "session": interruptedSession,
                 ])
@@ -1257,6 +1265,7 @@ final class DictationController: NSObject {
         dispatchPrecondition(condition: .onQueue(.main))
         guard !terminating else {
             mediaPlayback.restoreImmediatelyForTermination()
+            outputDucking.restoreImmediatelyForTermination()
             return
         }
         preserveForTermination {}
@@ -1270,6 +1279,7 @@ final class DictationController: NSObject {
         let completion = terminationCompletion
         terminationCompletion = nil
         mediaPlayback.restoreImmediatelyForTermination()
+        outputDucking.restoreImmediatelyForTermination()
         completion?()
     }
 
@@ -2414,6 +2424,7 @@ final class DictationController: NSObject {
         // headphones this prevents music from playing through the lower-quality
         // two-way headset route while Velora captures speech.
         mediaPlayback.pauseForDictation()
+        if AppConfig.shared.duckOtherAudio { outputDucking.duckForDictation() }
 
         sessionID = UUID().uuidString
         stopTiming = nil
@@ -2622,6 +2633,9 @@ final class DictationController: NSObject {
             guard let self else { return }
             self.logStopStage(.captureDrained, session: stoppedSession)
             self.mediaPlayback.restoreAfterDictation()
+            // Unconditional: restore is a no-op when nothing is ducked,
+            // so toggling the setting mid-recording can't wedge the volume.
+            outputDucking.restoreAfterDictation()
             guard self.sessionID == stoppedSession,
                   self.phase == .transcribing,
                   self.cancelledSessionID != stoppedSession else { return }
@@ -3801,6 +3815,9 @@ final class DictationController: NSObject {
         recordingLimitTimer = nil
         capture.stop()
         mediaPlayback.restoreAfterDictation()
+        // Unconditional: restore is a no-op when nothing is ducked, so
+        // toggling the setting mid-recording can't wedge the volume.
+        outputDucking.restoreAfterDictation()
     }
 
     private func failExternalRequest(
