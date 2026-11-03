@@ -13453,9 +13453,12 @@ private static func testLanguageScopeAndSTTDefaults() {
                "the languages step preselects the persisted scope")
         model.languageScope = "multilingual"
         model.commitLanguageChoice()
+        let expectedMultilingual = STTModel.recommended(
+            languageScope: "multilingual",
+            ramGB: Double(ProcessInfo.processInfo.physicalMemory) / 1_073_741_824)
         expect(config.languageScope == "multilingual"
-               && config.sttModel == "mlx-community/whisper-large-v3-turbo",
-               "answering multilingual keeps the multilingual default")
+               && config.sttModel == expectedMultilingual,
+               "answering multilingual adopts the RAM-appropriate multilingual default")
         let englishModel = OnboardingModel(now: Date.init, config: config)
         englishModel.languageScope = "english"
         englishModel.smartWriting = false

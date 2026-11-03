@@ -113,7 +113,9 @@ def local_transfers(monkeypatch, home):
 
 
 @pytest.fixture
-async def engine(home, fake_stt):
+async def engine(home, fake_stt, request, monkeypatch):
+    if hasattr(request, "param"):
+        monkeypatch.setattr(server_mod.models, "physical_ram_gb", lambda: request.param)
     config = Config()
     eng = Engine(config, parent_pid=None, hard_exit=Mock())
     # AF_UNIX paths are length-limited (~104 bytes on macOS); pytest's tmp_path
@@ -320,14 +322,19 @@ async def test_second_pre_ready_client_cannot_displace_setup_owner(home, fake_st
         shutil.rmtree(sock_dir, ignore_errors=True)
 
 
-async def test_full_dictation_flow(engine):
+@pytest.mark.parametrize(
+    "engine,expected_model",
+    [(8.0, "mlx-community/whisper-large-v3-turbo-q4"),
+     (36.0, "mlx-community/whisper-large-v3-turbo")],
+    indirect=["engine"],
+)
+async def test_full_dictation_flow(engine, expected_model):
     eng, sock = engine
     client = await connect(sock)
     ready = await client.recv()
     assert ready["event"] == "ready"
-    from velora_engine.config import DEFAULT_STT_MODEL
-
-    assert ready["stt_model"] == DEFAULT_STT_MODEL
+    assert ready["stt_model"] == expected_model
+    assert eng.stt.model_id == expected_model
 
     await client.send_json({"cmd": "start", "session": "s1", "context": {"bundle_id": "com.apple.Notes", "app_name": "Notes", "mode": None}})
     for _ in range(10):  # ~1s of audio
