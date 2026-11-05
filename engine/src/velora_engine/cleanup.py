@@ -98,6 +98,15 @@ COPY_DRAFT_MODELS = frozenset({
     "mlx-community/Qwen3.5-4B-MLX-4bit",
 })
 
+# Only unused Metal buffers count toward this limit; live weights and prompt
+# snapshots remain allocated. A 512 MiB budget retained the Quality model's
+# warm latency while releasing about 0.4 GB after varied dictation lengths.
+# A 256 MiB budget caused allocation churn and timeouts. Other models keep
+# MLX's default until measured. See docs/research/2026-11-05-phonon-efficiency-audit.md.
+ALLOCATOR_CACHE_LIMITS = {
+    "mlx-community/Qwen3.5-4B-MLX-8bit": 512 * 1024 * 1024,
+}
+
 # A cleanup may add punctuation or line breaks, but it must not silently
 # translate away the transcript's writing system. Two letters is enough to
 # make a script meaningful (for example, the complete Chinese phrase "买书").
@@ -691,6 +700,11 @@ class CleanupEngine:
             ) from exc
 
     def load(self, warm_system_prompt: str | None = None) -> None:
+        cache_limit = ALLOCATOR_CACHE_LIMITS.get(self.model_id)
+        if cache_limit is not None:
+            import mlx.core as mx
+
+            mx.set_cache_limit(cache_limit)
         # A load can replace the model/tokenizer on this object. Prompt-cache
         # arrays are model-specific even when two models share token IDs, so
         # never carry snapshots across a reload.

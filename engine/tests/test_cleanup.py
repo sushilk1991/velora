@@ -1315,6 +1315,32 @@ def offline_loaders(monkeypatch):
     return utils, tokenizer_utils
 
 
+@pytest.mark.parametrize("model_id, expected_limit", [
+    ("mlx-community/Qwen3.5-4B-MLX-8bit", 512 * 1024 * 1024),
+    ("mlx-community/Qwen3.5-4B-MLX-4bit", None),
+    ("logical/other-model", None),
+])
+def test_allocator_budget_precedes_loading(monkeypatch, tmp_path, model_id, expected_limit):
+    """Cap tested worker allocations before weights or warm-up can allocate."""
+    import mlx.core as mx
+
+    events = []
+    model, tokenizer = object(), object()
+    monkeypatch.setattr(mx, "set_cache_limit", lambda limit: events.append(("limit", limit)))
+    engine = CleanupEngine(model_id, local_model_path=tmp_path)
+    monkeypatch.setattr(engine, "_load_local_model", lambda _path: (
+        events.append(("load", None)) or (model, tokenizer)))
+    monkeypatch.setattr(engine, "_warm", lambda prompt: events.append(("warm", prompt)))
+    try:
+        engine.load("prefix")
+        expected = [] if expected_limit is None else [("limit", expected_limit)]
+        assert events == expected + [("load", None), ("warm", "prefix")]
+        assert engine.loaded
+        assert engine._model is model and engine._tokenizer is tokenizer
+    finally:
+        engine.close()
+
+
 @pytest.mark.parametrize("model_id", [
     "mlx-community/Qwen3.5-4B-MLX-8bit", "logical/other-model",
 ])
