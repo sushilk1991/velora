@@ -1,0 +1,19 @@
+{
+  "repository": "https://github.com/ggml-org/llama.cpp",
+  "commit": "4b77dee0524c64b8471869232e2958bd9589607d",
+  "license": "MIT",
+  "json_dependency": "llama.cpp/vendor/nlohmann/json.hpp (MIT)",
+  "sha256_dependency": "llama.cpp/vendor/hash/sha256 (public domain)",
+  "worker": "Independently authored Velora prototype; no Phonon implementation used",
+  "model": {
+    "repository": "LiquidAI/LFM3-1.7B-GGUF",
+    "revision": "cd0c74c575b5c416f3011b5b4c298077f26ca8c2",
+    "filename": "LFM3-1.7B-Q8_0.gguf",
+    "bytes": 1846238496,
+    "sha256": "8f6b24182258205e9e01e21f1f24a1f208c1e8115578825d202ce39976af20b6",
+    "license": "LFM Open License v1.0; separate from runtime MIT",
+    "comparison": "GGUF Q8_0 differs from MLX 8-bit; not backend-only equivalence"
+  },
+  "source_tree_sha256": "c2c7fd4aeec500073774b5578a974271a94e60f28b539b62fd5492dc67cd803e",
+  "source_archive_sha256": "f78d578b9a9246793e65917f7b3d0a567cb4f3aa349afe43f54576d623925d2a"
+}

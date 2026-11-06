@@ -1,0 +1,2 @@
+#pragma once
+#define VELORA_LLAMA_COMMIT "@LLAMA_PIN@"
