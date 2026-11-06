@@ -1,0 +1,50 @@
+{
+  "cases": 44,
+  "native_repeats": 3,
+  "phonon_repeats": 3,
+  "workload": "Same supported English case IDs; warm one-shot cleanup only, no audio/streaming/insertion. Different trained models, native engines and product prompts; not backend-only equivalence.",
+  "native": {
+    "p50_case_median_wall_ms": 77.60039600543678,
+    "p95_case_median_wall_ms": 222.82188753597438,
+    "max_case_median_wall_ms": 236.44512495957315,
+    "eos_per_run": [
+      44,
+      44,
+      44
+    ]
+  },
+  "phonon": {
+    "p50_case_median_wall_ms": 46.19208350777626,
+    "p95_case_median_wall_ms": 206.14603763679042,
+    "max_case_median_wall_ms": 368.1831250432879,
+    "guard_failed_cases": 1,
+    "thinking": false,
+    "model_revision": "2b0ab74bee7ab7cf364695bbe44f64ce4c47439e",
+    "engine_sha256": "8c12c4a2ca59424595ecb01738c4ab95f82e2088529d7a6764f1dcba54b30ccc",
+    "footprint_after_inference": {
+      "current_bytes": 529221504,
+      "peak_bytes": 548833200
+    },
+    "rss_after_inference": {
+      "current_bytes": 1360166912
+    }
+  },
+  "quality": {
+    "method": "Independent blinded Terra text review; 88ratings on44 supported diagnostic V4 cases. This is already examined diagnostic data for C, not fresh generalization or human/audio truth.",
+    "models": {
+      "native": {
+        "supported": 44,
+        "material_error": 3,
+        "introduced_fact": 3,
+        "control_error": 0
+      },
+      "phonon": {
+        "supported": 44,
+        "material_error": 4,
+        "introduced_fact": 4,
+        "control_error": 0
+      }
+    }
+  },
+  "percentiles": "Linear interpolation of per-case three-attempt medians for both engines."
+}

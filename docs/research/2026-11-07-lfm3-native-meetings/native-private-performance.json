@@ -1,0 +1,91 @@
+{
+  "q8": {
+    "case_count": 614,
+    "status_counts": {
+      "ok": 602,
+      "stt_failed": 1,
+      "cleanup_fallback": 7,
+      "cleanup_partial": 4
+    },
+    "all_nonnull_cleanup_wall": {
+      "n": 613,
+      "p50_ms": 307.924,
+      "p95_ms": 1750.397
+    },
+    "all_nonnull_reported_model": {
+      "n": 613,
+      "p50_ms": 307.0,
+      "p95_ms": 1747.4
+    },
+    "model_attempted_cleanup_wall": {
+      "n": 574,
+      "p50_ms": 319.037,
+      "p95_ms": 1803.965
+    },
+    "model_attempted_reported_model": {
+      "n": 574,
+      "p50_ms": 318.5,
+      "p95_ms": 1800.95
+    },
+    "end_resources": {
+      "worker": {
+        "current_bytes_rounded": 2576980377,
+        "peak_bytes_rounded": 2899102924
+      },
+      "supervisor": {
+        "current_bytes_rounded": 11744051,
+        "peak_bytes_rounded": 11744051
+      },
+      "model_load_ms": 4304.16
+    },
+    "length_limit_calls": 3,
+    "percentile_linear_interpolation": 1
+  },
+  "q4": {
+    "case_count": 614,
+    "status_counts": {
+      "ok": 603,
+      "stt_failed": 1,
+      "cleanup_partial": 5,
+      "cleanup_fallback": 5
+    },
+    "all_nonnull_cleanup_wall": {
+      "n": 613,
+      "p50_ms": 281.281,
+      "p95_ms": 1524.537
+    },
+    "all_nonnull_reported_model": {
+      "n": 613,
+      "p50_ms": 281.0,
+      "p95_ms": 1521.8
+    },
+    "model_attempted_cleanup_wall": {
+      "n": 574,
+      "p50_ms": 290.124,
+      "p95_ms": 1555.548
+    },
+    "model_attempted_reported_model": {
+      "n": 574,
+      "p50_ms": 289.0,
+      "p95_ms": 1552.85
+    },
+    "end_resources": {
+      "worker": {
+        "current_bytes_rounded": 1717986918,
+        "peak_bytes_rounded": 2040109465
+      },
+      "supervisor": {
+        "current_bytes_rounded": 11534336,
+        "peak_bytes_rounded": 11534336
+      },
+      "model_load_ms": 2622.486
+    },
+    "length_limit_calls": 6,
+    "percentile_linear_interpolation": 1
+  },
+  "coverage": {
+    "same_ids_and_input_hashes": 1,
+    "case_count": 614,
+    "input_hash_multiset_sha256": "cd71203a999a974393bec5d50bfb5234a7d6adbad772512fabef3bfb01a002ee"
+  }
+}

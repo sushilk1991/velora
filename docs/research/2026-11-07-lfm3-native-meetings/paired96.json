@@ -1,0 +1,330 @@
+{
+  "coverage": {
+    "case_count": 96,
+    "attempts_per_model": 192,
+    "total_attempts": 576,
+    "same_ids_and_input_hashes": 1,
+    "input_hash_multiset_sha256": "d07bfde2d77f6940b9c07501c1355afb29481780e1a1deb572027b7d2a083998",
+    "percentile_linear_interpolation": 1,
+    "latency_is_per_case_two_attempt_median": 1
+  },
+  "models": {
+    "current_4b": {
+      "status_counts": {
+        "ok": 184,
+        "stt_failed": 2,
+        "cleanup_fallback": 6
+      },
+      "all_nonnull_cleanup_wall": {
+        "n": 95,
+        "p50_ms": 601.296,
+        "p95_ms": 4039.413
+      },
+      "all_nonnull_reported_model": {
+        "n": 95,
+        "p50_ms": 600.0,
+        "p95_ms": 4035.6
+      },
+      "model_attempted_cleanup_wall": {
+        "n": 86,
+        "p50_ms": 649.666,
+        "p95_ms": 4063.072
+      },
+      "model_attempted_reported_model": {
+        "n": 86,
+        "p50_ms": 648.75,
+        "p95_ms": 4059.0
+      },
+      "repeat_parity": {
+        "text": {
+          "available": 95,
+          "equal": 95,
+          "different": 0
+        },
+        "status": {
+          "available": 96,
+          "equal": 96,
+          "different": 0
+        },
+        "system_prompt_sha256": {
+          "available": 86,
+          "equal": 86,
+          "different": 0
+        },
+        "_greedy_sha256": {
+          "available": 0,
+          "equal": 0,
+          "different": 0
+        },
+        "reason": {
+          "available": 86,
+          "equal": 86,
+          "different": 0
+        },
+        "eos": {
+          "available": 86,
+          "equal": 86,
+          "different": 0
+        },
+        "applied": {
+          "available": 86,
+          "equal": 86,
+          "different": 0
+        },
+        "prefix_candidates_sha256": {
+          "available": 86,
+          "equal": 86,
+          "different": 0
+        },
+        "input_token_counts": {
+          "available": 86,
+          "equal": 86,
+          "different": 0
+        },
+        "output_token_counts": {
+          "available": 86,
+          "equal": 86,
+          "different": 0
+        }
+      },
+      "end_resources": [
+        {
+          "process": {
+            "peak_rss_bytes": 5216354304,
+            "current_bytes_rounded": 5798205849,
+            "peak_bytes_rounded": 6657199308,
+            "mlx_active_bytes": 4761296394,
+            "mlx_peak_bytes": 5500474800,
+            "mlx_cache_bytes": 369507312
+          }
+        },
+        {
+          "process": {
+            "peak_rss_bytes": 4437082112,
+            "current_bytes_rounded": 5798205849,
+            "peak_bytes_rounded": 6657199308,
+            "mlx_active_bytes": 4761296394,
+            "mlx_peak_bytes": 5500474800,
+            "mlx_cache_bytes": 380045296
+          }
+        }
+      ]
+    },
+    "native_q4": {
+      "status_counts": {
+        "ok": 184,
+        "stt_failed": 2,
+        "cleanup_partial": 4,
+        "cleanup_fallback": 2
+      },
+      "all_nonnull_cleanup_wall": {
+        "n": 95,
+        "p50_ms": 280.996,
+        "p95_ms": 1641.654
+      },
+      "all_nonnull_reported_model": {
+        "n": 95,
+        "p50_ms": 280.5,
+        "p95_ms": 1637.9
+      },
+      "model_attempted_cleanup_wall": {
+        "n": 86,
+        "p50_ms": 289.079,
+        "p95_ms": 1660.933
+      },
+      "model_attempted_reported_model": {
+        "n": 86,
+        "p50_ms": 288.25,
+        "p95_ms": 1657.25
+      },
+      "repeat_parity": {
+        "text": {
+          "available": 95,
+          "equal": 95,
+          "different": 0
+        },
+        "status": {
+          "available": 96,
+          "equal": 96,
+          "different": 0
+        },
+        "system_prompt_sha256": {
+          "available": 86,
+          "equal": 86,
+          "different": 0
+        },
+        "_greedy_sha256": {
+          "available": 0,
+          "equal": 0,
+          "different": 0
+        },
+        "reason": {
+          "available": 86,
+          "equal": 86,
+          "different": 0
+        },
+        "eos": {
+          "available": 86,
+          "equal": 86,
+          "different": 0
+        },
+        "applied": {
+          "available": 86,
+          "equal": 86,
+          "different": 0
+        },
+        "prefix_candidates_sha256": {
+          "available": 0,
+          "equal": 0,
+          "different": 0
+        },
+        "input_token_counts": {
+          "available": 86,
+          "equal": 86,
+          "different": 0
+        },
+        "output_token_counts": {
+          "available": 86,
+          "equal": 86,
+          "different": 0
+        },
+        "native_prompt_token_ids": {
+          "available": 86,
+          "equal": 86,
+          "different": 0
+        },
+        "native_output_token_ids": {
+          "available": 86,
+          "equal": 86,
+          "different": 0
+        }
+      },
+      "end_resources": [
+        {
+          "worker": {
+            "current_bytes_rounded": 2040109465,
+            "peak_bytes_rounded": 2040109465
+          },
+          "supervisor": {
+            "current_bytes_rounded": 11534336,
+            "peak_bytes_rounded": 11534336
+          },
+          "model_load_ms": 2558.866
+        },
+        {
+          "worker": {
+            "current_bytes_rounded": 2040109465,
+            "peak_bytes_rounded": 2040109465
+          },
+          "supervisor": {
+            "current_bytes_rounded": 11534336,
+            "peak_bytes_rounded": 11534336
+          },
+          "model_load_ms": 2690.448
+        }
+      ]
+    },
+    "mlx_c": {
+      "status_counts": {
+        "ok": 182,
+        "stt_failed": 2,
+        "cleanup_partial": 4,
+        "cleanup_fallback": 4
+      },
+      "all_nonnull_cleanup_wall": {
+        "n": 95,
+        "p50_ms": 548.294,
+        "p95_ms": 4041.717
+      },
+      "all_nonnull_reported_model": {
+        "n": 95,
+        "p50_ms": 547.0,
+        "p95_ms": 4032.1
+      },
+      "model_attempted_cleanup_wall": {
+        "n": 86,
+        "p50_ms": 620.544,
+        "p95_ms": 4118.397
+      },
+      "model_attempted_reported_model": {
+        "n": 86,
+        "p50_ms": 618.75,
+        "p95_ms": 4109.5
+      },
+      "repeat_parity": {
+        "text": {
+          "available": 95,
+          "equal": 95,
+          "different": 0
+        },
+        "status": {
+          "available": 96,
+          "equal": 96,
+          "different": 0
+        },
+        "system_prompt_sha256": {
+          "available": 86,
+          "equal": 86,
+          "different": 0
+        },
+        "_greedy_sha256": {
+          "available": 0,
+          "equal": 0,
+          "different": 0
+        },
+        "reason": {
+          "available": 86,
+          "equal": 85,
+          "different": 1
+        },
+        "eos": {
+          "available": 86,
+          "equal": 86,
+          "different": 0
+        },
+        "applied": {
+          "available": 86,
+          "equal": 86,
+          "different": 0
+        },
+        "prefix_candidates_sha256": {
+          "available": 86,
+          "equal": 86,
+          "different": 0
+        },
+        "input_token_counts": {
+          "available": 86,
+          "equal": 86,
+          "different": 0
+        },
+        "output_token_counts": {
+          "available": 86,
+          "equal": 85,
+          "different": 1
+        }
+      },
+      "end_resources": [
+        {
+          "process": {
+            "peak_rss_bytes": 2396913664,
+            "current_bytes_rounded": 2362232012,
+            "peak_bytes_rounded": 3758096384,
+            "mlx_active_bytes": 1903146248,
+            "mlx_peak_bytes": 3207730626,
+            "mlx_cache_bytes": 60030410
+          }
+        },
+        {
+          "process": {
+            "peak_rss_bytes": 2397061120,
+            "current_bytes_rounded": 2362232012,
+            "peak_bytes_rounded": 3758096384,
+            "mlx_active_bytes": 1903146248,
+            "mlx_peak_bytes": 3207730626,
+            "mlx_cache_bytes": 60018122
+          }
+        }
+      ]
+    }
+  }
+}

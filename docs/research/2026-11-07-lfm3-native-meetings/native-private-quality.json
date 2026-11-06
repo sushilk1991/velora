@@ -1,0 +1,189 @@
+{
+  "coverage": {
+    "cases": 303,
+    "selected_reviewed": 78,
+    "inherited_equal_cases_per_native_variant": 225,
+    "reviewed_unique_text_ratings": 213,
+    "common_all_four_supported": 255
+  },
+  "jointly_supported": {
+    "c": {
+      "cases": 257,
+      "material_error": {
+        "current_errors": 8,
+        "candidate_errors": 8,
+        "additional": 6,
+        "improved": 6,
+        "both_error": 2,
+        "neither_error": 243
+      },
+      "introduced_error": {
+        "current_errors": 8,
+        "candidate_errors": 3,
+        "additional": 1,
+        "improved": 6,
+        "both_error": 2,
+        "neither_error": 248
+      },
+      "control_error": {
+        "current_errors": 17,
+        "candidate_errors": 17,
+        "additional": 3,
+        "improved": 3,
+        "both_error": 14,
+        "neither_error": 237
+      }
+    },
+    "q8": {
+      "cases": 256,
+      "material_error": {
+        "current_errors": 7,
+        "candidate_errors": 8,
+        "additional": 7,
+        "improved": 6,
+        "both_error": 1,
+        "neither_error": 242
+      },
+      "introduced_error": {
+        "current_errors": 7,
+        "candidate_errors": 2,
+        "additional": 1,
+        "improved": 6,
+        "both_error": 1,
+        "neither_error": 248
+      },
+      "control_error": {
+        "current_errors": 16,
+        "candidate_errors": 17,
+        "additional": 4,
+        "improved": 3,
+        "both_error": 13,
+        "neither_error": 236
+      }
+    },
+    "q4": {
+      "cases": 256,
+      "material_error": {
+        "current_errors": 7,
+        "candidate_errors": 7,
+        "additional": 6,
+        "improved": 6,
+        "both_error": 1,
+        "neither_error": 243
+      },
+      "introduced_error": {
+        "current_errors": 7,
+        "candidate_errors": 3,
+        "additional": 2,
+        "improved": 6,
+        "both_error": 1,
+        "neither_error": 247
+      },
+      "control_error": {
+        "current_errors": 16,
+        "candidate_errors": 16,
+        "additional": 4,
+        "improved": 4,
+        "both_error": 12,
+        "neither_error": 236
+      }
+    }
+  },
+  "common_all_four_supported": {
+    "c": {
+      "cases": 255,
+      "material_error": {
+        "current_errors": 7,
+        "candidate_errors": 7,
+        "additional": 6,
+        "improved": 6,
+        "both_error": 1,
+        "neither_error": 242
+      },
+      "introduced_error": {
+        "current_errors": 7,
+        "candidate_errors": 2,
+        "additional": 1,
+        "improved": 6,
+        "both_error": 1,
+        "neither_error": 247
+      },
+      "control_error": {
+        "current_errors": 16,
+        "candidate_errors": 16,
+        "additional": 3,
+        "improved": 3,
+        "both_error": 13,
+        "neither_error": 236
+      }
+    },
+    "q8": {
+      "cases": 255,
+      "material_error": {
+        "current_errors": 7,
+        "candidate_errors": 8,
+        "additional": 7,
+        "improved": 6,
+        "both_error": 1,
+        "neither_error": 241
+      },
+      "introduced_error": {
+        "current_errors": 7,
+        "candidate_errors": 2,
+        "additional": 1,
+        "improved": 6,
+        "both_error": 1,
+        "neither_error": 247
+      },
+      "control_error": {
+        "current_errors": 16,
+        "candidate_errors": 17,
+        "additional": 4,
+        "improved": 3,
+        "both_error": 13,
+        "neither_error": 235
+      }
+    },
+    "q4": {
+      "cases": 255,
+      "material_error": {
+        "current_errors": 7,
+        "candidate_errors": 6,
+        "additional": 5,
+        "improved": 6,
+        "both_error": 1,
+        "neither_error": 243
+      },
+      "introduced_error": {
+        "current_errors": 7,
+        "candidate_errors": 2,
+        "additional": 1,
+        "improved": 6,
+        "both_error": 1,
+        "neither_error": 247
+      },
+      "control_error": {
+        "current_errors": 16,
+        "candidate_errors": 15,
+        "additional": 3,
+        "improved": 4,
+        "both_error": 12,
+        "neither_error": 236
+      }
+    }
+  },
+  "context_verification": {
+    "q4": {
+      "same_input_hash": 303,
+      "same_mode": 303,
+      "matching_system_prompt_hash_cases": 294,
+      "inherited_exact_text_context": 225
+    },
+    "q8": {
+      "same_input_hash": 303,
+      "same_mode": 303,
+      "matching_system_prompt_hash_cases": 302,
+      "inherited_exact_text_context": 225
+    }
+  }
+}

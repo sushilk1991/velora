@@ -1,0 +1,34 @@
+{
+  "hardware": "Apple M5 Max, 36 GiB unified memory",
+  "models": {
+    "current_4B": {
+      "peak_rss_native": 4330389504,
+      "peak_rss_units": "bytes on macOS",
+      "physical_footprint_lines": [
+        "Physical footprint:         5.5G",
+        "Physical footprint (peak):  6.2G"
+      ],
+      "mlx_memory": {
+        "available": true,
+        "mlx_active_bytes": 4761296394,
+        "mlx_peak_bytes": 5500489648,
+        "mlx_cache_bytes": 498085904
+      }
+    },
+    "C_MLX8": {
+      "peak_rss_native": 2400436224,
+      "peak_rss_units": "bytes on macOS",
+      "physical_footprint_lines": [
+        "Physical footprint:         2.1G",
+        "Physical footprint (peak):  3.5G"
+      ],
+      "mlx_memory": {
+        "available": true,
+        "mlx_active_bytes": 1903146248,
+        "mlx_peak_bytes": 3207730626,
+        "mlx_cache_bytes": 27729948
+      }
+    }
+  },
+  "scope": "End of 614-case cleanup replay while model resident; STT not resident in these processes. Peak is process lifetime, not a hardware RAM requirement. Different model/runtime environments; no download-size inference."
+}

@@ -1,0 +1,58 @@
+{
+  "artifact": "15def8830eb1ee5a7a5ddc002aae31a8a38a913b53f0d7f1c8583b80044f16c9",
+  "binary_sha256": "609f14b1861d01cadf1bdcd32882e79775c53c69e0936cfda168cb978f3d3aa9",
+  "workload": "Fresh96 public V5; warm one-shot cleanup, not audio or GUI latency",
+  "order": [
+    "scalar",
+    "copy3_prefix",
+    "copy8_prefix",
+    "copy8_prefix",
+    "copy3_prefix",
+    "scalar"
+  ],
+  "parameters": {
+    "prefill_batch": 128,
+    "context": 4096,
+    "max_output": 1024,
+    "temperature": 0
+  },
+  "variants": {
+    "scalar": {
+      "cases": 96,
+      "repeats": 2,
+      "eos_requests": 192,
+      "exact_output_token_status_parity_to_scalar": true,
+      "runtime_qualification_per_run": [
+        true,
+        true
+      ],
+      "p50_case_median_ms": 84.16864601895213,
+      "p95_case_median_ms": 1993.4973751660436
+    },
+    "copy3_prefix": {
+      "cases": 96,
+      "repeats": 2,
+      "eos_requests": 192,
+      "exact_output_token_status_parity_to_scalar": true,
+      "runtime_qualification_per_run": [
+        true,
+        true
+      ],
+      "p50_case_median_ms": 62.04427074408159,
+      "p95_case_median_ms": 1015.035979449749
+    },
+    "copy8_prefix": {
+      "cases": 96,
+      "repeats": 2,
+      "eos_requests": 192,
+      "exact_output_token_status_parity_to_scalar": true,
+      "runtime_qualification_per_run": [
+        true,
+        true
+      ],
+      "p50_case_median_ms": 48.172583570703864,
+      "p95_case_median_ms": 476.6767709515989
+    }
+  },
+  "attribution": "copy3 versus copy8 changes draft size only; scalar versus copy changes both copy and prefix caching."
+}

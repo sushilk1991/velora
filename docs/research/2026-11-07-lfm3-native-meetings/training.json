@@ -1,0 +1,109 @@
+{
+  "model": "LiquidAI/LFM3-1.7B-MLX-8bit",
+  "revision": "4d6d94c9c2c2f249f1f740f4f08e071b0dbfe099",
+  "port_sha256": "40e87df07edf678baf6c1bdc1719bd5b6fb0e8eb88acaca1fdbfc9196ce94a58",
+  "recipes": [
+    {
+      "name": "A",
+      "rows": {
+        "total": 1604,
+        "train": 1242,
+        "dev": 362
+      },
+      "parameters": {
+        "iters": 2488,
+        "rank": 16,
+        "lora_scale": 8.0,
+        "lr": 1e-05,
+        "grad_accum": 4,
+        "max_seq": 1536,
+        "warmup_updates": 20,
+        "lr_schedule": "cosine",
+        "clip_grad_norm": 1.0,
+        "seed": 42
+      },
+      "data_sha256": "6935b330dfa6c602b2d9703b71d107a8aa78e7c04bba8cb79ff5cb99eb760c21",
+      "holdout_sha256": "6a593c3e6d50baaf85031b9cb771eff0a6e6863ca6d6cd664258b23f0470f360",
+      "selected_samples": 1872,
+      "selected_dev_loss": 0.1736389696598053,
+      "selected_adapter_sha256": "47645ec6a1025d3ce265993e437d0cafa8be0a1c12e522b710b6c3dc40353224",
+      "gradient_preflight": {
+        "loss": 0.16989655792713165,
+        "gradient_arrays": 306,
+        "finite": true
+      },
+      "training_elapsed_seconds": 511.7802,
+      "training_peak_mlx_bytes": 3481648306
+    },
+    {
+      "name": "B",
+      "rows": {
+        "total": 1838,
+        "train": 1476,
+        "dev": 362
+      },
+      "parameters": {
+        "iters": 2952,
+        "rank": 16,
+        "lora_scale": 8.0,
+        "lr": 1e-05,
+        "grad_accum": 4,
+        "max_seq": 1536,
+        "warmup_updates": 20,
+        "lr_schedule": "cosine",
+        "clip_grad_norm": 1.0,
+        "seed": 42
+      },
+      "data_sha256": "85d6401b8d713ff729c30dd596ceef830d5698ccb9692c580745f5074013e340",
+      "holdout_sha256": "6a593c3e6d50baaf85031b9cb771eff0a6e6863ca6d6cd664258b23f0470f360",
+      "selected_samples": 1480,
+      "selected_dev_loss": 0.1522892415523529,
+      "selected_adapter_sha256": "441f0bbbf7fc81fd0606d8c2f4d51719c02c679a85df8639171006115902e7dc",
+      "gradient_preflight": {
+        "loss": 0.15036366879940033,
+        "gradient_arrays": 306,
+        "finite": true
+      },
+      "training_elapsed_seconds": 664.1559,
+      "training_peak_mlx_bytes": 3793811860
+    },
+    {
+      "name": "C",
+      "rows": {
+        "total": 2216,
+        "train": 1799,
+        "dev": 417
+      },
+      "parameters": {
+        "iters": 3600,
+        "rank": 16,
+        "lora_scale": 8.0,
+        "lr": 3e-06,
+        "grad_accum": 4,
+        "max_seq": 2048,
+        "warmup_updates": 20,
+        "lr_schedule": "cosine",
+        "clip_grad_norm": 1.0,
+        "seed": 42
+      },
+      "data_sha256": "fac685509b3d1b5b44e4af6707ce8e1f8e2a525e215b4083507a2ecd89f48a51",
+      "holdout_sha256": "d1811b39bf3a6ff57aa36e61571252396b1e6805489caa9d0fd4c67701c40b5a",
+      "selected_samples": 1800,
+      "selected_dev_loss": 0.1444857269525528,
+      "selected_adapter_sha256": "2389b2d67d719e7b7f56b8f348cd6b38c7c7f2f7b59c6c8276cba2501c498f17",
+      "gradient_preflight": {
+        "loss": 0.08105571568012238,
+        "gradient_arrays": 306,
+        "finite": true
+      },
+      "training_elapsed_seconds": 789.3262,
+      "training_peak_mlx_bytes": 3975921604
+    }
+  ],
+  "C_selection_includes_initial_B": true,
+  "C_initial_B_loss_on_same_417_dev": 0.15828651189804077,
+  "personal_training_rows": 0,
+  "podcast_training_rows": 0,
+  "Qwen_teacher_rows": 0,
+  "evaluation_scope": "Public held-out challenge plus previously examined private regression; no human/audio accuracy claim."
+}

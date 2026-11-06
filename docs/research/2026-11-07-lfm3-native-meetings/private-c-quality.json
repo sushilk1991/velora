@@ -1,0 +1,38 @@
+{
+  "reference_approved_cases": 303,
+  "rating_pairs": 606,
+  "jointly_supported_pairs": 262,
+  "uncertain_pairs": 41,
+  "independently_adjudicated_cases": 76,
+  "method": "Fresh Muse paired606; independent Terra152 on all flagged/uncertain plus12 clean cases. Second judgments replace first on selected cases; model-assisted text references, not human/audio truth.",
+  "models": {
+    "current": {
+      "material_error": 6,
+      "introduced_error": 6,
+      "control_error": 9
+    },
+    "c": {
+      "material_error": 7,
+      "introduced_error": 2,
+      "control_error": 8
+    }
+  },
+  "paired_differences": {
+    "material_error": {
+      "additional_c": 5,
+      "improved_c": 4
+    },
+    "introduced_error": {
+      "additional_c": 0,
+      "improved_c": 4
+    },
+    "control_error": {
+      "additional_c": 2,
+      "improved_c": 3
+    }
+  },
+  "source_sha256": {
+    "second_review": "ed9748016e0a4d3a3ef4fb3033e2f44a9da0650d01d438776c59df89d5fd83d8",
+    "first_summary": "e513a010d47049cd10a9840f9ebfa7c955dcdf1920c3cc9e6a4a708729054800"
+  }
+}

@@ -1,0 +1,1352 @@
+{
+  "schema": 1,
+  "scope": "Aggregate model-assisted blinded notes review against ASR-derived claims; ASR reference is not human truth. One source recording; no general quality or adoption claim.",
+  "contains_private_text": false,
+  "private_case_ids_included": false,
+  "studies": [
+    {
+      "study_id": "mlx",
+      "sources": [
+        {
+          "source_id": "podcast/notes-blind-mlx/summary.json",
+          "sha256": "65a4f5ef7123bbfc677fd900a0b5c53fc14135f3e7b14c4de192fab1aba0e82c"
+        },
+        {
+          "source_id": "podcast/notes-blind-mlx/ratings.json",
+          "sha256": "c474b43015e44b0bf40737cb499de6edc06e0bef16307d62435c98bf9ffb17b4"
+        },
+        {
+          "source_id": "podcast/notes-blind-mlx-key.json",
+          "sha256": "34a08d1696eef3aea82bad138d6bd91c9287ec14fa00b26f2ff1383857fa3874"
+        }
+      ],
+      "expected_candidates": 9,
+      "review_available_candidates": 6,
+      "review_unavailable_candidates": 3,
+      "runtime_status_counts": {
+        "failed": 2,
+        "partial": 3,
+        "complete": 4
+      },
+      "late_denominator_policy": "Taken only from source summary; null means not recorded there.",
+      "rows": [
+        {
+          "run_source_id": "lfm3-base-hierarchical.json",
+          "review_available": false,
+          "claim_denominator": 29,
+          "full": null,
+          "partial": null,
+          "absent": null,
+          "contradicted": null,
+          "late_full": null,
+          "late_partial": null,
+          "late_denominator": 13,
+          "unsupported_summary_fact_entries": null,
+          "unsupported_decision_entries": null,
+          "unsupported_action_entries": null,
+          "unsupported_commitment_entries": null,
+          "runtime": {
+            "source": {
+              "source_id": "podcast/lfm3-base-hierarchical.json",
+              "sha256": "72c7087d4eb342b715261704d38701359d6fae3d94d20b2c0c5136227b6f8c24"
+            },
+            "status": "failed",
+            "complete": false,
+            "chunks": 16,
+            "failed_chunks": 1,
+            "failed_spans_count": 1,
+            "reducer_loss_entries": 0,
+            "successfully_mapped_chars": 55561,
+            "total_ms": 29401.16220805794,
+            "load_ms": 424.36800012364984,
+            "peak_rss_native": 2378366976,
+            "max_input_tokens": 4096,
+            "timestamp_count": 64,
+            "chunk_chars": 4000,
+            "reduce_chars": 12000,
+            "request_count": 17,
+            "request_status_counts": {
+              "none": 16,
+              "length": 1
+            },
+            "native_status_counts": {},
+            "request_valid_count": 15,
+            "request_clipped_count": 0,
+            "validation_limit_entries": 0,
+            "request_applied_count": 16,
+            "output_token_budget_counts": {
+              "384": 16,
+              "512": 1
+            },
+            "actual_output_tokens_total": 3633,
+            "actual_input_tokens_max": 2246,
+            "request_wall_ms_total": 29399.247168097645,
+            "transcript_sha256": "67bbbe1a8b32a33e1d1545ebe6b61c0f4f33cac906e0e98c8594eee3a974a600",
+            "source_hashes": {
+              "benchmark_long_notes.py": "5ba30cb6f3481c9e19c5358b036bad3e0604db47712a42e29d5b271f9fe81904",
+              "meeting_notes.py": "49411dec92f1d76b87c38279a2aea176b094883517f8f7c6c851a6e6f9fb2b8a",
+              "server.py": "3d999b6f093a354c30b346ef14e551e5f9435efe9f0eb47da36b109e8081563a",
+              "cleanup.py": "e35d522c34a4cfd29196c9353de8440c481f64045af5914f81706213e16cfe0a",
+              "provenance.py": "a1a32e12d37fbf0fb095441203552fa64310526f9e744b2ad857d2433dd4a884",
+              "benchmark_personal_native.py": "91c2e6f1ad0f463750bcb64aa506b48e17e4b0daa00986d91b9af9289be180b2",
+              "supervise.py": "034db4bcd73b3bec9159c10ffed367bcffe973b7a31234ea300680419668323b",
+              "UPSTREAM.json": "84d1f9f6d4cacc110097490a512d0e5746e782700c786a928468f4a25512883a"
+            }
+          }
+        },
+        {
+          "run_source_id": "current4b-hierarchical.json",
+          "review_available": false,
+          "claim_denominator": 29,
+          "full": null,
+          "partial": null,
+          "absent": null,
+          "contradicted": null,
+          "late_full": null,
+          "late_partial": null,
+          "late_denominator": 13,
+          "unsupported_summary_fact_entries": null,
+          "unsupported_decision_entries": null,
+          "unsupported_action_entries": null,
+          "unsupported_commitment_entries": null,
+          "runtime": {
+            "source": {
+              "source_id": "podcast/current4b-hierarchical.json",
+              "sha256": "54f71d0549278d11395f108971a3e7c6f59041ce9366b92b19745594cf69ed2c"
+            },
+            "status": "failed",
+            "complete": false,
+            "chunks": 16,
+            "failed_chunks": 0,
+            "failed_spans_count": 0,
+            "reducer_loss_entries": 0,
+            "successfully_mapped_chars": 59194,
+            "total_ms": 50455.206708051264,
+            "load_ms": 4291.253834031522,
+            "peak_rss_native": 3950641152,
+            "max_input_tokens": 4096,
+            "timestamp_count": 64,
+            "chunk_chars": 4000,
+            "reduce_chars": 12000,
+            "request_count": 17,
+            "request_status_counts": {
+              "none": 16,
+              "length": 1
+            },
+            "native_status_counts": {},
+            "request_valid_count": 16,
+            "request_clipped_count": 0,
+            "validation_limit_entries": 0,
+            "request_applied_count": 16,
+            "output_token_budget_counts": {
+              "384": 16,
+              "512": 1
+            },
+            "actual_output_tokens_total": 2107,
+            "actual_input_tokens_max": 1507,
+            "request_wall_ms_total": 50450.66762412898,
+            "transcript_sha256": "67bbbe1a8b32a33e1d1545ebe6b61c0f4f33cac906e0e98c8594eee3a974a600",
+            "source_hashes": {
+              "benchmark_long_notes.py": "5ba30cb6f3481c9e19c5358b036bad3e0604db47712a42e29d5b271f9fe81904",
+              "meeting_notes.py": "49411dec92f1d76b87c38279a2aea176b094883517f8f7c6c851a6e6f9fb2b8a",
+              "server.py": "3d999b6f093a354c30b346ef14e551e5f9435efe9f0eb47da36b109e8081563a",
+              "cleanup.py": "e35d522c34a4cfd29196c9353de8440c481f64045af5914f81706213e16cfe0a",
+              "provenance.py": "a1a32e12d37fbf0fb095441203552fa64310526f9e744b2ad857d2433dd4a884",
+              "benchmark_personal_native.py": "91c2e6f1ad0f463750bcb64aa506b48e17e4b0daa00986d91b9af9289be180b2",
+              "supervise.py": "034db4bcd73b3bec9159c10ffed367bcffe973b7a31234ea300680419668323b",
+              "UPSTREAM.json": "84d1f9f6d4cacc110097490a512d0e5746e782700c786a928468f4a25512883a"
+            }
+          }
+        },
+        {
+          "run_source_id": "lfm3-c-production.json",
+          "review_available": false,
+          "claim_denominator": 29,
+          "full": null,
+          "partial": null,
+          "absent": null,
+          "contradicted": null,
+          "late_full": null,
+          "late_partial": null,
+          "late_denominator": 13,
+          "unsupported_summary_fact_entries": null,
+          "unsupported_decision_entries": null,
+          "unsupported_action_entries": null,
+          "unsupported_commitment_entries": null,
+          "runtime": {
+            "source": {
+              "source_id": "podcast/lfm3-c-production.json",
+              "sha256": "c9741cbdf8b73e48254d74c0a2432c109b7ebc15cfab7214c99e83b41c587cea"
+            },
+            "status": "partial",
+            "complete": false,
+            "chunks": 16,
+            "failed_chunks": 0,
+            "failed_spans_count": 0,
+            "reducer_loss_entries": 1,
+            "successfully_mapped_chars": 59194,
+            "covered_chars": 59194,
+            "input_chars": 59194,
+            "total_ms": 32403.003083076328,
+            "load_ms": 432.33045912347734,
+            "peak_rss_native": 2379841536,
+            "max_input_tokens": 4096,
+            "timestamp_count": 64,
+            "chunk_chars": 4000,
+            "reduce_chars": 12000,
+            "request_count": 17,
+            "request_status_counts": {
+              "none": 16,
+              "length": 1
+            },
+            "native_status_counts": {},
+            "request_valid_count": 16,
+            "request_clipped_count": 0,
+            "validation_limit_entries": 0,
+            "request_applied_count": 16,
+            "output_token_budget_counts": {
+              "384": 16,
+              "512": 1
+            },
+            "actual_output_tokens_total": 2384,
+            "actual_input_tokens_max": 1122,
+            "request_wall_ms_total": 32401.716584339738,
+            "transcript_sha256": "67bbbe1a8b32a33e1d1545ebe6b61c0f4f33cac906e0e98c8594eee3a974a600",
+            "source_hashes": {
+              "benchmark_long_notes.py": "5ba30cb6f3481c9e19c5358b036bad3e0604db47712a42e29d5b271f9fe81904",
+              "meeting_notes.py": "49411dec92f1d76b87c38279a2aea176b094883517f8f7c6c851a6e6f9fb2b8a",
+              "server.py": "3d999b6f093a354c30b346ef14e551e5f9435efe9f0eb47da36b109e8081563a",
+              "cleanup.py": "e35d522c34a4cfd29196c9353de8440c481f64045af5914f81706213e16cfe0a",
+              "provenance.py": "a1a32e12d37fbf0fb095441203552fa64310526f9e744b2ad857d2433dd4a884",
+              "benchmark_personal_native.py": "91c2e6f1ad0f463750bcb64aa506b48e17e4b0daa00986d91b9af9289be180b2",
+              "supervise.py": "034db4bcd73b3bec9159c10ffed367bcffe973b7a31234ea300680419668323b",
+              "UPSTREAM.json": "84d1f9f6d4cacc110097490a512d0e5746e782700c786a928468f4a25512883a"
+            }
+          }
+        },
+        {
+          "run_source_id": "lfm3-base-production.json",
+          "review_available": true,
+          "claim_denominator": 29,
+          "full": 0,
+          "partial": 9,
+          "absent": 20,
+          "contradicted": 0,
+          "late_full": 0,
+          "late_partial": 0,
+          "late_denominator": 13,
+          "unsupported_summary_fact_entries": 1,
+          "unsupported_decision_entries": 8,
+          "unsupported_action_entries": 8,
+          "unsupported_commitment_entries": 16,
+          "runtime": {
+            "source": {
+              "source_id": "podcast/lfm3-base-production.json",
+              "sha256": "aaba5414a271e9366faa6c7a52e0277a51948dcd2c339e3c09325035e1582cac"
+            },
+            "status": "partial",
+            "complete": false,
+            "chunks": 16,
+            "failed_chunks": 2,
+            "failed_spans_count": 2,
+            "reducer_loss_entries": 1,
+            "successfully_mapped_chars": 51987,
+            "covered_chars": 59194,
+            "input_chars": 59194,
+            "total_ms": 27212.291874922812,
+            "load_ms": 418.9201667904854,
+            "peak_rss_native": 2378498048,
+            "max_input_tokens": 4096,
+            "timestamp_count": 64,
+            "chunk_chars": 4000,
+            "reduce_chars": 12000,
+            "request_count": 17,
+            "request_status_counts": {
+              "none": 17
+            },
+            "native_status_counts": {},
+            "request_valid_count": 15,
+            "request_clipped_count": 0,
+            "validation_limit_entries": 0,
+            "request_applied_count": 17,
+            "output_token_budget_counts": {
+              "384": 16,
+              "512": 1
+            },
+            "actual_output_tokens_total": 3388,
+            "actual_input_tokens_max": 1102,
+            "request_wall_ms_total": 27210.8234569896,
+            "transcript_sha256": "67bbbe1a8b32a33e1d1545ebe6b61c0f4f33cac906e0e98c8594eee3a974a600",
+            "source_hashes": {
+              "benchmark_long_notes.py": "5ba30cb6f3481c9e19c5358b036bad3e0604db47712a42e29d5b271f9fe81904",
+              "meeting_notes.py": "49411dec92f1d76b87c38279a2aea176b094883517f8f7c6c851a6e6f9fb2b8a",
+              "server.py": "3d999b6f093a354c30b346ef14e551e5f9435efe9f0eb47da36b109e8081563a",
+              "cleanup.py": "e35d522c34a4cfd29196c9353de8440c481f64045af5914f81706213e16cfe0a",
+              "provenance.py": "a1a32e12d37fbf0fb095441203552fa64310526f9e744b2ad857d2433dd4a884",
+              "benchmark_personal_native.py": "91c2e6f1ad0f463750bcb64aa506b48e17e4b0daa00986d91b9af9289be180b2",
+              "supervise.py": "034db4bcd73b3bec9159c10ffed367bcffe973b7a31234ea300680419668323b",
+              "UPSTREAM.json": "84d1f9f6d4cacc110097490a512d0e5746e782700c786a928468f4a25512883a"
+            }
+          }
+        },
+        {
+          "run_source_id": "lfm3-c-direct.json",
+          "review_available": true,
+          "claim_denominator": 29,
+          "full": 0,
+          "partial": 14,
+          "absent": 15,
+          "contradicted": 0,
+          "late_full": 0,
+          "late_partial": 4,
+          "late_denominator": 13,
+          "unsupported_summary_fact_entries": 2,
+          "unsupported_decision_entries": 0,
+          "unsupported_action_entries": 0,
+          "unsupported_commitment_entries": 0,
+          "runtime": {
+            "source": {
+              "source_id": "podcast/lfm3-c-direct.json",
+              "sha256": "15474460be185ebb5f533d5821d299970c454493942c0d465eee26b7434f25c3"
+            },
+            "status": "complete",
+            "complete": true,
+            "chunks": 1,
+            "failed_chunks": 0,
+            "failed_spans_count": 0,
+            "reducer_loss_entries": 0,
+            "successfully_mapped_chars": 59194,
+            "covered_chars": 59194,
+            "input_chars": 59194,
+            "total_ms": 5571.476957993582,
+            "load_ms": 432.90087510831654,
+            "peak_rss_native": 2379415552,
+            "max_input_tokens": 16384,
+            "timestamp_count": 64,
+            "chunk_chars": 4000,
+            "reduce_chars": 12000,
+            "request_count": 1,
+            "request_status_counts": {
+              "none": 1
+            },
+            "native_status_counts": {},
+            "request_valid_count": 1,
+            "request_clipped_count": 0,
+            "validation_limit_entries": 0,
+            "request_applied_count": 1,
+            "output_token_budget_counts": {
+              "1024": 1
+            },
+            "actual_output_tokens_total": 217,
+            "actual_input_tokens_max": 13639,
+            "request_wall_ms_total": 5570.989833911881,
+            "transcript_sha256": "67bbbe1a8b32a33e1d1545ebe6b61c0f4f33cac906e0e98c8594eee3a974a600",
+            "source_hashes": {
+              "benchmark_long_notes.py": "5ba30cb6f3481c9e19c5358b036bad3e0604db47712a42e29d5b271f9fe81904",
+              "meeting_notes.py": "49411dec92f1d76b87c38279a2aea176b094883517f8f7c6c851a6e6f9fb2b8a",
+              "server.py": "3d999b6f093a354c30b346ef14e551e5f9435efe9f0eb47da36b109e8081563a",
+              "cleanup.py": "e35d522c34a4cfd29196c9353de8440c481f64045af5914f81706213e16cfe0a",
+              "provenance.py": "a1a32e12d37fbf0fb095441203552fa64310526f9e744b2ad857d2433dd4a884",
+              "benchmark_personal_native.py": "91c2e6f1ad0f463750bcb64aa506b48e17e4b0daa00986d91b9af9289be180b2",
+              "supervise.py": "034db4bcd73b3bec9159c10ffed367bcffe973b7a31234ea300680419668323b",
+              "UPSTREAM.json": "84d1f9f6d4cacc110097490a512d0e5746e782700c786a928468f4a25512883a"
+            }
+          }
+        },
+        {
+          "run_source_id": "lfm3-c-hierarchical.json",
+          "review_available": true,
+          "claim_denominator": 29,
+          "full": 4,
+          "partial": 3,
+          "absent": 22,
+          "contradicted": 0,
+          "late_full": 0,
+          "late_partial": 0,
+          "late_denominator": 13,
+          "unsupported_summary_fact_entries": 2,
+          "unsupported_decision_entries": 0,
+          "unsupported_action_entries": 4,
+          "unsupported_commitment_entries": 4,
+          "runtime": {
+            "source": {
+              "source_id": "podcast/lfm3-c-hierarchical.json",
+              "sha256": "5fb6faeefc3f1480711599433510b19549ed4551c23d3938ea22b8118b9ad6e1"
+            },
+            "status": "complete",
+            "complete": true,
+            "chunks": 16,
+            "failed_chunks": 0,
+            "failed_spans_count": 0,
+            "reducer_loss_entries": 0,
+            "successfully_mapped_chars": 59194,
+            "covered_chars": 59194,
+            "input_chars": 59194,
+            "total_ms": 33250.272459117696,
+            "load_ms": 429.23037498258054,
+            "peak_rss_native": 2379644928,
+            "max_input_tokens": 4096,
+            "timestamp_count": 64,
+            "chunk_chars": 4000,
+            "reduce_chars": 12000,
+            "request_count": 17,
+            "request_status_counts": {
+              "none": 17
+            },
+            "native_status_counts": {},
+            "request_valid_count": 17,
+            "request_clipped_count": 0,
+            "validation_limit_entries": 0,
+            "request_applied_count": 17,
+            "output_token_budget_counts": {
+              "384": 16,
+              "512": 1
+            },
+            "actual_output_tokens_total": 2137,
+            "actual_input_tokens_max": 1746,
+            "request_wall_ms_total": 33248.19204118103,
+            "transcript_sha256": "67bbbe1a8b32a33e1d1545ebe6b61c0f4f33cac906e0e98c8594eee3a974a600",
+            "source_hashes": {
+              "benchmark_long_notes.py": "5ba30cb6f3481c9e19c5358b036bad3e0604db47712a42e29d5b271f9fe81904",
+              "meeting_notes.py": "49411dec92f1d76b87c38279a2aea176b094883517f8f7c6c851a6e6f9fb2b8a",
+              "server.py": "3d999b6f093a354c30b346ef14e551e5f9435efe9f0eb47da36b109e8081563a",
+              "cleanup.py": "e35d522c34a4cfd29196c9353de8440c481f64045af5914f81706213e16cfe0a",
+              "provenance.py": "a1a32e12d37fbf0fb095441203552fa64310526f9e744b2ad857d2433dd4a884",
+              "benchmark_personal_native.py": "91c2e6f1ad0f463750bcb64aa506b48e17e4b0daa00986d91b9af9289be180b2",
+              "supervise.py": "034db4bcd73b3bec9159c10ffed367bcffe973b7a31234ea300680419668323b",
+              "UPSTREAM.json": "84d1f9f6d4cacc110097490a512d0e5746e782700c786a928468f4a25512883a"
+            }
+          }
+        },
+        {
+          "run_source_id": "current4b-production.json",
+          "review_available": true,
+          "claim_denominator": 29,
+          "full": 0,
+          "partial": 6,
+          "absent": 23,
+          "contradicted": 0,
+          "late_full": 0,
+          "late_partial": 1,
+          "late_denominator": 13,
+          "unsupported_summary_fact_entries": 1,
+          "unsupported_decision_entries": 0,
+          "unsupported_action_entries": 8,
+          "unsupported_commitment_entries": 8,
+          "runtime": {
+            "source": {
+              "source_id": "podcast/current4b-production.json",
+              "sha256": "af2c2562f0a54471a9575383e984f28f7353687edb3d14caa6d907cb895e225f"
+            },
+            "status": "partial",
+            "complete": false,
+            "chunks": 16,
+            "failed_chunks": 0,
+            "failed_spans_count": 0,
+            "reducer_loss_entries": 1,
+            "successfully_mapped_chars": 59194,
+            "covered_chars": 59194,
+            "input_chars": 59194,
+            "total_ms": 41207.8464590013,
+            "load_ms": 3855.788166867569,
+            "peak_rss_native": 4875616256,
+            "max_input_tokens": 4096,
+            "timestamp_count": 64,
+            "chunk_chars": 4000,
+            "reduce_chars": 12000,
+            "request_count": 17,
+            "request_status_counts": {
+              "none": 17
+            },
+            "native_status_counts": {},
+            "request_valid_count": 17,
+            "request_clipped_count": 0,
+            "validation_limit_entries": 0,
+            "request_applied_count": 17,
+            "output_token_budget_counts": {
+              "384": 16,
+              "512": 1
+            },
+            "actual_output_tokens_total": 1628,
+            "actual_input_tokens_max": 1051,
+            "request_wall_ms_total": 41205.35641652532,
+            "transcript_sha256": "67bbbe1a8b32a33e1d1545ebe6b61c0f4f33cac906e0e98c8594eee3a974a600",
+            "source_hashes": {
+              "benchmark_long_notes.py": "5ba30cb6f3481c9e19c5358b036bad3e0604db47712a42e29d5b271f9fe81904",
+              "meeting_notes.py": "49411dec92f1d76b87c38279a2aea176b094883517f8f7c6c851a6e6f9fb2b8a",
+              "server.py": "3d999b6f093a354c30b346ef14e551e5f9435efe9f0eb47da36b109e8081563a",
+              "cleanup.py": "e35d522c34a4cfd29196c9353de8440c481f64045af5914f81706213e16cfe0a",
+              "provenance.py": "a1a32e12d37fbf0fb095441203552fa64310526f9e744b2ad857d2433dd4a884",
+              "benchmark_personal_native.py": "91c2e6f1ad0f463750bcb64aa506b48e17e4b0daa00986d91b9af9289be180b2",
+              "supervise.py": "034db4bcd73b3bec9159c10ffed367bcffe973b7a31234ea300680419668323b",
+              "UPSTREAM.json": "84d1f9f6d4cacc110097490a512d0e5746e782700c786a928468f4a25512883a"
+            }
+          }
+        },
+        {
+          "run_source_id": "lfm3-base-direct.json",
+          "review_available": true,
+          "claim_denominator": 29,
+          "full": 0,
+          "partial": 15,
+          "absent": 14,
+          "contradicted": 0,
+          "late_full": 0,
+          "late_partial": 6,
+          "late_denominator": 13,
+          "unsupported_summary_fact_entries": 1,
+          "unsupported_decision_entries": 6,
+          "unsupported_action_entries": 5,
+          "unsupported_commitment_entries": 11,
+          "runtime": {
+            "source": {
+              "source_id": "podcast/lfm3-base-direct.json",
+              "sha256": "0e5469b1949b9ba6e986894d3dfbc3a857183de083845a9c87ae01b1e759eb95"
+            },
+            "status": "complete",
+            "complete": true,
+            "chunks": 1,
+            "failed_chunks": 0,
+            "failed_spans_count": 0,
+            "reducer_loss_entries": 0,
+            "successfully_mapped_chars": 59194,
+            "covered_chars": 59194,
+            "input_chars": 59194,
+            "total_ms": 4978.483292041346,
+            "load_ms": 422.0786669757217,
+            "peak_rss_native": 2378285056,
+            "max_input_tokens": 16384,
+            "timestamp_count": 64,
+            "chunk_chars": 4000,
+            "reduce_chars": 12000,
+            "request_count": 1,
+            "request_status_counts": {
+              "none": 1
+            },
+            "native_status_counts": {},
+            "request_valid_count": 1,
+            "request_clipped_count": 0,
+            "validation_limit_entries": 0,
+            "request_applied_count": 1,
+            "output_token_budget_counts": {
+              "1024": 1
+            },
+            "actual_output_tokens_total": 409,
+            "actual_input_tokens_max": 13639,
+            "request_wall_ms_total": 4978.124832967296,
+            "transcript_sha256": "67bbbe1a8b32a33e1d1545ebe6b61c0f4f33cac906e0e98c8594eee3a974a600",
+            "source_hashes": {
+              "benchmark_long_notes.py": "5ba30cb6f3481c9e19c5358b036bad3e0604db47712a42e29d5b271f9fe81904",
+              "meeting_notes.py": "49411dec92f1d76b87c38279a2aea176b094883517f8f7c6c851a6e6f9fb2b8a",
+              "server.py": "3d999b6f093a354c30b346ef14e551e5f9435efe9f0eb47da36b109e8081563a",
+              "cleanup.py": "e35d522c34a4cfd29196c9353de8440c481f64045af5914f81706213e16cfe0a",
+              "provenance.py": "a1a32e12d37fbf0fb095441203552fa64310526f9e744b2ad857d2433dd4a884",
+              "benchmark_personal_native.py": "91c2e6f1ad0f463750bcb64aa506b48e17e4b0daa00986d91b9af9289be180b2",
+              "supervise.py": "034db4bcd73b3bec9159c10ffed367bcffe973b7a31234ea300680419668323b",
+              "UPSTREAM.json": "84d1f9f6d4cacc110097490a512d0e5746e782700c786a928468f4a25512883a"
+            }
+          }
+        },
+        {
+          "run_source_id": "current4b-direct.json",
+          "review_available": true,
+          "claim_denominator": 29,
+          "full": 1,
+          "partial": 15,
+          "absent": 13,
+          "contradicted": 0,
+          "late_full": 0,
+          "late_partial": 6,
+          "late_denominator": 13,
+          "unsupported_summary_fact_entries": 4,
+          "unsupported_decision_entries": 0,
+          "unsupported_action_entries": 0,
+          "unsupported_commitment_entries": 0,
+          "runtime": {
+            "source": {
+              "source_id": "podcast/current4b-direct.json",
+              "sha256": "db7756cd5a1c7c3bb6a198ef092d049966fd979cf28a298d5a81b25ab2db6439"
+            },
+            "status": "complete",
+            "complete": true,
+            "chunks": 1,
+            "failed_chunks": 0,
+            "failed_spans_count": 0,
+            "reducer_loss_entries": 0,
+            "successfully_mapped_chars": 59194,
+            "covered_chars": 59194,
+            "input_chars": 59194,
+            "total_ms": 11781.243874924257,
+            "load_ms": 3772.32287498191,
+            "peak_rss_native": 5367496704,
+            "max_input_tokens": 16384,
+            "timestamp_count": 64,
+            "chunk_chars": 4000,
+            "reduce_chars": 12000,
+            "request_count": 1,
+            "request_status_counts": {
+              "none": 1
+            },
+            "native_status_counts": {},
+            "request_valid_count": 1,
+            "request_clipped_count": 0,
+            "validation_limit_entries": 0,
+            "request_applied_count": 1,
+            "output_token_budget_counts": {
+              "1024": 1
+            },
+            "actual_output_tokens_total": 260,
+            "actual_input_tokens_max": 13877,
+            "request_wall_ms_total": 11780.819959007204,
+            "transcript_sha256": "67bbbe1a8b32a33e1d1545ebe6b61c0f4f33cac906e0e98c8594eee3a974a600",
+            "source_hashes": {
+              "benchmark_long_notes.py": "5ba30cb6f3481c9e19c5358b036bad3e0604db47712a42e29d5b271f9fe81904",
+              "meeting_notes.py": "49411dec92f1d76b87c38279a2aea176b094883517f8f7c6c851a6e6f9fb2b8a",
+              "server.py": "3d999b6f093a354c30b346ef14e551e5f9435efe9f0eb47da36b109e8081563a",
+              "cleanup.py": "e35d522c34a4cfd29196c9353de8440c481f64045af5914f81706213e16cfe0a",
+              "provenance.py": "a1a32e12d37fbf0fb095441203552fa64310526f9e744b2ad857d2433dd4a884",
+              "benchmark_personal_native.py": "91c2e6f1ad0f463750bcb64aa506b48e17e4b0daa00986d91b9af9289be180b2",
+              "supervise.py": "034db4bcd73b3bec9159c10ffed367bcffe973b7a31234ea300680419668323b",
+              "UPSTREAM.json": "84d1f9f6d4cacc110097490a512d0e5746e782700c786a928468f4a25512883a"
+            }
+          }
+        }
+      ]
+    },
+    {
+      "study_id": "second",
+      "sources": [
+        {
+          "source_id": "podcast/notes-blind-second/summary.json",
+          "sha256": "f68cc1cca95a2386618d664e2b25d8ae8bb025132d87defea75e4fcb8ba7718a"
+        },
+        {
+          "source_id": "podcast/notes-blind-second/ratings.json",
+          "sha256": "7401aaa4e5b197e4de65c7c76d6d784bcd7329e8dca7aebf15b683a6493d3472"
+        },
+        {
+          "source_id": "podcast/notes-blind-second-key.json",
+          "sha256": "873c03cdf8ccc08bf3da19ccf7052845be7ea514a68b170792cfd2394ff04f81"
+        }
+      ],
+      "expected_candidates": 11,
+      "review_available_candidates": 7,
+      "review_unavailable_candidates": 4,
+      "runtime_status_counts": {
+        "complete": 7,
+        "failed": 3,
+        "partial": 1
+      },
+      "late_denominator_policy": "Taken only from source summary; null means not recorded there.",
+      "rows": [
+        {
+          "run_source_id": "lfm3-c-hierarchical-comprehensive.json",
+          "review_available": true,
+          "claim_denominator": 29,
+          "full": 8,
+          "partial": 6,
+          "absent": 15,
+          "contradicted": 0,
+          "late_full": 4,
+          "late_partial": 3,
+          "late_denominator": null,
+          "unsupported_summary_fact_entries": 5,
+          "unsupported_decision_entries": 6,
+          "unsupported_action_entries": 6,
+          "unsupported_commitment_entries": 12,
+          "runtime": {
+            "source": {
+              "source_id": "podcast/lfm3-c-hierarchical-comprehensive.json",
+              "sha256": "778450e33c35c336bb1bed48b740df6c0db707b9fbcb12f1ce285014c66033e5"
+            },
+            "status": "complete",
+            "complete": true,
+            "chunks": 16,
+            "failed_chunks": 0,
+            "failed_spans_count": 0,
+            "reducer_loss_entries": 0,
+            "successfully_mapped_chars": 59194,
+            "covered_chars": 59194,
+            "input_chars": 59194,
+            "total_ms": 31992.939500138164,
+            "load_ms": 435.1788330823183,
+            "peak_rss_native": 2379923456,
+            "max_input_tokens": 4096,
+            "timestamp_count": 64,
+            "chunk_chars": 4000,
+            "reduce_chars": 12000,
+            "request_count": 17,
+            "request_status_counts": {
+              "none": 17
+            },
+            "native_status_counts": {},
+            "request_valid_count": 17,
+            "request_clipped_count": 0,
+            "validation_limit_entries": 0,
+            "request_applied_count": 17,
+            "output_token_budget_counts": {
+              "768": 16,
+              "1536": 1
+            },
+            "actual_output_tokens_total": 2327,
+            "actual_input_tokens_max": 1737,
+            "request_wall_ms_total": 31991.649083327502,
+            "transcript_sha256": "67bbbe1a8b32a33e1d1545ebe6b61c0f4f33cac906e0e98c8594eee3a974a600",
+            "source_hashes": {
+              "benchmark_long_notes.py": "d46cdf7eee3372e266eaa6c5129eae297fb6279db871482bed72d75fda321944",
+              "meeting_notes.py": "49411dec92f1d76b87c38279a2aea176b094883517f8f7c6c851a6e6f9fb2b8a",
+              "server.py": "3d999b6f093a354c30b346ef14e551e5f9435efe9f0eb47da36b109e8081563a",
+              "cleanup.py": "e35d522c34a4cfd29196c9353de8440c481f64045af5914f81706213e16cfe0a",
+              "provenance.py": "a1a32e12d37fbf0fb095441203552fa64310526f9e744b2ad857d2433dd4a884",
+              "benchmark_personal_native.py": "91c2e6f1ad0f463750bcb64aa506b48e17e4b0daa00986d91b9af9289be180b2",
+              "supervise.py": "034db4bcd73b3bec9159c10ffed367bcffe973b7a31234ea300680419668323b",
+              "UPSTREAM.json": "84d1f9f6d4cacc110097490a512d0e5746e782700c786a928468f4a25512883a"
+            }
+          }
+        },
+        {
+          "run_source_id": "native-c-q4-hierarchical.json",
+          "review_available": true,
+          "claim_denominator": 29,
+          "full": 0,
+          "partial": 2,
+          "absent": 27,
+          "contradicted": 0,
+          "late_full": 0,
+          "late_partial": 0,
+          "late_denominator": null,
+          "unsupported_summary_fact_entries": 1,
+          "unsupported_decision_entries": 0,
+          "unsupported_action_entries": 0,
+          "unsupported_commitment_entries": 0,
+          "runtime": {
+            "source": {
+              "source_id": "podcast/native-c-q4-hierarchical.json",
+              "sha256": "4ac4e60232098834da8181d151c99c39b7bb3e5d7a1ec135e745317c6ad493cd"
+            },
+            "status": "complete",
+            "complete": true,
+            "chunks": 16,
+            "failed_chunks": 0,
+            "failed_spans_count": 0,
+            "reducer_loss_entries": 0,
+            "successfully_mapped_chars": 59194,
+            "covered_chars": 59194,
+            "input_chars": 59194,
+            "total_ms": 14442.633499857038,
+            "load_ms": 2609.389791963622,
+            "chunk_chars": 4000,
+            "reduce_chars": 12000,
+            "request_count": 17,
+            "request_status_counts": {
+              "eos": 17
+            },
+            "native_status_counts": {
+              "eos": 17
+            },
+            "request_valid_count": 17,
+            "request_clipped_count": 0,
+            "validation_limit_entries": 0,
+            "request_applied_count": 17,
+            "output_token_budget_counts": {
+              "384": 16,
+              "512": 1
+            },
+            "actual_output_tokens_total": 1760,
+            "actual_input_tokens_max": 1655,
+            "request_wall_ms_total": 14432.208376005292,
+            "transcript_sha256": "67bbbe1a8b32a33e1d1545ebe6b61c0f4f33cac906e0e98c8594eee3a974a600",
+            "source_hashes": {
+              "benchmark_long_notes.py": "d6e2ef252f52a058a4a0fe4f74c9a5828cae6e6d776864aec06f5f5318bef5d3",
+              "meeting_notes.py": "49411dec92f1d76b87c38279a2aea176b094883517f8f7c6c851a6e6f9fb2b8a",
+              "server.py": "3d999b6f093a354c30b346ef14e551e5f9435efe9f0eb47da36b109e8081563a",
+              "cleanup.py": "e35d522c34a4cfd29196c9353de8440c481f64045af5914f81706213e16cfe0a",
+              "provenance.py": "a1a32e12d37fbf0fb095441203552fa64310526f9e744b2ad857d2433dd4a884",
+              "benchmark_personal_native.py": "91c2e6f1ad0f463750bcb64aa506b48e17e4b0daa00986d91b9af9289be180b2",
+              "supervise.py": "034db4bcd73b3bec9159c10ffed367bcffe973b7a31234ea300680419668323b",
+              "UPSTREAM.json": "84d1f9f6d4cacc110097490a512d0e5746e782700c786a928468f4a25512883a"
+            }
+          }
+        },
+        {
+          "run_source_id": "native-c-q4-hierarchical-comprehensive.json",
+          "review_available": false,
+          "claim_denominator": 29,
+          "full": null,
+          "partial": null,
+          "absent": null,
+          "contradicted": null,
+          "late_full": null,
+          "late_partial": null,
+          "late_denominator": null,
+          "unsupported_summary_fact_entries": null,
+          "unsupported_decision_entries": null,
+          "unsupported_action_entries": null,
+          "unsupported_commitment_entries": null,
+          "runtime": {
+            "source": {
+              "source_id": "podcast/native-c-q4-hierarchical-comprehensive.json",
+              "sha256": "a59d5d9e7cde94b751732379bd5096b6e96f78d34f2df1f46ad83f80e404b1a0"
+            },
+            "status": "failed",
+            "complete": false,
+            "chunks": 16,
+            "failed_chunks": 0,
+            "failed_spans_count": 0,
+            "reducer_loss_entries": 0,
+            "successfully_mapped_chars": 59194,
+            "total_ms": 28460.12395899743,
+            "load_ms": 2622.4907080177218,
+            "chunk_chars": 4000,
+            "reduce_chars": 12000,
+            "request_count": 17,
+            "request_status_counts": {
+              "eos": 16,
+              "length": 1
+            },
+            "native_status_counts": {
+              "eos": 16,
+              "length": 1
+            },
+            "request_valid_count": 16,
+            "request_clipped_count": 0,
+            "validation_limit_entries": 0,
+            "request_applied_count": 16,
+            "output_token_budget_counts": {
+              "768": 16,
+              "1536": 1
+            },
+            "actual_output_tokens_total": 3850,
+            "actual_input_tokens_max": 2357,
+            "request_wall_ms_total": 28450.09204093367,
+            "transcript_sha256": "67bbbe1a8b32a33e1d1545ebe6b61c0f4f33cac906e0e98c8594eee3a974a600",
+            "source_hashes": {
+              "benchmark_long_notes.py": "d46cdf7eee3372e266eaa6c5129eae297fb6279db871482bed72d75fda321944",
+              "meeting_notes.py": "49411dec92f1d76b87c38279a2aea176b094883517f8f7c6c851a6e6f9fb2b8a",
+              "server.py": "3d999b6f093a354c30b346ef14e551e5f9435efe9f0eb47da36b109e8081563a",
+              "cleanup.py": "e35d522c34a4cfd29196c9353de8440c481f64045af5914f81706213e16cfe0a",
+              "provenance.py": "a1a32e12d37fbf0fb095441203552fa64310526f9e744b2ad857d2433dd4a884",
+              "benchmark_personal_native.py": "91c2e6f1ad0f463750bcb64aa506b48e17e4b0daa00986d91b9af9289be180b2",
+              "supervise.py": "034db4bcd73b3bec9159c10ffed367bcffe973b7a31234ea300680419668323b",
+              "UPSTREAM.json": "84d1f9f6d4cacc110097490a512d0e5746e782700c786a928468f4a25512883a"
+            }
+          }
+        },
+        {
+          "run_source_id": "native-c-q4-production.json",
+          "review_available": false,
+          "claim_denominator": 29,
+          "full": null,
+          "partial": null,
+          "absent": null,
+          "contradicted": null,
+          "late_full": null,
+          "late_partial": null,
+          "late_denominator": null,
+          "unsupported_summary_fact_entries": null,
+          "unsupported_decision_entries": null,
+          "unsupported_action_entries": null,
+          "unsupported_commitment_entries": null,
+          "runtime": {
+            "source": {
+              "source_id": "podcast/native-c-q4-production.json",
+              "sha256": "73238a907837df5f1afea8c0cdb2bc8a28c0292b56b546cd7f5ed93362dfc12d"
+            },
+            "status": "partial",
+            "complete": false,
+            "chunks": 16,
+            "failed_chunks": 0,
+            "failed_spans_count": 0,
+            "reducer_loss_entries": 1,
+            "successfully_mapped_chars": 59194,
+            "covered_chars": 59194,
+            "input_chars": 59194,
+            "total_ms": 18957.40458299406,
+            "load_ms": 2583.8513339404017,
+            "chunk_chars": 4000,
+            "reduce_chars": 12000,
+            "request_count": 17,
+            "request_status_counts": {
+              "eos": 16,
+              "length": 1
+            },
+            "native_status_counts": {
+              "eos": 16,
+              "length": 1
+            },
+            "request_valid_count": 16,
+            "request_clipped_count": 0,
+            "validation_limit_entries": 0,
+            "request_applied_count": 16,
+            "output_token_budget_counts": {
+              "384": 16,
+              "512": 1
+            },
+            "actual_output_tokens_total": 2636,
+            "actual_input_tokens_max": 1040,
+            "request_wall_ms_total": 18945.736623136327,
+            "transcript_sha256": "67bbbe1a8b32a33e1d1545ebe6b61c0f4f33cac906e0e98c8594eee3a974a600",
+            "source_hashes": {
+              "benchmark_long_notes.py": "d6e2ef252f52a058a4a0fe4f74c9a5828cae6e6d776864aec06f5f5318bef5d3",
+              "meeting_notes.py": "49411dec92f1d76b87c38279a2aea176b094883517f8f7c6c851a6e6f9fb2b8a",
+              "server.py": "3d999b6f093a354c30b346ef14e551e5f9435efe9f0eb47da36b109e8081563a",
+              "cleanup.py": "e35d522c34a4cfd29196c9353de8440c481f64045af5914f81706213e16cfe0a",
+              "provenance.py": "a1a32e12d37fbf0fb095441203552fa64310526f9e744b2ad857d2433dd4a884",
+              "benchmark_personal_native.py": "91c2e6f1ad0f463750bcb64aa506b48e17e4b0daa00986d91b9af9289be180b2",
+              "supervise.py": "034db4bcd73b3bec9159c10ffed367bcffe973b7a31234ea300680419668323b",
+              "UPSTREAM.json": "84d1f9f6d4cacc110097490a512d0e5746e782700c786a928468f4a25512883a"
+            }
+          }
+        },
+        {
+          "run_source_id": "current4b-hierarchical-comprehensive.json",
+          "review_available": true,
+          "claim_denominator": 29,
+          "full": 7,
+          "partial": 14,
+          "absent": 8,
+          "contradicted": 0,
+          "late_full": 2,
+          "late_partial": 6,
+          "late_denominator": null,
+          "unsupported_summary_fact_entries": 3,
+          "unsupported_decision_entries": 6,
+          "unsupported_action_entries": 5,
+          "unsupported_commitment_entries": 11,
+          "runtime": {
+            "source": {
+              "source_id": "podcast/current4b-hierarchical-comprehensive.json",
+              "sha256": "bdb84763ce9c37d8825e3161fd23f2075dfd938005b669d0093953c3518e77cd"
+            },
+            "status": "complete",
+            "complete": true,
+            "chunks": 16,
+            "failed_chunks": 0,
+            "failed_spans_count": 0,
+            "reducer_loss_entries": 0,
+            "successfully_mapped_chars": 59194,
+            "covered_chars": 59194,
+            "input_chars": 59194,
+            "total_ms": 52582.45166693814,
+            "load_ms": 3633.291541133076,
+            "peak_rss_native": 3750133760,
+            "max_input_tokens": 4096,
+            "timestamp_count": 64,
+            "chunk_chars": 4000,
+            "reduce_chars": 12000,
+            "request_count": 17,
+            "request_status_counts": {
+              "none": 17
+            },
+            "native_status_counts": {},
+            "request_valid_count": 17,
+            "request_clipped_count": 0,
+            "validation_limit_entries": 0,
+            "request_applied_count": 17,
+            "output_token_budget_counts": {
+              "768": 16,
+              "1536": 1
+            },
+            "actual_output_tokens_total": 2522,
+            "actual_input_tokens_max": 1797,
+            "request_wall_ms_total": 52580.26820537634,
+            "transcript_sha256": "67bbbe1a8b32a33e1d1545ebe6b61c0f4f33cac906e0e98c8594eee3a974a600",
+            "source_hashes": {
+              "benchmark_long_notes.py": "d46cdf7eee3372e266eaa6c5129eae297fb6279db871482bed72d75fda321944",
+              "meeting_notes.py": "49411dec92f1d76b87c38279a2aea176b094883517f8f7c6c851a6e6f9fb2b8a",
+              "server.py": "3d999b6f093a354c30b346ef14e551e5f9435efe9f0eb47da36b109e8081563a",
+              "cleanup.py": "e35d522c34a4cfd29196c9353de8440c481f64045af5914f81706213e16cfe0a",
+              "provenance.py": "a1a32e12d37fbf0fb095441203552fa64310526f9e744b2ad857d2433dd4a884",
+              "benchmark_personal_native.py": "91c2e6f1ad0f463750bcb64aa506b48e17e4b0daa00986d91b9af9289be180b2",
+              "supervise.py": "034db4bcd73b3bec9159c10ffed367bcffe973b7a31234ea300680419668323b",
+              "UPSTREAM.json": "84d1f9f6d4cacc110097490a512d0e5746e782700c786a928468f4a25512883a"
+            }
+          }
+        },
+        {
+          "run_source_id": "native-c-q4-direct-comprehensive.json",
+          "review_available": false,
+          "claim_denominator": 29,
+          "full": null,
+          "partial": null,
+          "absent": null,
+          "contradicted": null,
+          "late_full": null,
+          "late_partial": null,
+          "late_denominator": null,
+          "unsupported_summary_fact_entries": null,
+          "unsupported_decision_entries": null,
+          "unsupported_action_entries": null,
+          "unsupported_commitment_entries": null,
+          "runtime": {
+            "source": {
+              "source_id": "podcast/native-c-q4-direct-comprehensive.json",
+              "sha256": "fb9c352b824b317f746b23d923935b392e6e49a70832c91894163c25e8e83432"
+            },
+            "status": "failed",
+            "complete": false,
+            "chunks": 1,
+            "failed_chunks": 1,
+            "failed_spans_count": 1,
+            "reducer_loss_entries": 0,
+            "successfully_mapped_chars": 0,
+            "covered_chars": 59194,
+            "input_chars": 59194,
+            "total_ms": 6849.818374961615,
+            "load_ms": 2562.4740419443697,
+            "chunk_chars": 4000,
+            "reduce_chars": 12000,
+            "request_count": 1,
+            "request_status_counts": {
+              "eos": 1
+            },
+            "native_status_counts": {
+              "eos": 1
+            },
+            "request_valid_count": 1,
+            "request_clipped_count": 1,
+            "validation_limit_entries": 1,
+            "request_applied_count": 1,
+            "output_token_budget_counts": {
+              "1536": 1
+            },
+            "actual_output_tokens_total": 537,
+            "actual_input_tokens_max": 13681,
+            "request_wall_ms_total": 6843.863416928798,
+            "transcript_sha256": "67bbbe1a8b32a33e1d1545ebe6b61c0f4f33cac906e0e98c8594eee3a974a600",
+            "source_hashes": {
+              "benchmark_long_notes.py": "d46cdf7eee3372e266eaa6c5129eae297fb6279db871482bed72d75fda321944",
+              "meeting_notes.py": "49411dec92f1d76b87c38279a2aea176b094883517f8f7c6c851a6e6f9fb2b8a",
+              "server.py": "3d999b6f093a354c30b346ef14e551e5f9435efe9f0eb47da36b109e8081563a",
+              "cleanup.py": "e35d522c34a4cfd29196c9353de8440c481f64045af5914f81706213e16cfe0a",
+              "provenance.py": "a1a32e12d37fbf0fb095441203552fa64310526f9e744b2ad857d2433dd4a884",
+              "benchmark_personal_native.py": "91c2e6f1ad0f463750bcb64aa506b48e17e4b0daa00986d91b9af9289be180b2",
+              "supervise.py": "034db4bcd73b3bec9159c10ffed367bcffe973b7a31234ea300680419668323b",
+              "UPSTREAM.json": "84d1f9f6d4cacc110097490a512d0e5746e782700c786a928468f4a25512883a"
+            }
+          }
+        },
+        {
+          "run_source_id": "native-c-q4-direct.json",
+          "review_available": true,
+          "claim_denominator": 29,
+          "full": 0,
+          "partial": 14,
+          "absent": 15,
+          "contradicted": 0,
+          "late_full": 0,
+          "late_partial": 6,
+          "late_denominator": null,
+          "unsupported_summary_fact_entries": 1,
+          "unsupported_decision_entries": 0,
+          "unsupported_action_entries": 0,
+          "unsupported_commitment_entries": 0,
+          "runtime": {
+            "source": {
+              "source_id": "podcast/native-c-q4-direct.json",
+              "sha256": "9afaf63a93e5610d3ad43f8a1fa64107dbcf01e1ae39954be7a63c1a4840aed4"
+            },
+            "status": "complete",
+            "complete": true,
+            "chunks": 1,
+            "failed_chunks": 0,
+            "failed_spans_count": 0,
+            "reducer_loss_entries": 0,
+            "successfully_mapped_chars": 59194,
+            "covered_chars": 59194,
+            "input_chars": 59194,
+            "total_ms": 4422.209625132382,
+            "load_ms": 2590.976499952376,
+            "chunk_chars": 4000,
+            "reduce_chars": 12000,
+            "request_count": 1,
+            "request_status_counts": {
+              "eos": 1
+            },
+            "native_status_counts": {
+              "eos": 1
+            },
+            "request_valid_count": 1,
+            "request_clipped_count": 0,
+            "validation_limit_entries": 0,
+            "request_applied_count": 1,
+            "output_token_budget_counts": {
+              "1024": 1
+            },
+            "actual_output_tokens_total": 217,
+            "actual_input_tokens_max": 13639,
+            "request_wall_ms_total": 4415.815459098667,
+            "transcript_sha256": "67bbbe1a8b32a33e1d1545ebe6b61c0f4f33cac906e0e98c8594eee3a974a600",
+            "source_hashes": {
+              "benchmark_long_notes.py": "d6e2ef252f52a058a4a0fe4f74c9a5828cae6e6d776864aec06f5f5318bef5d3",
+              "meeting_notes.py": "49411dec92f1d76b87c38279a2aea176b094883517f8f7c6c851a6e6f9fb2b8a",
+              "server.py": "3d999b6f093a354c30b346ef14e551e5f9435efe9f0eb47da36b109e8081563a",
+              "cleanup.py": "e35d522c34a4cfd29196c9353de8440c481f64045af5914f81706213e16cfe0a",
+              "provenance.py": "a1a32e12d37fbf0fb095441203552fa64310526f9e744b2ad857d2433dd4a884",
+              "benchmark_personal_native.py": "91c2e6f1ad0f463750bcb64aa506b48e17e4b0daa00986d91b9af9289be180b2",
+              "supervise.py": "034db4bcd73b3bec9159c10ffed367bcffe973b7a31234ea300680419668323b",
+              "UPSTREAM.json": "84d1f9f6d4cacc110097490a512d0e5746e782700c786a928468f4a25512883a"
+            }
+          }
+        },
+        {
+          "run_source_id": "current4b-direct-comprehensive.json",
+          "review_available": true,
+          "claim_denominator": 29,
+          "full": 4,
+          "partial": 12,
+          "absent": 13,
+          "contradicted": 0,
+          "late_full": 1,
+          "late_partial": 3,
+          "late_denominator": null,
+          "unsupported_summary_fact_entries": 2,
+          "unsupported_decision_entries": 0,
+          "unsupported_action_entries": 0,
+          "unsupported_commitment_entries": 0,
+          "runtime": {
+            "source": {
+              "source_id": "podcast/current4b-direct-comprehensive.json",
+              "sha256": "36162bf680b69a2fedf51775959e78d4c5bf68e814b9a71dd46d914e41968a35"
+            },
+            "status": "complete",
+            "complete": true,
+            "chunks": 1,
+            "failed_chunks": 0,
+            "failed_spans_count": 0,
+            "reducer_loss_entries": 0,
+            "successfully_mapped_chars": 59194,
+            "covered_chars": 59194,
+            "input_chars": 59194,
+            "total_ms": 14782.63470903039,
+            "load_ms": 3151.6619159374386,
+            "peak_rss_native": 4967251968,
+            "max_input_tokens": 16384,
+            "timestamp_count": 64,
+            "chunk_chars": 4000,
+            "reduce_chars": 12000,
+            "request_count": 1,
+            "request_status_counts": {
+              "none": 1
+            },
+            "native_status_counts": {},
+            "request_valid_count": 1,
+            "request_clipped_count": 0,
+            "validation_limit_entries": 0,
+            "request_applied_count": 1,
+            "output_token_budget_counts": {
+              "1536": 1
+            },
+            "actual_output_tokens_total": 472,
+            "actual_input_tokens_max": 13923,
+            "request_wall_ms_total": 14774.365042103454,
+            "transcript_sha256": "67bbbe1a8b32a33e1d1545ebe6b61c0f4f33cac906e0e98c8594eee3a974a600",
+            "source_hashes": {
+              "benchmark_long_notes.py": "d46cdf7eee3372e266eaa6c5129eae297fb6279db871482bed72d75fda321944",
+              "meeting_notes.py": "49411dec92f1d76b87c38279a2aea176b094883517f8f7c6c851a6e6f9fb2b8a",
+              "server.py": "3d999b6f093a354c30b346ef14e551e5f9435efe9f0eb47da36b109e8081563a",
+              "cleanup.py": "e35d522c34a4cfd29196c9353de8440c481f64045af5914f81706213e16cfe0a",
+              "provenance.py": "a1a32e12d37fbf0fb095441203552fa64310526f9e744b2ad857d2433dd4a884",
+              "benchmark_personal_native.py": "91c2e6f1ad0f463750bcb64aa506b48e17e4b0daa00986d91b9af9289be180b2",
+              "supervise.py": "034db4bcd73b3bec9159c10ffed367bcffe973b7a31234ea300680419668323b",
+              "UPSTREAM.json": "84d1f9f6d4cacc110097490a512d0e5746e782700c786a928468f4a25512883a"
+            }
+          }
+        },
+        {
+          "run_source_id": "lfm3-base-direct-comprehensive.json",
+          "review_available": true,
+          "claim_denominator": 29,
+          "full": 3,
+          "partial": 16,
+          "absent": 10,
+          "contradicted": 0,
+          "late_full": 0,
+          "late_partial": 8,
+          "late_denominator": null,
+          "unsupported_summary_fact_entries": 2,
+          "unsupported_decision_entries": 8,
+          "unsupported_action_entries": 0,
+          "unsupported_commitment_entries": 8,
+          "runtime": {
+            "source": {
+              "source_id": "podcast/lfm3-base-direct-comprehensive.json",
+              "sha256": "2c797ef3fc0bcac04f00bcd4e192b47fcec2ac39d56d9aa88d70bb937f16553f"
+            },
+            "status": "complete",
+            "complete": true,
+            "chunks": 1,
+            "failed_chunks": 0,
+            "failed_spans_count": 0,
+            "reducer_loss_entries": 0,
+            "successfully_mapped_chars": 59194,
+            "covered_chars": 59194,
+            "input_chars": 59194,
+            "total_ms": 6411.40399989672,
+            "load_ms": 418.074999935925,
+            "peak_rss_native": 2378694656,
+            "max_input_tokens": 16384,
+            "timestamp_count": 64,
+            "chunk_chars": 4000,
+            "reduce_chars": 12000,
+            "request_count": 1,
+            "request_status_counts": {
+              "none": 1
+            },
+            "native_status_counts": {},
+            "request_valid_count": 1,
+            "request_clipped_count": 0,
+            "validation_limit_entries": 0,
+            "request_applied_count": 1,
+            "output_token_budget_counts": {
+              "1536": 1
+            },
+            "actual_output_tokens_total": 533,
+            "actual_input_tokens_max": 13681,
+            "request_wall_ms_total": 6411.065208027139,
+            "transcript_sha256": "67bbbe1a8b32a33e1d1545ebe6b61c0f4f33cac906e0e98c8594eee3a974a600",
+            "source_hashes": {
+              "benchmark_long_notes.py": "d46cdf7eee3372e266eaa6c5129eae297fb6279db871482bed72d75fda321944",
+              "meeting_notes.py": "49411dec92f1d76b87c38279a2aea176b094883517f8f7c6c851a6e6f9fb2b8a",
+              "server.py": "3d999b6f093a354c30b346ef14e551e5f9435efe9f0eb47da36b109e8081563a",
+              "cleanup.py": "e35d522c34a4cfd29196c9353de8440c481f64045af5914f81706213e16cfe0a",
+              "provenance.py": "a1a32e12d37fbf0fb095441203552fa64310526f9e744b2ad857d2433dd4a884",
+              "benchmark_personal_native.py": "91c2e6f1ad0f463750bcb64aa506b48e17e4b0daa00986d91b9af9289be180b2",
+              "supervise.py": "034db4bcd73b3bec9159c10ffed367bcffe973b7a31234ea300680419668323b",
+              "UPSTREAM.json": "84d1f9f6d4cacc110097490a512d0e5746e782700c786a928468f4a25512883a"
+            }
+          }
+        },
+        {
+          "run_source_id": "lfm3-base-hierarchical-comprehensive.json",
+          "review_available": false,
+          "claim_denominator": 29,
+          "full": null,
+          "partial": null,
+          "absent": null,
+          "contradicted": null,
+          "late_full": null,
+          "late_partial": null,
+          "late_denominator": null,
+          "unsupported_summary_fact_entries": null,
+          "unsupported_decision_entries": null,
+          "unsupported_action_entries": null,
+          "unsupported_commitment_entries": null,
+          "runtime": {
+            "source": {
+              "source_id": "podcast/lfm3-base-hierarchical-comprehensive.json",
+              "sha256": "b57e40829ad6ccdd0ac7211b7684aafafd57a8421549e903f1b36e28087b8bee"
+            },
+            "status": "failed",
+            "complete": false,
+            "chunks": 16,
+            "failed_chunks": 0,
+            "failed_spans_count": 0,
+            "reducer_loss_entries": 0,
+            "successfully_mapped_chars": 59194,
+            "total_ms": 32893.875665962696,
+            "load_ms": 418.292541988194,
+            "peak_rss_native": 2380496896,
+            "max_input_tokens": 4096,
+            "timestamp_count": 64,
+            "chunk_chars": 4000,
+            "reduce_chars": 12000,
+            "request_count": 17,
+            "request_status_counts": {
+              "none": 16,
+              "length": 1
+            },
+            "native_status_counts": {},
+            "request_valid_count": 16,
+            "request_clipped_count": 0,
+            "validation_limit_entries": 0,
+            "request_applied_count": 16,
+            "output_token_budget_counts": {
+              "768": 16,
+              "1536": 1
+            },
+            "actual_output_tokens_total": 4116,
+            "actual_input_tokens_max": 2461,
+            "request_wall_ms_total": 32892.27649872191,
+            "transcript_sha256": "67bbbe1a8b32a33e1d1545ebe6b61c0f4f33cac906e0e98c8594eee3a974a600",
+            "source_hashes": {
+              "benchmark_long_notes.py": "d46cdf7eee3372e266eaa6c5129eae297fb6279db871482bed72d75fda321944",
+              "meeting_notes.py": "49411dec92f1d76b87c38279a2aea176b094883517f8f7c6c851a6e6f9fb2b8a",
+              "server.py": "3d999b6f093a354c30b346ef14e551e5f9435efe9f0eb47da36b109e8081563a",
+              "cleanup.py": "e35d522c34a4cfd29196c9353de8440c481f64045af5914f81706213e16cfe0a",
+              "provenance.py": "a1a32e12d37fbf0fb095441203552fa64310526f9e744b2ad857d2433dd4a884",
+              "benchmark_personal_native.py": "91c2e6f1ad0f463750bcb64aa506b48e17e4b0daa00986d91b9af9289be180b2",
+              "supervise.py": "034db4bcd73b3bec9159c10ffed367bcffe973b7a31234ea300680419668323b",
+              "UPSTREAM.json": "84d1f9f6d4cacc110097490a512d0e5746e782700c786a928468f4a25512883a"
+            }
+          }
+        },
+        {
+          "run_source_id": "lfm3-c-direct-comprehensive.json",
+          "review_available": true,
+          "claim_denominator": 29,
+          "full": 4,
+          "partial": 17,
+          "absent": 8,
+          "contradicted": 0,
+          "late_full": 0,
+          "late_partial": 8,
+          "late_denominator": null,
+          "unsupported_summary_fact_entries": 3,
+          "unsupported_decision_entries": 6,
+          "unsupported_action_entries": 6,
+          "unsupported_commitment_entries": 12,
+          "runtime": {
+            "source": {
+              "source_id": "podcast/lfm3-c-direct-comprehensive.json",
+              "sha256": "99358330e7cc993a17765fc4b0bcb6a5c293bd2808e03de013dc38062e1194a2"
+            },
+            "status": "complete",
+            "complete": true,
+            "chunks": 1,
+            "failed_chunks": 0,
+            "failed_spans_count": 0,
+            "reducer_loss_entries": 0,
+            "successfully_mapped_chars": 59194,
+            "covered_chars": 59194,
+            "input_chars": 59194,
+            "total_ms": 11153.059707954526,
+            "load_ms": 428.7652079947293,
+            "peak_rss_native": 2379857920,
+            "max_input_tokens": 16384,
+            "timestamp_count": 64,
+            "chunk_chars": 4000,
+            "reduce_chars": 12000,
+            "request_count": 1,
+            "request_status_counts": {
+              "none": 1
+            },
+            "native_status_counts": {},
+            "request_valid_count": 1,
+            "request_clipped_count": 0,
+            "validation_limit_entries": 0,
+            "request_applied_count": 1,
+            "output_token_budget_counts": {
+              "1536": 1
+            },
+            "actual_output_tokens_total": 641,
+            "actual_input_tokens_max": 13681,
+            "request_wall_ms_total": 11152.451541973278,
+            "transcript_sha256": "67bbbe1a8b32a33e1d1545ebe6b61c0f4f33cac906e0e98c8594eee3a974a600",
+            "source_hashes": {
+              "benchmark_long_notes.py": "d46cdf7eee3372e266eaa6c5129eae297fb6279db871482bed72d75fda321944",
+              "meeting_notes.py": "49411dec92f1d76b87c38279a2aea176b094883517f8f7c6c851a6e6f9fb2b8a",
+              "server.py": "3d999b6f093a354c30b346ef14e551e5f9435efe9f0eb47da36b109e8081563a",
+              "cleanup.py": "e35d522c34a4cfd29196c9353de8440c481f64045af5914f81706213e16cfe0a",
+              "provenance.py": "a1a32e12d37fbf0fb095441203552fa64310526f9e744b2ad857d2433dd4a884",
+              "benchmark_personal_native.py": "91c2e6f1ad0f463750bcb64aa506b48e17e4b0daa00986d91b9af9289be180b2",
+              "supervise.py": "034db4bcd73b3bec9159c10ffed367bcffe973b7a31234ea300680419668323b",
+              "UPSTREAM.json": "84d1f9f6d4cacc110097490a512d0e5746e782700c786a928468f4a25512883a"
+            }
+          }
+        }
+      ]
+    }
+  ],
+  "count_policy": "Unsupported commitment entries sum decision and action entries; they are not deduplicated facts. Available partial outputs remain partial, and all failed runs remain in the denominator. Covered claim ratings are normalized to full."
+}

@@ -1,0 +1,132 @@
+{
+  "method": "Muse blind384, independentlyTerra59selectedcases236ratings; secondjudgment replacesfirst onlyselected; model-assisted nothuman/audio truth",
+  "counts": {
+    "c": {
+      "rated": 96,
+      "supported": 93,
+      "material_error": 1,
+      "introduced_fact": 1,
+      "control_error": 0
+    },
+    "b": {
+      "rated": 96,
+      "supported": 93,
+      "material_error": 1,
+      "introduced_fact": 1,
+      "control_error": 1
+    },
+    "base": {
+      "rated": 96,
+      "supported": 93,
+      "material_error": 16,
+      "introduced_fact": 11,
+      "control_error": 33
+    },
+    "current4b": {
+      "rated": 96,
+      "supported": 92,
+      "material_error": 11,
+      "introduced_fact": 2,
+      "control_error": 17
+    }
+  },
+  "c_pairs": {
+    "b": {
+      "jointly_supported": 93,
+      "uncertain_excluded": 3,
+      "material_error": {
+        "c": 1,
+        "other": 1,
+        "additional": 0,
+        "improved": 0
+      },
+      "introduced_fact": {
+        "c": 1,
+        "other": 1,
+        "additional": 0,
+        "improved": 0
+      },
+      "control_error": {
+        "c": 0,
+        "other": 1,
+        "additional": 0,
+        "improved": 1
+      }
+    },
+    "base": {
+      "jointly_supported": 92,
+      "uncertain_excluded": 4,
+      "material_error": {
+        "c": 1,
+        "other": 16,
+        "additional": 0,
+        "improved": 15
+      },
+      "introduced_fact": {
+        "c": 1,
+        "other": 10,
+        "additional": 1,
+        "improved": 10
+      },
+      "control_error": {
+        "c": 0,
+        "other": 32,
+        "additional": 0,
+        "improved": 32
+      }
+    },
+    "current4b": {
+      "jointly_supported": 92,
+      "uncertain_excluded": 4,
+      "material_error": {
+        "c": 1,
+        "other": 11,
+        "additional": 0,
+        "improved": 10
+      },
+      "introduced_fact": {
+        "c": 1,
+        "other": 2,
+        "additional": 1,
+        "improved": 2
+      },
+      "control_error": {
+        "c": 0,
+        "other": 17,
+        "additional": 0,
+        "improved": 17
+      }
+    }
+  },
+  "rating_disagreements": 42,
+  "source_sha256": {
+    "public-v5-blind/ratings.jsonl": "29cf07393cd6f2bd0adfa816291d505d98bf05fd48924181aa55728ed8085862",
+    "public-v5-adjudication/ratings.jsonl": "695635f09c0735bed53ec2e8239e27a226039435e1ee13520208556151813345"
+  },
+  "first_review_counts": {
+    "c": {
+      "supported": 94,
+      "material_error": 4,
+      "introduced_fact": 0,
+      "control_error": 0
+    },
+    "b": {
+      "supported": 93,
+      "material_error": 4,
+      "introduced_fact": 0,
+      "control_error": 1
+    },
+    "base": {
+      "supported": 94,
+      "material_error": 19,
+      "introduced_fact": 22,
+      "control_error": 23
+    },
+    "current4b": {
+      "supported": 94,
+      "material_error": 17,
+      "introduced_fact": 1,
+      "control_error": 8
+    }
+  }
+}

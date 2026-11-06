@@ -1,0 +1,99 @@
+{
+  "128": {
+    "states": {
+      "off": {
+        "cases_with_latency": 95,
+        "p50_case_median_ms": 206.02727099321783,
+        "header_requests": 0,
+        "header_hits": 0,
+        "previous_context_fallbacks": 0,
+        "max_snapshot_bytes": 2195716
+      },
+      "on": {
+        "cases_with_latency": 95,
+        "p50_case_median_ms": 133.27237498015165,
+        "header_requests": 172,
+        "header_hits": 102,
+        "previous_context_fallbacks": 76,
+        "max_snapshot_bytes": 13559240
+      }
+    },
+    "different_cases_from_off128_by_run": [
+      0,
+      0,
+      0,
+      0
+    ],
+    "reduction_percent": 35.3132357975373
+  },
+  "512": {
+    "states": {
+      "off": {
+        "cases_with_latency": 95,
+        "p50_case_median_ms": 154.90252047311515,
+        "header_requests": 0,
+        "header_hits": 0,
+        "previous_context_fallbacks": 0,
+        "max_snapshot_bytes": 2195716
+      },
+      "on": {
+        "cases_with_latency": 95,
+        "p50_case_median_ms": 135.6414584442973,
+        "header_requests": 172,
+        "header_hits": 102,
+        "previous_context_fallbacks": 76,
+        "max_snapshot_bytes": 10410440
+      }
+    },
+    "different_cases_from_off128_by_run": [
+      0,
+      0,
+      0,
+      0
+    ],
+    "reduction_percent": 12.434311572199874
+  },
+  "baseline_binary_comparison": {
+    "compared_cases": 96,
+    "different_cases": 0
+  },
+  "workload": "First96 frozen recordings, 95 available STT texts; two reversed off/on pairs per batch. Same experimental binary, model, input and controller; no audio/capture/insertion timing.",
+  "worker_sha256": "6b5ab148f586b881d27577f5a61a5dafa551d1a24edb140213c29321ec044a3c",
+  "default_enabled": false,
+  "full614_on128": {
+    "cases": 614,
+    "different_case_count": 0,
+    "compared_native_calls": 760,
+    "header_hits": 375,
+    "previous_context_fallbacks": 186,
+    "max_snapshot_bytes": 13559240,
+    "p50_all_nonnull_cleanup_ms": 200.69562504068017
+  },
+  "promoted_benchmark_qualification": {
+    "stress-on": {
+      "runtime_qualified": true,
+      "all_main_rows_eos": true,
+      "prompt_token_parity": true,
+      "output_reference_parity": true,
+      "student_header_evidence": {
+        "captures": 4,
+        "hits": 6,
+        "exercised": true
+      },
+      "protocol_recovery_passed": true
+    },
+    "v5-on": {
+      "runtime_qualified": false,
+      "all_main_rows_eos": true,
+      "prompt_token_parity": true,
+      "output_reference_parity": true,
+      "student_header_evidence": {
+        "captures": 0,
+        "hits": 0,
+        "exercised": false
+      },
+      "protocol_recovery_passed": false
+    },
+    "scope": "Stress12 is positive header coverage; V5 short96 deliberately fails feature qualification because no header path is exercised, despite exact full output parity. Clean public private-replay CLI96 also completed exit0."
+  }
+}
