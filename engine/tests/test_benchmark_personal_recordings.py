@@ -103,3 +103,50 @@ def test_production_glossary_is_reset_on_every_batch_chunk(tmp_path, monkeypatch
     info=json.loads((output/'stt-run.json').read_text())
     assert info['glossary']['mode'].startswith('production global')
     assert info['glossary']['sha256']
+
+
+def test_glossary_replay_migrates_only_private_snapshot(tmp_path, monkeypatch):
+    monkeypatch.setenv('VELORA_FAKE_STT', '1')
+    audio = tmp_path / 'audio'; audio.mkdir()
+    home = tmp_path / 'home'; home.mkdir()
+    config = home / 'config.json'; config.write_text('{}')
+    before = config.read_bytes()
+    manifest = tmp_path / 'manifest.json'
+    manifest.write_text(json.dumps({'audio_root': str(audio), 'cases': []}))
+    output = tmp_path / 'out'
+    bench.replay(manifest, output, 'fake', 'auto', None, home)
+    assert config.read_bytes() == before
+    assert not (home / 'modes').exists()
+    assert (output / 'config-snapshot' / 'modes').is_dir()
+    assert all(p.stat().st_mode & 0o777 == 0o600
+               for p in (output / 'config-snapshot').rglob('*') if p.is_file())
+    assert json.loads((output / 'config-snapshot' / 'config.json').read_text()).get('builtin_modes_rev')
+    bench.replay(manifest, output, 'fake', 'auto', None, home)
+    assert config.read_bytes() == before
+
+
+def test_replay_rejects_stale_results_and_duplicate_manifest_before_load(tmp_path, monkeypatch):
+    monkeypatch.setenv('VELORA_FAKE_STT', '1')
+    audio = tmp_path / 'audio'; audio.mkdir()
+    manifest = tmp_path / 'manifest.json'
+    case = {'id': 1, 'input_sha256': 'frozen', 'status': 'missing_or_unsafe'}
+    manifest.write_text(json.dumps({'audio_root': str(audio), 'cases': [case]}))
+    output = tmp_path / 'out'
+    bench.replay(manifest, output, 'fake', 'auto', None)
+    results = output / 'stt.jsonl'
+    original = results.read_text()
+    from velora_engine import stt
+    monkeypatch.setattr(stt, 'create_backend', lambda *args: pytest.fail('model loaded before validation'))
+    for bad, message in [
+        ({'id': 2, 'input_sha256': 'frozen'}, 'not in frozen manifest'),
+        ({'id': 1, 'input_sha256': 'wrong'}, 'hash differs'),
+    ]:
+        results.write_text(json.dumps(bad) + '\n')
+        with pytest.raises(ValueError, match=message):
+            bench.replay(manifest, output, 'fake', 'auto', None)
+    results.write_text(original + original)
+    with pytest.raises(ValueError, match='duplicate result'):
+        bench.replay(manifest, output, 'fake', 'auto', None)
+    manifest.write_text(json.dumps({'audio_root': str(audio), 'cases': [case, case]}))
+    with pytest.raises(ValueError, match='duplicate manifest'):
+        bench.replay(manifest, tmp_path / 'other', 'fake', 'auto', None)

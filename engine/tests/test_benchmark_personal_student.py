@@ -184,3 +184,25 @@ def test_stream_results_report_injected_memory_including_rejected_calls():
     result=asyncio.run(student.cleanup('hello world','s',timeout_ms=20000))
     assert result.reason=='context_limit'
     assert (result.mlx_active_bytes,result.mlx_peak_bytes,result.mlx_cache_bytes)==(123,456,78)
+
+
+@pytest.mark.parametrize('failure', ['timeout', 'cancelled'])
+def test_stream_failure_keeps_generated_token_count(monkeypatch, failure):
+    from threading import Event
+    student, _ = adapter('unused')
+    student.set_context(SimpleNamespace(system_prompt='s'),
+        {'mode':'default','language':'en','romanize':False,'instructions':'','vocabulary':[]})
+    cancel = Event()
+    now = [0.0]
+    monkeypatch.setattr(bench.time, 'perf_counter', lambda: now[0])
+    def stream(*args, **kwargs):
+        for count in range(1, 4):
+            if count == 3:
+                if failure == 'cancelled': cancel.set()
+                else: now[0] = 2.0
+            yield SimpleNamespace(text='x',finish_reason=None,generation_tokens=count)
+    student.stream = stream
+    raw = 'please retain this raw transcript'
+    result = asyncio.run(student.cleanup(raw, 's', timeout_ms=1000, cancel_event=cancel))
+    assert not result.applied and result.text == raw and result.reason == failure
+    assert result.output_tokens == 3

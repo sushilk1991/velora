@@ -8,6 +8,7 @@ Outputs contain private text and must stay outside the checkout.
 from __future__ import annotations
 import argparse
 import hashlib
+import shutil
 import json
 import os
 from pathlib import Path
@@ -43,6 +44,30 @@ def private_write(path, value):
     with os.fdopen(fd, 'w') as out:
         json.dump(value, out, ensure_ascii=False, indent=2)
         out.write('\n')
+
+
+def snapshot_config(source, dest):
+    """Copy only formatter inputs; Config migrations operate on the copy."""
+    source = source.expanduser().resolve(strict=True)
+    dest.mkdir(mode=0o700)
+    for name in ('config.json', 'learned.json', 'auto_learned.json'):
+        path = source / name
+        if path.is_symlink():
+            raise ValueError('symlinked config input is not supported')
+        if path.is_file():
+            shutil.copyfile(path, dest / name)
+            os.chmod(dest / name, 0o600)
+    modes = source / 'modes'
+    if modes.is_symlink():
+        raise ValueError('symlinked modes directory is not supported')
+    if modes.is_dir():
+        target = dest / 'modes'
+        target.mkdir(mode=0o700)
+        for path in sorted(modes.glob('*.json')):
+            if path.is_symlink():
+                raise ValueError('symlinked mode is not supported')
+            shutil.copyfile(path, target / path.name)
+            os.chmod(target / path.name, 0o600)
 
 
 def confined(root, name):
@@ -88,25 +113,41 @@ def replay(manifest_path, output, model, language, model_path, config_home=None)
     from velora_engine.media import load_media, split_for_batch
     from velora_engine.stt import SAMPLE_RATE, create_backend, transcribe_clip
     from velora_engine import models
+    output = private_dir(output)
+    metadata = output / 'stt-run.json'
+    snapshot = output / 'config-snapshot'
     glossary = None
     glossary_info = 'none; explicit unbiased reference/control pass'
     if config_home is not None:
         from velora_engine.config import Config
         from velora_engine.stt import build_glossary_prompt
         home = config_home.expanduser().resolve(strict=True)
-        config = Config(home)
+        if not metadata.exists():
+            if snapshot.exists():
+                raise ValueError('incomplete setup: choose a new output directory')
+            snapshot_config(home, snapshot)
+        elif not snapshot.is_dir():
+            raise ValueError('missing frozen configuration snapshot')
+        before = {str(p.relative_to(snapshot)): digest(p) for p in sorted(snapshot.rglob('*')) if p.is_file()}
+        config = Config(snapshot)
+        for path in snapshot.rglob('*'):
+            os.chmod(path, 0o700 if path.is_dir() else 0o600)
+        after = {str(p.relative_to(snapshot)): digest(p) for p in sorted(snapshot.rglob('*')) if p.is_file()}
+        if metadata.exists() and before != after:
+            raise ValueError('configuration snapshot changed during load')
         glossary = build_glossary_prompt(config.user_vocabulary,
             config.learned_vocabulary, config.auto_vocabulary, [])
         glossary_info = {'mode': 'production global glossary; no historical screen entities',
             'sha256': hashlib.sha256((glossary or '').encode()).hexdigest(),
             'config_home': str(home),
-            'source_sha256': {p.name: digest(p) for p in sorted(home.glob('*.json'))}}
+            'source_sha256': after}
     manifest_path = manifest_path.resolve(strict=True)
     manifest = json.loads(manifest_path.read_text())
     root = Path(manifest['audio_root']).resolve(strict=True)
-    output = private_dir(output)
+    cases_by_id = {case['id']: case for case in manifest['cases']}
+    if len(cases_by_id) != len(manifest['cases']):
+        raise ValueError('duplicate manifest id')
     results = output / 'stt.jsonl'
-    metadata = output / 'stt-run.json'
     info = {'schema': 1, 'manifest_sha256': digest(manifest_path), 'model': model,
             'language': language, 'model_path': str(model_path.resolve()) if model_path else None,
             'method': 'offline production transcribe_file batch STT; no live capture, cleanup or insertion',
@@ -130,9 +171,14 @@ def replay(manifest_path, output, model, language, model_path, config_home=None)
     if results.exists():
         for line in results.read_text().splitlines():
             row = json.loads(line)
-            if row['id'] in done:
+            identity = row['id']
+            if identity in done:
                 raise ValueError('duplicate result id')
-            done.add(row['id'])
+            if identity not in cases_by_id:
+                raise ValueError('result id is not in frozen manifest')
+            if row.get('input_sha256') != cases_by_id[identity].get('input_sha256'):
+                raise ValueError('result input hash differs from frozen manifest')
+            done.add(identity)
     if not model_path and os.environ.get('VELORA_FAKE_STT') != '1':
         raise ValueError('--model-path is required for offline replay')
     if model_path:

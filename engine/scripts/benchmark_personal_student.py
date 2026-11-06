@@ -120,18 +120,19 @@ class StudentCleanup:
             return result(raw, False, 'context_limit')
         timeout = kwargs.get('timeout_ms', 30000) / 1000
         cancel = kwargs.get('cancel_event')
-        parts, last = [], None
+        parts, last, count = [], None, 0
         try:
             for response in self.stream(self.model, self.tokenizer, prompt=prompt,
                                         max_tokens=cap, sampler=self.sampler):
+                count = getattr(response, 'generation_tokens', len(parts) + 1)
                 if cancel is not None and cancel.is_set():
-                    return result(raw, False, 'cancelled')
+                    return result(raw, False, 'cancelled', count)
                 if time.perf_counter()-t0 > timeout:
-                    return result(raw, False, 'timeout')
+                    return result(raw, False, 'timeout', count)
                 parts.append(response.text)
                 last = response
         except Exception:
-            return result(raw, False, 'generation_error')
+            return result(raw, False, 'generation_error', count)
         if last is None:
             return result(raw, False, 'empty_generation')
         count = getattr(last, 'generation_tokens', len(parts))

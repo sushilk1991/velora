@@ -76,8 +76,11 @@ def main():
                 if pending and now>min(pending.values()):raise TimeoutError('worker request/cancel deadline')
                 if now>=next_rss:
                     next_rss=now+.25
-                    measured=subprocess.run(['/bin/ps','-o','rss=','-p',str(child.pid)],capture_output=True,text=True,timeout=.25)
-                    if measured.returncode==0 and int(measured.stdout.strip() or 0)*1024>a.max_rss_mb*1024*1024:raise MemoryError('worker process RSS limit')
+                    try:
+                        measured=subprocess.run(['/bin/ps','-o','rss=','-p',str(child.pid)],capture_output=True,text=True,timeout=.25)
+                    except (OSError,subprocess.SubprocessError):
+                        measured=None
+                    if measured is not None and measured.returncode==0 and int(measured.stdout.strip() or 0)*1024>a.max_rss_mb*1024*1024:raise MemoryError('worker process RSS limit')
             for key,mask in selector.select(.02):
                 fd=key.fd
                 if key.data=='write':

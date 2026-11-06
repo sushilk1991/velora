@@ -2,12 +2,12 @@
 import json,os,pathlib,selectors,signal,subprocess,sys,tempfile,time,unittest
 SUPERVISOR=pathlib.Path(__file__).with_name('supervise.py')
 class SupervisorTests(unittest.TestCase):
-    def launch(self,directory,ready):
+    def launch(self,directory,ready,wrapper=None):
         pidfile=pathlib.Path(directory)/'pid'
         fake=pathlib.Path(directory)/'fake-worker'
         fake.write_text('#!'+sys.executable+'\nimport os,time,signal,pathlib\npathlib.Path('+repr(str(pidfile))+').write_text(str(os.getpid()))\nsignal.signal(signal.SIGTERM,signal.SIG_IGN)\n'+('print(\'{"event":"ready"}\',flush=True)\n' if ready else '')+'time.sleep(30)\n')
         fake.chmod(0o700)
-        process=subprocess.Popen([sys.executable,str(SUPERVISOR),str(fake),'unused','0'*64,'--startup-deadline-ms','1000','--hard-grace-ms','50'],stdin=subprocess.PIPE,stdout=subprocess.PIPE,stderr=subprocess.PIPE)
+        process=subprocess.Popen([sys.executable,str(wrapper or SUPERVISOR),str(fake),'unused','0'*64,'--startup-deadline-ms','1000','--hard-grace-ms','50'],stdin=subprocess.PIPE,stdout=subprocess.PIPE,stderr=subprocess.PIPE)
         return process,pidfile
     def assert_reaped(self,pidfile):
         pid=int(pidfile.read_text())
@@ -23,6 +23,34 @@ class SupervisorTests(unittest.TestCase):
             self.assertIn(b'busy',stdout)
             self.assertLess(time.monotonic()-start,2);self.assertNotEqual(process.returncode,0)
             self.assertIn(b'request/cancel deadline',stdout);self.assert_reaped(pidfile)
+    def test_rss_sample_timeout_skips_sample_but_keeps_request_deadline(self):
+        with tempfile.TemporaryDirectory() as directory:
+            wrapper=pathlib.Path(directory)/'wrapper.py'
+            wrapper.write_text("import runpy,subprocess,sys\n"
+                "def timeout(*args,**kwargs): raise subprocess.TimeoutExpired('ps',.25)\n"
+                "subprocess.run=timeout\n"
+                "runpy.run_path("+repr(str(SUPERVISOR))+",run_name='__main__')\n")
+            process,pidfile=self.launch(directory,True,wrapper)
+            selector=selectors.DefaultSelector();selector.register(process.stdout,selectors.EVENT_READ)
+            self.assertTrue(selector.select(2));self.assertEqual(json.loads(process.stdout.readline())['event'],'ready');selector.close()
+            start=time.monotonic()
+            request=(json.dumps({'op':'generate','id':'stalled','deadline_ms':100})+'\n').encode()
+            stdout,stderr=process.communicate(request,timeout=3)
+            self.assertLess(time.monotonic()-start,2)
+            self.assertIn(b'request/cancel deadline',stdout)
+            self.assertNotIn(b'TimeoutExpired',stdout)
+            self.assert_reaped(pidfile)
+    def test_measured_oversized_rss_still_reaps_worker(self):
+        with tempfile.TemporaryDirectory() as directory:
+            wrapper=pathlib.Path(directory)/'wrapper.py'
+            wrapper.write_text("import runpy,subprocess,types\n"
+                "subprocess.run=lambda *a,**k: types.SimpleNamespace(returncode=0,stdout='999999999')\n"
+                "runpy.run_path("+repr(str(SUPERVISOR))+",run_name='__main__')\n")
+            process,pidfile=self.launch(directory,True,wrapper)
+            stdout,stderr=process.communicate(timeout=3)
+            self.assertIn(b'worker process RSS limit',stdout)
+            self.assertNotEqual(process.returncode,0)
+            if pidfile.exists():self.assert_reaped(pidfile)
     def test_never_ready_rejects_generate_without_pipe_write(self):
         with tempfile.TemporaryDirectory() as directory:
             process,pidfile=self.launch(directory,False)

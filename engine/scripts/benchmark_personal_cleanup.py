@@ -14,14 +14,13 @@ import os
 from pathlib import Path
 import resource
 import re
-import shutil
 import sys
 import time
 
 REPO = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(REPO / 'engine' / 'src'))
 sys.path.insert(0, str(REPO / 'engine' / 'scripts'))
-from benchmark_personal_recordings import digest, private_dir, private_write
+from benchmark_personal_recordings import digest, private_dir, private_write, snapshot_config
 from benchmark_resources import loaded_model_memory, write_end_resources
 
 
@@ -41,30 +40,6 @@ def hash_tree(path):
             h.update(str(file.relative_to(path)).encode() + b'\0')
             h.update(bytes.fromhex(digest(file)))
     return h.hexdigest()
-
-
-def snapshot_config(source, dest):
-    """Copy only formatter inputs; Config migrations operate on the copy."""
-    source = source.expanduser().resolve(strict=True)
-    dest.mkdir(mode=0o700)
-    for name in ('config.json', 'learned.json', 'auto_learned.json'):
-        path = source / name
-        if path.is_symlink():
-            raise ValueError('symlinked config input is not supported')
-        if path.is_file():
-            shutil.copyfile(path, dest / name)
-            os.chmod(dest / name, 0o600)
-    modes = source / 'modes'
-    if modes.is_symlink():
-        raise ValueError('symlinked modes directory is not supported')
-    if modes.is_dir():
-        target = dest / 'modes'
-        target.mkdir(mode=0o700)
-        for path in sorted(modes.glob('*.json')):
-            if path.is_symlink():
-                raise ValueError('symlinked mode is not supported')
-            shutil.copyfile(path, target / path.name)
-            os.chmod(target / path.name, 0o600)
 
 
 def read_inputs(manifest_path, stt_path):
@@ -167,7 +142,7 @@ def make_server(config, cleanup):
 
 def source_fingerprint():
     h = hashlib.sha256()
-    paths = [Path(__file__), REPO/'engine/scripts/benchmark_resources.py', REPO/'engine/src/velora_engine/server.py',
+    paths = [Path(__file__), REPO/'engine/scripts/benchmark_personal_recordings.py', REPO/'engine/scripts/benchmark_resources.py', REPO/'engine/src/velora_engine/server.py',
              REPO/'engine/src/velora_engine/formatting.py',
              REPO/'engine/src/velora_engine/cleanup.py',
              REPO/'engine/src/velora_engine/config.py']
@@ -175,6 +150,14 @@ def source_fingerprint():
         h.update(path.name.encode() + bytes.fromhex(digest(path)))
     h.update(bytes.fromhex(hash_tree(REPO/'engine/src/velora_engine/modes_builtin')))
     return h.hexdigest()
+
+
+def cleanup_status(calls, applied, reason):
+    if reason == 'partial_cleanup':
+        return 'cleanup_partial'
+    if calls and not applied:
+        return 'cleanup_fallback'
+    return 'ok'
 
 
 async def replay(manifest_path, stt_path, output, config_home, model, model_path,
@@ -249,6 +232,15 @@ async def replay(manifest_path, stt_path, output, config_home, model, model_path
     case_dir = output / 'cases'
     case_dir.mkdir(mode=0o700, exist_ok=True)
     os.chmod(case_dir, 0o700)
+    expected_names = {hashlib.sha256(str(case['id']).encode()).hexdigest()+'.json' for case in cases}
+    if any(p.name not in expected_names or p.is_symlink() for p in case_dir.glob('*.json')):
+        raise ValueError('unexpected or unsafe case result')
+    for case in cases:
+        path = case_dir / (hashlib.sha256(str(case['id']).encode()).hexdigest() + '.json')
+        if path.exists():
+            row = json.loads(path.read_text())
+            if row.get('id') != case['id'] or row.get('input_sha256') != case.get('input_sha256'):
+                raise ValueError('existing case result mismatch')
     engine = CleanupEngine(model, local_model_path=model_path)
     started = time.perf_counter()
     await engine.load_async(STATIC_SYSTEM_PROMPT)
@@ -278,7 +270,7 @@ async def replay(manifest_path, stt_path, output, config_home, model, model_path
                 try:
                     text, mode, infer_ms, applied, reason = await server._apply_formatting(
                         source['raw'], case.get('bundle_id'), case.get('app_name'), case.get('mode'))
-                    status = 'cleanup_fallback' if instrumented.calls and not applied else 'ok'
+                    status = cleanup_status(instrumented.calls, applied, reason)
                     record.update(status=status, text=text, mode=mode, cleanup_model_ms=infer_ms,
                                   cleanup_applied=applied, cleanup_reason=reason)
                 except Exception as exc:
@@ -303,7 +295,8 @@ async def replay(manifest_path, stt_path, output, config_home, model, model_path
                 write_end_resources(output,engine,private_write)
         finally:
             engine.close()
-    all_results = [json.loads(p.read_text()) for p in case_dir.glob('*.json')]
+    all_results = [json.loads((case_dir / (hashlib.sha256(str(case['id']).encode()).hexdigest() + '.json')).read_text())
+                   for case in cases if (case_dir / (hashlib.sha256(str(case['id']).encode()).hexdigest() + '.json')).exists()]
     ok = sum(r['status'] == 'ok' for r in all_results)
     print(json.dumps({'output': str(case_dir), 'total_cases': len(cases),
                       'completed': len(all_results), 'ok': ok,

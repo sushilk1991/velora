@@ -109,6 +109,18 @@ def test_replay_snapshots_and_resumes_without_model_or_history(tmp_path, monkeyp
     asyncio.run(bench.replay(*args))
     assert prior == {p.name: p.read_bytes() for p in (output/'cases').glob('*.json')}
     assert 'longer phrase' not in capsys.readouterr().out
+    stale = output/'cases'/'extra.json'
+    stale.write_text(json.dumps({'id': 999, 'status': 'ok'}))
+    with pytest.raises(ValueError, match='unexpected or unsafe'):
+        asyncio.run(bench.replay(*args))
+    stale.unlink()
+    target = next((output/'cases').glob('*.json'))
+    saved = target.read_bytes()
+    target.unlink()
+    target.symlink_to(output/'cleanup-run.json')
+    with pytest.raises(ValueError, match='unexpected or unsafe'):
+        asyncio.run(bench.replay(*args))
+    target.unlink(); target.write_bytes(saved)
     smoke = tmp_path/'smoke'
     asyncio.run(bench.replay(manifest, stt, smoke, home, 'fake', model, 6, 1, True))
     meta = json.loads((smoke/'cleanup-run.json').read_text())
@@ -122,3 +134,10 @@ def test_replay_snapshots_and_resumes_without_model_or_history(tmp_path, monkeyp
     (model/'weight').write_bytes(b'changed')
     with pytest.raises(ValueError, match='provenance changed'):
         asyncio.run(bench.replay(*args))
+
+
+def test_partial_piece_cleanup_is_not_a_full_fallback():
+    calls = [{'reason': None}, {'reason': 'timeout'}]
+    assert bench.cleanup_status(calls, False, 'partial_cleanup') == 'cleanup_partial'
+    assert bench.cleanup_status(calls, False, 'cleanup_unavailable') == 'cleanup_fallback'
+    assert bench.cleanup_status(calls, True, 'chunked') == 'ok'
