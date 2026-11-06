@@ -1316,6 +1316,27 @@ extension Selftest {
         let saved = probe.frames["new 1"]
         expect(saved.map { visible.insetBy(dx: 0, dy: -1).contains($0) } == true,
                "the next add, made while scrolled down, scrolls its entry into view (\(saved ?? .zero) in \(visible))")
+        expect(!probe.reveal, "the inserted row consumes its reveal exactly once")
+
+        // A newly inserted ID in the middle must be registered too; this
+        // cannot be satisfied by merely scrolling the document to its top.
+        dictionaryListScroll(scroller, to: .greatestFiniteMagnitude)
+        probe.rows.insert(word("new 2"), at: 100)
+        probe.selection = "new 2"
+        probe.reveal = true
+        waitUntil(timeout: 0.4) { false }
+        let middle = probe.frames["new 2"]
+        expect(middle.map { visible.insetBy(dx: 0, dy: -1).contains($0) } == true && !probe.reveal,
+               "a save also reveals a newly inserted middle row once (\(middle ?? .zero) in \(visible))")
+
+        // Once the save is handled, manual scrolling and an unrelated sync
+        // must not reveal the selection again.
+        dictionaryListScroll(scroller, to: .greatestFiniteMagnitude)
+        probe.rows.append(word("synced"))
+        waitUntil(timeout: 0.4) { false }
+        let afterSync = probe.frames["new 2"]
+        expect(!probe.reveal && (afterSync.map { !visible.intersects($0) } ?? true),
+               "a later sync respects the user's scroll after a saved row was revealed")
     }
 
     /// VoiceOver reads the list as one group named Entries holding exactly

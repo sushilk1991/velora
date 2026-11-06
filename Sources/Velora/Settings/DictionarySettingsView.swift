@@ -992,8 +992,14 @@ struct DictionaryEntryList: View {
                     return
                 }
                 reveal = false
-                if let selection {
-                    proxy.scrollTo(selection)
+                if let target = selection {
+                    // A save can insert the row in this same update. Its
+                    // scroll ID is registered only after the lazy stack has
+                    // reconciled the new rows; scrolling here loses the request.
+                    DispatchQueue.main.async {
+                        guard selection == target else { return }
+                        proxy.scrollTo(target)
+                    }
                 }
             }
             // Tabbing in shows focus on a row: the selection, else the first
