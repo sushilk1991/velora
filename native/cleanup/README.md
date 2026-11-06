@@ -2,7 +2,7 @@
 
 This is an independently authored C++ token loop over the MIT llama.cpp/ggml math core and Metal kernels. It is not an HTTP proxy, does not invoke Python for inference, and does not copy Phonon's GPL implementation. It is isolated from Velora's shipped engine and defaults. The optional Python supervisor is process ownership/watchdog code; model evaluation and greedy token selection are C++.
 
-Current status: **the optional cache build compiles and passes CPU protocol/lifecycle checks; its model-state parity is not yet tested.** Root ran the earlier uncached build on64public rows:63EOS and1length, so it remained unqualified. The new cache requires a separately reserved GPU comparison. The verified official GGUF is ready on disk.
+Current status: **GPU comparisons passed output, token and status parity on all 64 public fixtures, including two fresh-process copy-draft comparisons.** Cancellation, system-cache invalidation and context-error recovery also passed. The base model reached EOS on 63 cases and its token ceiling on one, so model qualification still failed. The worker remains experimental and separate from the shipped app; measured results and limits are below.
 
 ## Why this backend
 
