@@ -1,0 +1,17 @@
+[project]
+name = "velora-cleanup-training"
+version = "0.1.0"
+requires-python = ">=3.12,<3.13"
+dependencies = []
+
+[project.optional-dependencies]
+train = ["mlx==0.32.4", "mlx-lm==0.32.2", "transformers==5.22.1"]
+acquire = ["huggingface-hub>=0.30,<2", "pyarrow>=18,<24"]
+test = ["pytest>=8,<10"]
+
+[build-system]
+requires = ["setuptools>=69"]
+build-backend = "setuptools.build_meta"
+
+[tool.setuptools]
+packages = ["cleanup"]

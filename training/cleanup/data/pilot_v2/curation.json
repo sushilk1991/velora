@@ -1,0 +1,202 @@
+{
+  "rows": 1109,
+  "split": {
+    "train": 900,
+    "dev": 209
+  },
+  "language_split": {
+    "en:train": 621,
+    "en:dev": 166,
+    "hi:dev": 24,
+    "hi:train": 138,
+    "hinglish:train": 141,
+    "hinglish:dev": 19
+  },
+  "excluded": [
+    {
+      "id": "muse-public-0117",
+      "reason": "frozen holdout overlap"
+    },
+    {
+      "id": "muse-public-0135",
+      "reason": "not independently approved"
+    },
+    {
+      "id": "muse-public-0147",
+      "reason": "not independently approved"
+    },
+    {
+      "id": "sotto-relabel-0020",
+      "reason": "not independently approved"
+    },
+    {
+      "id": "sotto-relabel-0042",
+      "reason": "not independently approved"
+    },
+    {
+      "id": "sotto-relabel-0156",
+      "reason": "duplicate normalized content"
+    },
+    {
+      "id": "sotto-relabel-0247",
+      "reason": "duplicate normalized content"
+    },
+    {
+      "id": "sotto-relabel-0273",
+      "reason": "not independently approved"
+    },
+    {
+      "id": "sotto-relabel-0325",
+      "reason": "duplicate normalized content"
+    },
+    {
+      "id": "sotto-relabel-0365",
+      "reason": "duplicate normalized content"
+    },
+    {
+      "id": "sotto-relabel-0402",
+      "reason": "duplicate normalized content"
+    },
+    {
+      "id": "sotto-relabel-0428",
+      "reason": "duplicate normalized content"
+    },
+    {
+      "id": "sotto-relabel-0502",
+      "reason": "duplicate normalized content"
+    },
+    {
+      "id": "muse-v2-0097",
+      "reason": "not independently approved"
+    },
+    {
+      "id": "muse-v2-0098",
+      "reason": "not independently approved"
+    },
+    {
+      "id": "muse-v2-0100",
+      "reason": "not independently approved"
+    },
+    {
+      "id": "muse-v2-0105",
+      "reason": "not independently approved"
+    },
+    {
+      "id": "muse-v2-0106",
+      "reason": "not independently approved"
+    },
+    {
+      "id": "muse-v2-0107",
+      "reason": "not independently approved"
+    },
+    {
+      "id": "muse-v2-0110",
+      "reason": "not independently approved"
+    },
+    {
+      "id": "muse-v2-0111",
+      "reason": "not independently approved"
+    },
+    {
+      "id": "muse-v2-0112",
+      "reason": "not independently approved"
+    },
+    {
+      "id": "muse-v2-0117",
+      "reason": "not independently approved"
+    },
+    {
+      "id": "muse-v2-0118",
+      "reason": "not independently approved"
+    },
+    {
+      "id": "muse-v2-0120",
+      "reason": "not independently approved"
+    },
+    {
+      "id": "muse-v2-0124",
+      "reason": "not independently approved"
+    },
+    {
+      "id": "muse-v2-0125",
+      "reason": "not independently approved"
+    },
+    {
+      "id": "muse-v2-0225",
+      "reason": "not independently approved"
+    },
+    {
+      "id": "muse-v2-0226",
+      "reason": "not independently approved"
+    },
+    {
+      "id": "muse-v2-0228",
+      "reason": "not independently approved"
+    },
+    {
+      "id": "muse-v2-0233",
+      "reason": "not independently approved"
+    },
+    {
+      "id": "muse-v2-0234",
+      "reason": "not independently approved"
+    },
+    {
+      "id": "muse-v2-0235",
+      "reason": "not independently approved"
+    },
+    {
+      "id": "muse-v2-0236",
+      "reason": "duplicate normalized content"
+    },
+    {
+      "id": "muse-v2-0238",
+      "reason": "not independently approved"
+    },
+    {
+      "id": "muse-v2-0239",
+      "reason": "not independently approved"
+    },
+    {
+      "id": "muse-v2-0240",
+      "reason": "not independently approved"
+    },
+    {
+      "id": "muse-v2-0244",
+      "reason": "duplicate normalized content"
+    },
+    {
+      "id": "muse-v2-0245",
+      "reason": "not independently approved"
+    },
+    {
+      "id": "muse-v2-0246",
+      "reason": "not independently approved"
+    },
+    {
+      "id": "muse-v2-0248",
+      "reason": "not independently approved"
+    },
+    {
+      "id": "muse-v2-0252",
+      "reason": "not independently approved"
+    },
+    {
+      "id": "muse-v2-0253",
+      "reason": "not independently approved"
+    }
+  ],
+  "scenario_components": 903,
+  "seed": "velora-public-20261106-v1",
+  "dev_percent": 20,
+  "inputs_sha256": [
+    "50e2eb01a8f024a04438e1428d835ed8597fc39018b8d230c6bb8c41a76100be",
+    "2a61e8efe59973f7173b637f92267148fa9df1a5401e837a7432917b9bc3e244",
+    "54423b1d7830efd1058211ca68c34da4602fb14cfc4f0f2d71422b7de4c844d8",
+    "219dc253e1b031dc51076f557386a693f7eb0a5f0c6ed191bff5ba65c09ff312"
+  ],
+  "holdout_sha256": "4c1d3bec72bb44180402bea071a3efabe88ce7d3a90a82e288c399bdb24cb249",
+  "ledger_sha256": "e08987426a0edd199b254dfdb4ef71c6300ce7d7ac2af6f48e3dc58c153e665c",
+  "dataset_sha256": "b45c3e6eb987de01b3ee53462880cbf3b0f047762db59af0db764c7cfc6ef806",
+  "sotto_raw_sha256": "8ae733269c7471a027c690daa2bea7268d228ebbfcb81ac50323a93c2c234f79"
+}

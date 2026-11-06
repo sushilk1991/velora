@@ -1,0 +1,36 @@
+{
+  "dataset_sha256": "3c51a38930ccc1fc4bb39b791807a1fa5ade1bccc13b438eec12cd6b30af8547",
+  "sotto": {
+    "repository": "juanquivilla/sotto-transcript-cleanup",
+    "revision": "183cc8fd58532f13fa192980185214de1bcd5acc",
+    "license": "MIT",
+    "files": {
+      "data/train-00000-of-00001.parquet": "9ea6d4241905a5ff141d95ffd9519813dce7ccd0d383d1f72a48e55652565a69",
+      "data/validation-00000-of-00001.parquet": "d1304f3ff4fdcbe90d2d5dd6df081bf61e57daf1d3acc0951101860630deeb39"
+    },
+    "output_sha256": "8ae733269c7471a027c690daa2bea7268d228ebbfcb81ac50323a93c2c234f79"
+  },
+  "teachers": [
+    {
+      "role": "synthetic author",
+      "agent": "Muse native configured default",
+      "model_identity": "not exposed by CLI",
+      "run_id": "20261106T055601-33310432"
+    },
+    {
+      "role": "independent synthetic review and Sotto relabel",
+      "agent": "Codex gpt-6.1-terra",
+      "model_identity": "gpt-6.1-terra"
+    },
+    {
+      "role": "independent Sotto review",
+      "agent": "Muse native configured default",
+      "model_identity": "not exposed by CLI",
+      "run_id": "20261106T061125-df004b7d"
+    }
+  ],
+  "human_review": false,
+  "private_dictations_included": false,
+  "qwen4b_targets_included": false,
+  "review_limitations": "Model-authored and independently model-reviewed, not human-certified. Semantic review can miss errors. Source license declaration does not prove upstream provenance beyond the pinned source."
+}

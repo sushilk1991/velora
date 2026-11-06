@@ -1,0 +1,190 @@
+{
+  "model_reviews_not_human": true,
+  "personal_data_used": false,
+  "qwen4b_targets_used": false,
+  "muse_generation_run": "20261106T064656-3fd5952f",
+  "muse_english_review_run": "20261106T065344-585af2f7",
+  "terra_model": "gpt-6.1-terra",
+  "english_batches": [
+    {
+      "count": 64,
+      "language_counts": {
+        "en": 64
+      },
+      "categories": {
+        "condition": 3,
+        "exact": 16,
+        "list": 3,
+        "long-narrative": 8,
+        "narrative": 2,
+        "near-correction": 16,
+        "retraction": 16
+      },
+      "empty_instructions": 8,
+      "distinct_nonempty_instructions": 56,
+      "long_70_120_words": 8,
+      "status": "generated; independent review pending",
+      "limitations": [
+        "Category counts overlap in intended use; no independent review has been performed."
+      ]
+    },
+    {
+      "count": 64,
+      "language_counts": {
+        "en": 64
+      },
+      "categories": {
+        "condition": 3,
+        "exact": 16,
+        "format": 1,
+        "list": 2,
+        "long-narrative": 8,
+        "narrative": 2,
+        "near-correction": 16,
+        "retraction": 16
+      },
+      "empty_instructions": 8,
+      "distinct_nonempty_instructions": 49,
+      "long_70_120_words": 8,
+      "status": "generated; independent review pending",
+      "limitations": [
+        "Category coverage can overlap; no independent review has been performed."
+      ]
+    }
+  ],
+  "muse_generation": {
+    "batch": "muse-v2-generated",
+    "count": 256,
+    "ids": {
+      "first": "muse-v2-0001",
+      "last": "muse-v2-0256",
+      "unique": 256
+    },
+    "language_counts": {
+      "hi": 128,
+      "hinglish": 128
+    },
+    "romanize_true_hindi": 48,
+    "mode_counts": {
+      "note": 66,
+      "default": 130,
+      "code": 14,
+      "terminal": 12,
+      "message": 18,
+      "email": 16
+    },
+    "instructions": {
+      "nonempty": 183,
+      "empty": 73,
+      "distinct_nonempty": 40
+    },
+    "category_counts": {
+      "noop-exact": 48,
+      "retraction": 48,
+      "near-correction": 48,
+      "longform-narrative": 32,
+      "narrative-prose": 16,
+      "heading": 4,
+      "list": 4,
+      "email": 4,
+      "message": 4,
+      "negation-condition": 10,
+      "uncertainty": 6,
+      "quoted-instruction": 4,
+      "code-case": 6,
+      "terminal-noperiod": 4,
+      "one-paragraph": 8,
+      "custom-instruction": 2,
+      "uppercase-preserve": 2,
+      "lowercase-preserve": 2,
+      "exact-preserve": 4
+    },
+    "coverage": {
+      "noop_exact_raw_equals_target": 48,
+      "explicit_retractions": 48,
+      "near_corrections_not_retractions": 48,
+      "narrative_prose_incl_longform": 48,
+      "long_inputs_70_to_120_words": 32,
+      "with_vocabulary_list": 24,
+      "scenario_groups": 91
+    },
+    "source": {
+      "name": "velora-muse-synthetic-v2",
+      "revision": "muse-v2-20261106",
+      "license": "project-generated"
+    },
+    "teacher": {
+      "name": "Muse-native-default",
+      "revision": "muse-v2-20261106"
+    },
+    "visibility": "public",
+    "split": "train",
+    "quality_review": {
+      "status": "generated",
+      "reviewer": "pending-independent-review"
+    },
+    "limitations": [
+      "Synthetic single-author batch; targets were authored with the raw pairs and have not had independent human review (quality_review remains generated/pending-independent-review).",
+      "Long-form narratives are assembled from authored clause sets on recurring rural/travel/school topics; topic diversity is broad but not exhaustive.",
+      "Romanized Hindi targets use a consistent informal Latin transliteration; alternative valid transliteration spellings exist.",
+      "Code/terminal exact-preservation strings are short realistic snippets, not exhaustive shell coverage.",
+      "Word counts for the long-form quota use whitespace tokenization of the raw transcript."
+    ],
+    "notes": "Categories overlap by design (e.g. long-form narratives also count as narrative prose). No human-review or approval claim is made."
+  },
+  "terra_muse_review": {
+    "count": 256,
+    "approved": 228,
+    "rejected": 28,
+    "changed_targets": 2,
+    "reviewer": "gpt-6.1-terra-independent",
+    "review_type": "model review, not human review",
+    "remaining_coverage_risks": [
+      "Many Hindi and Hinglish examples share translated topics and structures; keep related variants in the same data split.",
+      "Romanization allows legitimate spelling variation; no formal transliteration standard was specified.",
+      "Single-model review can miss semantic errors; independent human or additional model review is warranted.",
+      "Spoken contrasts can express both correction and meaningful exclusion; review their intended policy before training."
+    ]
+  },
+  "muse_english_review": {
+    "dataset": "terra-v2-english-generated.jsonl (velora-original-synthetic-v2, terra-v2-20261106)",
+    "reviewer": "Muse-native-default-independent",
+    "review_type": "independent semantic review of every raw/target pair against its mode, instructions and vocabulary controls; no model runs, no benchmark or private data used",
+    "total_rows": 128,
+    "approved": 128,
+    "rejected": 0,
+    "changed": 1,
+    "changed_ids": [
+      "terra-v2-b01-0050"
+    ],
+    "rejected_ids": [],
+    "unchanged_approved": 127,
+    "semantic_concerns": [
+      {
+        "id": "terra-v2-b01-0050",
+        "concern": "Original bulleted target kept the verb on the first item only, leaving the second item as a fragment that dropped the 'take' action for the blue folder.",
+        "resolution": "Corrected minimally by adding 'Take' to the second bullet and approved; the raw coordination unambiguously applies the verb to both folders, so no rejection was needed."
+      },
+      {
+        "id": null,
+        "concern": "Near-correction and contrast rows (distinct versions, people, doors, maps, samples, tickets and observations) risk being misread as retractions.",
+        "resolution": "Checked each semantically and left them unchanged; no clause was deleted where both sides carry independent facts."
+      },
+      {
+        "id": null,
+        "concern": "Instruction-looking and code-like transcripts (shell commands, flags, paths, identifiers) risk being executed, answered or recased.",
+        "resolution": "Treated them as transcript data; targets keep exact casing, paths, tokens and terminal punctuation."
+      },
+      {
+        "id": null,
+        "concern": "Long narratives risk paragraph breaks landing after the wrong sentence.",
+        "resolution": "Verified each break falls immediately after the sentence named in its control (entrance, tool, delay, stamp, gathering, map, screws, station, or the second sentence)."
+      }
+    ],
+    "limitations": [
+      "Single independent reviewer (Muse native default); this is not a human review and makes no human-review claim.",
+      "Review is limited to the supplied public synthetic pairs and the stated teacher rubric; no benchmark, private or held-out data was read and no model was run.",
+      "Rows whose intent was unambiguous were approved; the one defective target had a single faithful minimal correction, so no row required rejection."
+    ]
+  }
+}

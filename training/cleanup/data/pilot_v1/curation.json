@@ -1,0 +1,76 @@
+{
+  "rows": 756,
+  "split": {
+    "train": 592,
+    "dev": 164
+  },
+  "language_split": {
+    "en:train": 513,
+    "en:dev": 147,
+    "hi:dev": 11,
+    "hi:train": 37,
+    "hinglish:train": 42,
+    "hinglish:dev": 6
+  },
+  "excluded": [
+    {
+      "id": "muse-public-0135",
+      "reason": "not independently approved"
+    },
+    {
+      "id": "muse-public-0147",
+      "reason": "not independently approved"
+    },
+    {
+      "id": "sotto-relabel-0020",
+      "reason": "not independently approved"
+    },
+    {
+      "id": "sotto-relabel-0042",
+      "reason": "not independently approved"
+    },
+    {
+      "id": "sotto-relabel-0156",
+      "reason": "duplicate normalized content"
+    },
+    {
+      "id": "sotto-relabel-0247",
+      "reason": "duplicate normalized content"
+    },
+    {
+      "id": "sotto-relabel-0273",
+      "reason": "not independently approved"
+    },
+    {
+      "id": "sotto-relabel-0325",
+      "reason": "duplicate normalized content"
+    },
+    {
+      "id": "sotto-relabel-0365",
+      "reason": "duplicate normalized content"
+    },
+    {
+      "id": "sotto-relabel-0402",
+      "reason": "duplicate normalized content"
+    },
+    {
+      "id": "sotto-relabel-0428",
+      "reason": "duplicate normalized content"
+    },
+    {
+      "id": "sotto-relabel-0502",
+      "reason": "duplicate normalized content"
+    }
+  ],
+  "scenario_components": 737,
+  "seed": "velora-public-20261106-v1",
+  "dev_percent": 20,
+  "inputs_sha256": [
+    "50e2eb01a8f024a04438e1428d835ed8597fc39018b8d230c6bb8c41a76100be",
+    "2a61e8efe59973f7173b637f92267148fa9df1a5401e837a7432917b9bc3e244"
+  ],
+  "holdout_sha256": "00bdaed5e5d0598080c0661ad95b0a3db9d459944b42ce1d5e6163588a55144b",
+  "ledger_sha256": "11cd42c159b62158e874612bc23edf8faffceb667d5d51ad3a14b2a0a1676ade",
+  "dataset_sha256": "3c51a38930ccc1fc4bb39b791807a1fa5ade1bccc13b438eec12cd6b30af8547",
+  "sotto_raw_sha256": "8ae733269c7471a027c690daa2bea7268d228ebbfcb81ac50323a93c2c234f79"
+}

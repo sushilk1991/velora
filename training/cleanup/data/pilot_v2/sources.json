@@ -1,0 +1,39 @@
+{
+  "allowed_licenses": [
+    "MIT",
+    "CC-BY-4.0",
+    "project-generated"
+  ],
+  "sources": {
+    "velora-original-synthetic": {
+      "kind": "synthetic",
+      "revision": "muse-pilot-v1",
+      "license": "project-generated"
+    },
+    "sotto-transcript-cleanup": {
+      "kind": "public",
+      "revision": "183cc8fd58532f13fa192980185214de1bcd5acc",
+      "license": "MIT"
+    },
+    "velora-frozen-public-eval": {
+      "kind": "synthetic",
+      "revision": "v1",
+      "license": "project-generated"
+    },
+    "velora-train-smoke": {
+      "kind": "synthetic",
+      "revision": "v1",
+      "license": "project-generated"
+    },
+    "velora-original-synthetic-v2": {
+      "kind": "synthetic",
+      "revision": "terra-v2-20261106",
+      "license": "project-generated"
+    },
+    "velora-muse-synthetic-v2": {
+      "kind": "synthetic",
+      "revision": "muse-v2-20261106",
+      "license": "project-generated"
+    }
+  }
+}
