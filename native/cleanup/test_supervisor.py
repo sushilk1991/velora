@@ -2,6 +2,23 @@
 import json,os,pathlib,selectors,signal,subprocess,sys,tempfile,time,unittest
 SUPERVISOR=pathlib.Path(__file__).with_name('supervise.py')
 class SupervisorTests(unittest.TestCase):
+    def test_bounded_swa_is_forwarded_only_when_requested(self):
+        with tempfile.TemporaryDirectory() as directory:
+            fake=pathlib.Path(directory)/'fake-options-worker'
+            fake.write_text('#!'+sys.executable+'\nimport json,sys\n'
+                'print(json.dumps({"event":"ready","args":sys.argv[1:]}),flush=True)\n'
+                'for line in sys.stdin:\n'
+                ' if json.loads(line).get("op")=="shutdown":break\n')
+            fake.chmod(0o700)
+            for enabled in (False,True):
+                command=[sys.executable,str(SUPERVISOR),str(fake),'unused','0'*64]
+                if enabled:command+=['--bounded-swa']
+                result=subprocess.run(command,input='{"op":"shutdown"}\n',text=True,capture_output=True,timeout=5)
+                self.assertEqual(result.returncode,0,result.stderr)
+                events=[json.loads(line) for line in result.stdout.splitlines()]
+                ready=next(row for row in events if row.get('event')=='ready')
+                self.assertEqual('--bounded-swa' in ready['args'],enabled)
+
     def launch(self,directory,ready,wrapper=None):
         pidfile=pathlib.Path(directory)/'pid'
         fake=pathlib.Path(directory)/'fake-worker'

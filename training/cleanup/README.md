@@ -98,3 +98,106 @@ timers. Peak allocation/RSS are process-lifetime observations, and allocator
 usage, process RSS and physical footprint are distinct measurements, not
 interchangeable estimates of a model's RAM requirement. Unhealthy processes
 skip further MLX/resource probes and retire through the existing failure path.
+
+## Reproduce the LFM3 A/B/C research recipes
+
+Use [scripts/run_lfm3.py](scripts/run_lfm3.py) for LFM3 `train` and
+`generate-eval`. The pinned environment cannot load this architecture through
+bare `python -m cleanup`: the wrapper registers the audited port for the whole
+operation, then removes that registration. It accepts only the audited local
+`snapshots/4d6d94c9c2c2f249f1f740f4f08e071b0dbfe099` base with `model_type=lfm3`.
+It never downloads a base. `train --help` and `generate-eval --help` forward to
+the underlying CLI without loading a model or writing provenance.
+
+This is a new portable counterpart to the historical ignored operator wrapper,
+not the script that produced the reported checkpoints. Historical
+`architecture.json` files retain that operator wrapper's actual SHA. New runs
+write their own wrapper/port hashes and invocation to
+`<out>.lfm3-architecture.json`, and successful training copies that record into
+`<out>/architecture.json`. Existing outputs, sidecars and evaluation metadata
+are rejected. A failed attempt retains its sidecar; choose a fresh output for
+a retry. The 512 MiB MLX allocator cache cap applies to evaluation only; the
+wrapper does not change training allocation, mathematics, or the port.
+
+Run from the repository root, using the isolated locked training environment
+and an already cached `LiquidAI/LFM3-1.7B-MLX-8bit` snapshot:
+
+```sh
+PY=training/cleanup/.venv/bin/python
+REV=4d6d94c9c2c2f249f1f740f4f08e071b0dbfe099
+BASE="$HOME/.cache/huggingface/hub/models--LiquidAI--LFM3-1.7B-MLX-8bit/snapshots/$REV"
+RUN=/absolute/path/to/new-lfm3-run
+mkdir -p "$RUN"
+
+train_lfm3() {
+  "$PY" training/cleanup/scripts/run_lfm3.py train \
+    --base "$BASE" --base-revision "$REV" \
+    --rank 16 --lora-scale 8 --grad-accum 4 --warmup-updates 20 \
+    --lr-schedule cosine --clip-grad-norm 1 --seed 42 \
+    --val-batches -1 --report-every 100 "$@"
+}
+train_lfm3 --data training/cleanup/data/pilot_v4/baseline_reviewed.jsonl \
+  --holdout training/cleanup/evaluation/training_exclusions_v4.jsonl \
+  --ledger training/cleanup/data/pilot_v4/sources.json \
+  --iters 2488 --lr 1e-5 --max-seq 1536 --eval-every 624 --save-every 624 --out "$RUN/a"
+train_lfm3 --data training/cleanup/data/pilot_v4/reviewed.jsonl \
+  --holdout training/cleanup/evaluation/training_exclusions_v4.jsonl \
+  --ledger training/cleanup/data/pilot_v4/sources.json \
+  --iters 2952 --lr 1e-5 --max-seq 1536 --eval-every 740 --save-every 740 --out "$RUN/b"
+```
+
+A and B use the same 362-row development set. Select the minimum **full-dev**
+validation loss from each run's `metrics.jsonl`, then preserve that saved
+checkpoint as `adapters.safetensors` in a fresh selected directory alongside its
+`adapter_config.json`, `manifest.json`, and `architecture.json`. Record the
+checkpoint SHA, eligible losses and selection rule in `selection.json`. The
+historical selected sample counts were A=1,872 and B=1,480; reruns must select
+from their own dev results rather than hardcoding those outcomes. Checkpoint
+filename counts are one greater than the zero-based callback iteration.
+
+C continues the selected B adapter using [pilot_v5](data/pilot_v5/README.md):
+2,216 reviewed rows, including 1,799 train and 417 dev. All original 362 dev rows
+remain unchanged; the expanded dev set adds 55 rows.
+
+```sh
+train_lfm3 --data training/cleanup/data/pilot_v5/reviewed.jsonl \
+  --holdout training/cleanup/evaluation/training_exclusions_v5.jsonl \
+  --ledger training/cleanup/data/pilot_v5/sources.json \
+  --adapter "$RUN/b-selected" --iters 3600 --lr 3e-6 --max-seq 2048 \
+  --eval-every 900 --save-every 900 --out "$RUN/c"
+```
+
+C selection includes the initial B checkpoint's loss on **all 417 dev rows**
+at iteration zero, alongside every saved C candidate. If initial B has the
+lowest loss, retain B; selection must not force a new checkpoint. A/B losses on
+362 rows and C losses on 417 rows are different comparisons. Freeze final test
+inputs before training, and never use their outputs or owner recordings to
+choose a checkpoint. The historical C minimum was 0.144486 versus initial B's
+0.158287 on the same expanded dev set. Lower dev loss did not qualify a default
+model change: additional meaning regressions remained in private evaluation.
+
+After selection, generate fresh public challenge predictions separately:
+
+```sh
+"$PY" training/cleanup/scripts/run_lfm3.py generate-eval \
+  --data training/cleanup/evaluation/qualification_v5.jsonl \
+  --base "$BASE" --base-revision "$REV" --adapter "$RUN/c-selected" \
+  --max-tokens 1024 --out "$RUN/c-v5-predictions.jsonl"
+
+# Explicit original-adapter qualification with complete token/status records.
+"$PY" training/cleanup/scripts/qualify_lfm3_artifacts.py run \
+  --data training/cleanup/evaluation/qualification_v5.jsonl \
+  --base "$BASE" --base-revision "$REV" --adapter "$RUN/c-selected" \
+  --max-output 1024 --output "$RUN/c-original.json" \
+  --native-reference "$RUN/c-native-prompts.json"
+```
+
+Judge generated meaning separately from EOS/runtime qualification. Export,
+fusion, GGUF quantization and native execution each require their own exact
+prompt/output and recovery checks; fusion or quantization can change outputs.
+[scripts/export_lfm3_native.py](scripts/export_lfm3_native.py) defaults to
+CPU-only inspection, while `--execute` explicitly performs export.
+[scripts/qualify_lfm3_artifacts.py](scripts/qualify_lfm3_artifacts.py) also accepts
+`--fused PATH --export-provenance PATH/export-provenance.json` for a separate
+fused run, then `compare --left ... --right ... --output ...` reports parity.
+These are research commands; they do not activate an application model.

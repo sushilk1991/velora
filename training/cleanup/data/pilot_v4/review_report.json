@@ -1,0 +1,394 @@
+{
+  "reviewer": "gpt-6.1-terra",
+  "review_type": "model-assisted independent review",
+  "total": 256,
+  "approved": 235,
+  "rejected": 21,
+  "counts": {
+    "language:en": {
+      "approved": 180,
+      "rejected": 12
+    },
+    "language:hi": {
+      "approved": 25,
+      "rejected": 7
+    },
+    "language:hinglish": {
+      "approved": 30,
+      "rejected": 2
+    },
+    "length:long_80plus_words": {
+      "approved": 41,
+      "rejected": 3
+    },
+    "length:under_80_words": {
+      "rejected": 18,
+      "approved": 194
+    },
+    "mode:code": {
+      "approved": 5
+    },
+    "mode:default": {
+      "approved": 160,
+      "rejected": 10
+    },
+    "mode:email": {
+      "approved": 5,
+      "rejected": 3
+    },
+    "mode:message": {
+      "approved": 29,
+      "rejected": 1
+    },
+    "mode:note": {
+      "approved": 35,
+      "rejected": 3
+    },
+    "mode:terminal": {
+      "rejected": 4,
+      "approved": 1
+    },
+    "no_op:false": {
+      "approved": 188,
+      "rejected": 21
+    },
+    "no_op:true": {
+      "approved": 47
+    },
+    "source:sotto-transcript-cleanup": {
+      "approved": 120,
+      "rejected": 8
+    },
+    "source:velora-muse-lfm3-long-v4": {
+      "approved": 115,
+      "rejected": 13
+    }
+  },
+  "length_definition": "long means at least 80 whitespace-separated raw words",
+  "no_op_definition": "raw exactly equals target",
+  "natural_raw_and_source_comparison": "128 of 128 match candidate bytes, record IDs, and source metadata",
+  "approved_ids": [
+    "lfm3-sotto-add-001",
+    "lfm3-sotto-add-002",
+    "lfm3-sotto-add-003",
+    "lfm3-sotto-add-004",
+    "lfm3-sotto-add-005",
+    "lfm3-sotto-add-006",
+    "lfm3-sotto-add-007",
+    "lfm3-sotto-add-008",
+    "lfm3-sotto-add-009",
+    "lfm3-sotto-add-010",
+    "lfm3-sotto-add-011",
+    "lfm3-sotto-add-012",
+    "lfm3-sotto-add-013",
+    "lfm3-sotto-add-014",
+    "lfm3-sotto-add-015",
+    "lfm3-sotto-add-016",
+    "lfm3-sotto-add-017",
+    "lfm3-sotto-add-018",
+    "lfm3-sotto-add-019",
+    "lfm3-sotto-add-020",
+    "lfm3-sotto-add-021",
+    "lfm3-sotto-add-022",
+    "lfm3-sotto-add-023",
+    "lfm3-sotto-add-024",
+    "lfm3-sotto-add-025",
+    "lfm3-sotto-add-026",
+    "lfm3-sotto-add-027",
+    "lfm3-sotto-add-028",
+    "lfm3-sotto-add-029",
+    "lfm3-sotto-add-030",
+    "lfm3-sotto-add-031",
+    "lfm3-sotto-add-032",
+    "lfm3-sotto-add-034",
+    "lfm3-sotto-add-035",
+    "lfm3-sotto-add-036",
+    "lfm3-sotto-add-037",
+    "lfm3-sotto-add-038",
+    "lfm3-sotto-add-039",
+    "lfm3-sotto-add-040",
+    "lfm3-sotto-add-041",
+    "lfm3-sotto-add-042",
+    "lfm3-sotto-add-043",
+    "lfm3-sotto-add-045",
+    "lfm3-sotto-add-046",
+    "lfm3-sotto-add-047",
+    "lfm3-sotto-add-048",
+    "lfm3-sotto-add-049",
+    "lfm3-sotto-add-050",
+    "lfm3-sotto-add-051",
+    "lfm3-sotto-add-052",
+    "lfm3-sotto-add-053",
+    "lfm3-sotto-add-054",
+    "lfm3-sotto-add-055",
+    "lfm3-sotto-add-056",
+    "lfm3-sotto-add-057",
+    "lfm3-sotto-add-058",
+    "lfm3-sotto-add-059",
+    "lfm3-sotto-add-060",
+    "lfm3-sotto-add-061",
+    "lfm3-sotto-add-062",
+    "lfm3-sotto-add-063",
+    "lfm3-sotto-add-064",
+    "lfm3-sotto-add-065",
+    "lfm3-sotto-add-066",
+    "lfm3-sotto-add-067",
+    "lfm3-sotto-add-068",
+    "lfm3-sotto-add-069",
+    "lfm3-sotto-add-070",
+    "lfm3-sotto-add-071",
+    "lfm3-sotto-add-072",
+    "lfm3-sotto-add-073",
+    "lfm3-sotto-add-075",
+    "lfm3-sotto-add-076",
+    "lfm3-sotto-add-077",
+    "lfm3-sotto-add-078",
+    "lfm3-sotto-add-079",
+    "lfm3-sotto-add-080",
+    "lfm3-sotto-add-082",
+    "lfm3-sotto-add-083",
+    "lfm3-sotto-add-084",
+    "lfm3-sotto-add-085",
+    "lfm3-sotto-add-086",
+    "lfm3-sotto-add-087",
+    "lfm3-sotto-add-088",
+    "lfm3-sotto-add-089",
+    "lfm3-sotto-add-090",
+    "lfm3-sotto-add-091",
+    "lfm3-sotto-add-092",
+    "lfm3-sotto-add-093",
+    "lfm3-sotto-add-095",
+    "lfm3-sotto-add-096",
+    "lfm3-sotto-add-097",
+    "lfm3-sotto-add-098",
+    "lfm3-sotto-add-099",
+    "lfm3-sotto-add-100",
+    "lfm3-sotto-add-101",
+    "lfm3-sotto-add-102",
+    "lfm3-sotto-add-103",
+    "lfm3-sotto-add-104",
+    "lfm3-sotto-add-105",
+    "lfm3-sotto-add-106",
+    "lfm3-sotto-add-107",
+    "lfm3-sotto-add-108",
+    "lfm3-sotto-add-109",
+    "lfm3-sotto-add-110",
+    "lfm3-sotto-add-111",
+    "lfm3-sotto-add-112",
+    "lfm3-sotto-add-114",
+    "lfm3-sotto-add-115",
+    "lfm3-sotto-add-116",
+    "lfm3-sotto-add-117",
+    "lfm3-sotto-add-119",
+    "lfm3-sotto-add-120",
+    "lfm3-sotto-add-121",
+    "lfm3-sotto-add-122",
+    "lfm3-sotto-add-123",
+    "lfm3-sotto-add-124",
+    "lfm3-sotto-add-126",
+    "lfm3-sotto-add-127",
+    "lfm3-sotto-add-128",
+    "lfm3-long-add-001",
+    "lfm3-long-add-002",
+    "lfm3-long-add-003",
+    "lfm3-long-add-004",
+    "lfm3-long-add-005",
+    "lfm3-long-add-007",
+    "lfm3-long-add-008",
+    "lfm3-long-add-009",
+    "lfm3-long-add-010",
+    "lfm3-long-add-011",
+    "lfm3-long-add-012",
+    "lfm3-long-add-013",
+    "lfm3-long-add-014",
+    "lfm3-long-add-015",
+    "lfm3-long-add-016",
+    "lfm3-long-add-017",
+    "lfm3-long-add-018",
+    "lfm3-long-add-019",
+    "lfm3-long-add-020",
+    "lfm3-long-add-021",
+    "lfm3-long-add-022",
+    "lfm3-long-add-023",
+    "lfm3-long-add-024",
+    "lfm3-long-add-025",
+    "lfm3-long-add-026",
+    "lfm3-long-add-027",
+    "lfm3-long-add-028",
+    "lfm3-long-add-029",
+    "lfm3-long-add-030",
+    "lfm3-long-add-031",
+    "lfm3-long-add-032",
+    "lfm3-long-add-033",
+    "lfm3-long-add-034",
+    "lfm3-long-add-035",
+    "lfm3-long-add-036",
+    "lfm3-long-add-037",
+    "lfm3-long-add-038",
+    "lfm3-long-add-039",
+    "lfm3-long-add-040",
+    "lfm3-long-add-041",
+    "lfm3-long-add-042",
+    "lfm3-long-add-043",
+    "lfm3-long-add-044",
+    "lfm3-long-add-045",
+    "lfm3-long-add-047",
+    "lfm3-long-add-048",
+    "lfm3-long-add-049",
+    "lfm3-long-add-050",
+    "lfm3-long-add-052",
+    "lfm3-long-add-053",
+    "lfm3-long-add-054",
+    "lfm3-long-add-055",
+    "lfm3-long-add-056",
+    "lfm3-long-add-057",
+    "lfm3-long-add-058",
+    "lfm3-long-add-059",
+    "lfm3-long-add-060",
+    "lfm3-long-add-061",
+    "lfm3-long-add-063",
+    "lfm3-long-add-064",
+    "lfm3-long-add-065",
+    "lfm3-long-add-066",
+    "lfm3-long-add-067",
+    "lfm3-long-add-068",
+    "lfm3-long-add-069",
+    "lfm3-long-add-070",
+    "lfm3-long-add-073",
+    "lfm3-long-add-074",
+    "lfm3-long-add-075",
+    "lfm3-long-add-077",
+    "lfm3-long-add-078",
+    "lfm3-long-add-079",
+    "lfm3-long-add-080",
+    "lfm3-long-add-081",
+    "lfm3-long-add-082",
+    "lfm3-long-add-083",
+    "lfm3-long-add-084",
+    "lfm3-long-add-085",
+    "lfm3-long-add-086",
+    "lfm3-long-add-087",
+    "lfm3-long-add-088",
+    "lfm3-long-add-089",
+    "lfm3-long-add-090",
+    "lfm3-long-add-092",
+    "lfm3-long-add-093",
+    "lfm3-long-add-097",
+    "lfm3-long-add-098",
+    "lfm3-long-add-099",
+    "lfm3-long-add-100",
+    "lfm3-long-add-101",
+    "lfm3-long-add-102",
+    "lfm3-long-add-103",
+    "lfm3-long-add-104",
+    "lfm3-long-add-105",
+    "lfm3-long-add-106",
+    "lfm3-long-add-107",
+    "lfm3-long-add-108",
+    "lfm3-long-add-109",
+    "lfm3-long-add-110",
+    "lfm3-long-add-111",
+    "lfm3-long-add-112",
+    "lfm3-long-add-113",
+    "lfm3-long-add-114",
+    "lfm3-long-add-115",
+    "lfm3-long-add-116",
+    "lfm3-long-add-117",
+    "lfm3-long-add-118",
+    "lfm3-long-add-119",
+    "lfm3-long-add-120",
+    "lfm3-long-add-121",
+    "lfm3-long-add-122",
+    "lfm3-long-add-123",
+    "lfm3-long-add-124",
+    "lfm3-long-add-125",
+    "lfm3-long-add-128"
+  ],
+  "rejections": [
+    {
+      "id": "lfm3-sotto-add-033",
+      "reason": "The spoken no may correct senior to junior, but target reverses it into not junior; intention is unresolved."
+    },
+    {
+      "id": "lfm3-sotto-add-044",
+      "reason": "The relationship between a failed trial and promising results for a new group is ambiguous; the target deletes the trial claim."
+    },
+    {
+      "id": "lfm3-sotto-add-074",
+      "reason": "Four oh and four two could denote different numeric forms; exact NPS reading is uncertain."
+    },
+    {
+      "id": "lfm3-sotto-add-081",
+      "reason": "The correction from query speed to latency may revise the action rather than cancel it; target loses the request."
+    },
+    {
+      "id": "lfm3-sotto-add-094",
+      "reason": "No wait may replace chest pain or add shortness of breath; clinical meaning is uncertain."
+    },
+    {
+      "id": "lfm3-sotto-add-113",
+      "reason": "Dictated period and question mark yield unclear sentence boundaries and question scope."
+    },
+    {
+      "id": "lfm3-sotto-add-118",
+      "reason": "The interrupted correction and relation to indemnification terms are unclear."
+    },
+    {
+      "id": "lfm3-sotto-add-125",
+      "reason": "Jason may be a name or JSON; the identity of the request is uncertain."
+    },
+    {
+      "id": "lfm3-long-add-006",
+      "reason": "Spoken flag and log path do not specify leading dashes or a leading slash; target guesses both."
+    },
+    {
+      "id": "lfm3-long-add-046",
+      "reason": "The spoken path lacks a leading slash; target adds one without evidence."
+    },
+    {
+      "id": "lfm3-long-add-051",
+      "reason": "Two-sentence body is required but none was dictated; target invents delivery and reference."
+    },
+    {
+      "id": "lfm3-long-add-062",
+      "reason": "The spoken words do not specify the exact option prefix characters for the terminal command."
+    },
+    {
+      "id": "lfm3-long-add-071",
+      "reason": "The file path punctuation and Latin spelling were not dictated; target invents separators and an identifier."
+    },
+    {
+      "id": "lfm3-long-add-072",
+      "reason": "The folder spelling, separators and Latin name spellings are not dictated; target guesses them."
+    },
+    {
+      "id": "lfm3-long-add-076",
+      "reason": "Target invents an email address and supplies an undictated TEA prefix for the second SKU."
+    },
+    {
+      "id": "lfm3-long-add-091",
+      "reason": "Target invents slash-separated path and Latin spelling for the Hindi name."
+    },
+    {
+      "id": "lfm3-long-add-094",
+      "reason": "The path separators and extension spelling are not clearly dictated."
+    },
+    {
+      "id": "lfm3-long-add-095",
+      "reason": "Target invents delivery and reference details for an undictated email body."
+    },
+    {
+      "id": "lfm3-long-add-096",
+      "reason": "The spoken word short does not specify the exact terminal flag prefix."
+    },
+    {
+      "id": "lfm3-long-add-126",
+      "reason": "Target invents delivery and reference details for an undictated email body."
+    },
+    {
+      "id": "lfm3-long-add-127",
+      "reason": "The spoken word short does not specify the exact terminal flag prefix."
+    }
+  ],
+  "output_sha256": "f466ff01883a4261e461917992429090c3ea352920e6ff00d451003f9b9d3c03"
+}

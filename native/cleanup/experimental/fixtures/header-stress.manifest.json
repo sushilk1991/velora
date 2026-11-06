@@ -1,0 +1,14 @@
+{
+  "schema": 1,
+  "visibility": "public",
+  "description": "Twelve synthetic student-header cache stress inputs and their model-specific prompt token IDs.",
+  "cases": 12,
+  "files_sha256": {
+    "header-stress.jsonl": "8c70399b95a4134787c52fc8d70927ff80ac9dfef13d94ca083334f074a467d7",
+    "header-stress-prompts.json": "4f7559e05c8f3fbbdcf141b56f115060e88833a0340e8a5ded631e42eb5d2b98"
+  },
+  "prompt_reference_model_sha256": "15def8830eb1ee5a7a5ddc002aae31a8a38a913b53f0d7f1c8583b80044f16c9",
+  "prompt_reference_template_sha256": "069050fa20a67b73bbd75e2a3737a0ddc23cc24bc509d6ddf74d3939cb90f6c8",
+  "qualified_worker_sha256": "6b5ab148f586b881d27577f5a61a5dafa551d1a24edb140213c29321ec044a3c",
+  "notes": "The previous-piece marker is a synthetic canary. Prompt token IDs are tokenizer/template specific, not model output or quality labels."
+}

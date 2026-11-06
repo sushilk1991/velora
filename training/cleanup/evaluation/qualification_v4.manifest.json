@@ -1,0 +1,13 @@
+{
+  "count": 96,
+  "sha256": "c1eec1c26d668bcc77a6c89163d7b8e8dfdc2af58900513f15b792b641ae198c",
+  "language": {
+    "en": 48,
+    "hi": 24,
+    "hinglish": 24
+  },
+  "frozen_before_training": true,
+  "guard_count": 347,
+  "guard_sha256": "6a593c3e6d50baaf85031b9cb771eff0a6e6863ca6d6cd664258b23f0470f360",
+  "filtered_pilot_validation": "passed"
+}

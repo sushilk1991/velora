@@ -13,12 +13,25 @@ struct RuntimeExperiments {
     bool direct_argmax = false;
     bool trace = false;
     bool backend_token_only = false;
+    size_t prefill_batch = 128;
+    bool research_long_context = false;
+    int max_output_tokens = 512;
+    bool bounded_swa = false;
+    bool student_prefix_cache = false;
     void validate(bool copy) const {
         if (draft_max < 1 || draft_max > 8) throw std::runtime_error("draft-max must be 1..8");
         if (recurrent_rollback && (!copy || draft_max < 2))
             throw std::runtime_error("recurrent rollback requires copy-draft and draft-max >=2");
         if (backend_sampling && direct_argmax) throw std::runtime_error("sampling experiments are mutually exclusive");
         if (backend_token_only && !backend_sampling) throw std::runtime_error("backend-token-only requires backend-sampling");
+        if (prefill_batch!=16 && prefill_batch!=32 && prefill_batch!=64 && prefill_batch!=128 && prefill_batch!=256 && prefill_batch!=512)
+            throw std::runtime_error("prefill-batch must be 16,32,64,128,256,512");
+        if (max_output_tokens<1 || max_output_tokens>2048 || (max_output_tokens>512 && !research_long_context))
+            throw std::runtime_error("max-output-tokens above 512 requires research-long-context; maximum 2048");
+    }
+    void validate_context(int ctx) const {
+        if(ctx<128 || (ctx>4096 && (!research_long_context || (ctx!=8192 && ctx!=16384))))
+            throw std::runtime_error("context above 4096 requires research-long-context and 8192 or 16384");
     }
 };
 
@@ -67,6 +80,14 @@ inline void runtime_experiments_selftest() {
     }
     if (rejected != 5) throw std::runtime_error("experiment bounds");
     RuntimeExperiments{8,true}.validate(true);
+    for (size_t size : {16,32,64,128,256,512}) {auto options=defaults;options.prefill_batch=size;options.validate(false);}
+    auto research=defaults;research.research_long_context=true;research.max_output_tokens=2048;research.validate(false);research.validate_context(16384);
+    int long_rejected=0;
+    try {defaults.validate_context(8192);} catch(const std::runtime_error &) {++long_rejected;}
+    try {research.validate_context(32768);} catch(const std::runtime_error &) {++long_rejected;}
+    try {auto bad=defaults;bad.prefill_batch=17;bad.validate(false);} catch(const std::runtime_error &) {++long_rejected;}
+    try {auto bad=defaults;bad.max_output_tokens=513;bad.validate(false);} catch(const std::runtime_error &) {++long_rejected;}
+    if(long_rejected!=4)throw std::runtime_error("research bounds");
     RuntimeTrace trace;
     { RuntimeTrace::Timer timer(trace, "off"); }
     if (!trace.spans.empty()) throw std::runtime_error("disabled trace");

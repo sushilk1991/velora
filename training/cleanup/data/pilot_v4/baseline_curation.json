@@ -1,0 +1,15 @@
+{
+  "original_rows": 1605,
+  "colliding_ids": [
+    "terra-v2-b01-0052"
+  ],
+  "removed_whole_groups": [
+    "component-terra-v2-b01-0052"
+  ],
+  "retained_rows": 1604,
+  "split_counts": {
+    "train": 1242,
+    "dev": 362
+  },
+  "sha256": "6935b330dfa6c602b2d9703b71d107a8aa78e7c04bba8cb79ff5cb99eb760c21"
+}

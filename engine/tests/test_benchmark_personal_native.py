@@ -14,10 +14,12 @@ import benchmark_personal_native as bench
 
 
 class FakeClient:
-    def __init__(self,*args):
+    def __init__(self,*args,**kwargs):
         upstream=json.loads((bench.NATIVE/'UPSTREAM.json').read_text())
         self.ready={'pid':123,'llama_commit':upstream['commit'],'context_tokens':4096,
-            'copy_draft':True,'copy_draft_max':8,'prefix_reuse':True}
+            'copy_draft':True,'copy_draft_max':8,'prefix_reuse':True,
+            'prefill_batch_tokens':kwargs.get('prefill_batch',128),
+            'student_prefix_cache':kwargs.get('student_prefix_cache',False)}
         self.child=SimpleNamespace(pid=456,returncode=None)
         self.unhealthy=False
         self.requests=[]
@@ -227,3 +229,113 @@ def test_private_replay_is_complete_atomic_and_resumable(tmp_path,monkeypatch,ca
     assert 'sentence contains' not in capsys.readouterr().out
     args.model_revision='1'*40
     with pytest.raises(ValueError,match='provenance changed'):asyncio.run(bench.replay(args))
+
+
+def test_local_trained_artifact_identity_checks_hashes_and_lineage(tmp_path):
+    model=tmp_path/'trained.gguf';model.write_bytes(b'local weights')
+    upstream={'commit':'b'*40}
+    from qualify_lfm3_artifacts import SOURCE_SHA256
+    export_dir=tmp_path/'export';export_dir.mkdir()
+    (export_dir/'config.json').write_text(json.dumps({'model_type':'lfm3','architectures':['Lfm3ForCausalLM']}))
+    (export_dir/'tokenizer.json').write_text('{}')
+    (export_dir/'tokenizer_config.json').write_text('{}')
+    (export_dir/'chat_template.jinja').write_text('{{ messages }}')
+    (export_dir/'model.safetensors').write_bytes(b'weights')
+    export_files={p.name:bench.digest(p) for p in export_dir.iterdir()}
+    export=export_dir/'export-provenance.json'
+    adapter='a'*64
+    export_info={'status':'exported','base_revision':bench.AUDITED_LFM3_REVISION,
+        'llama_converter_commit':upstream['commit'], 'port_sha256':SOURCE_SHA256,
+        'output_files_sha256':export_files,
+        'adapter_files_sha256':{'adapters.safetensors':adapter}}
+    export.write_text(json.dumps(export_info))
+    conversion=tmp_path/'conversion.json'
+    conversion_info={'schema':1,'kind':'lfm3-gguf-conversion',
+        'source_export_provenance_sha256':bench.digest(export),'source_export_files_sha256':export_files,
+        'model_sha256':bench.digest(model),'quantization':'Q8_0','converter_commit':upstream['commit'],
+        'converter_source_sha256':'c'*64,'quantizer_binary_sha256':'d'*64,
+        'gguf_metadata':{'architecture':'lfm3','file_type':7}}
+    conversion.write_text(json.dumps(conversion_info))
+    manifest=tmp_path/'artifact.json'
+    data={'schema':1,'kind':'local-trained-gguf','model_sha256':bench.digest(model),
+        'source_export_provenance_sha256':bench.digest(export),'export_provenance_path':str(export),
+        'source_base_revision':bench.AUDITED_LFM3_REVISION,'source_adapter_sha256':adapter,
+        'quantization':'Q8_0','converter_commit':upstream['commit'],
+        'conversion_manifest_path':str(conversion),'conversion_manifest_sha256':bench.digest(conversion)}
+    manifest.write_text(json.dumps(data))
+    args=SimpleNamespace(sha256=bench.digest(model),local_artifact_manifest=manifest,
+        model_repository=None,model_revision=None,prompt_contract='student')
+    identity=bench.artifact_identity(args,model,upstream)
+    assert identity['model_revision'] is None and identity['local_artifact_identity']==data
+    assert identity['local_artifact_manifest_sha256']==bench.digest(manifest)
+    args.model_repository='unrelated/repo'
+    with pytest.raises(ValueError,match='mutually exclusive'):bench.artifact_identity(args,model,upstream)
+    args.model_repository=None;args.prompt_contract='phonon'
+    with pytest.raises(ValueError,match='forbids'):bench.artifact_identity(args,model,upstream)
+    args.prompt_contract='student'
+    model.write_bytes(b'changed')
+    with pytest.raises(ValueError,match='GGUF SHA256'):bench.artifact_identity(args,model,upstream)
+    model.write_bytes(b'local weights')
+    for key,value in [('source_adapter_sha256','c'*64),('source_base_revision','d'*40),
+                      ('converter_commit','e'*40),('quantization','unsupported')]:
+        manifest.write_text(json.dumps({**data,key:value}))
+        with pytest.raises(ValueError):bench.artifact_identity(args,model,upstream)
+    manifest.write_text(json.dumps(data))
+    (export_dir/'model.safetensors').write_bytes(b'tampered')
+    with pytest.raises(ValueError,match='hash mismatch'):bench.artifact_identity(args,model,upstream)
+    (export_dir/'model.safetensors').write_bytes(b'weights')
+    conversion.write_text(json.dumps({**conversion_info,'gguf_metadata':{'architecture':'wrong','file_type':7}}))
+    changed={**data,'conversion_manifest_sha256':bench.digest(conversion)}
+    manifest.write_text(json.dumps(changed))
+    with pytest.raises(ValueError,match='conversion manifest lineage'):bench.artifact_identity(args,model,upstream)
+    manifest.write_text(json.dumps(data));export.write_text(json.dumps({**export_info,'status':'changed'}))
+    with pytest.raises(ValueError,match='provenance or adapter SHA256'):bench.artifact_identity(args,model,upstream)
+
+
+def test_hub_identity_still_requires_repository_and_revision(tmp_path):
+    model=tmp_path/'model';model.write_bytes(b'weights')
+    args=SimpleNamespace(sha256=bench.digest(model),model_repository='repo/model',model_revision='a'*40)
+    assert bench.artifact_identity(args,model,{})=={'model_repository':'repo/model','model_revision':'a'*40}
+    args.model_repository=None
+    with pytest.raises(ValueError,match='repository'):bench.artifact_identity(args,model,{})
+    args.model_repository='repo/model';args.model_revision='bad'
+    with pytest.raises(ValueError,match='revision'):bench.artifact_identity(args,model,{})
+
+
+def test_local_artifact_requires_lfm3_worker_readiness():
+    ready={'llama_commit':'a'*40,'context_tokens':4096,'copy_draft':True,
+        'copy_draft_max':8,'prefix_reuse':True,'prefill_batch_tokens':128,'architecture':'qwen3'}
+    bench.validate_worker_ready(ready,{'commit':'a'*40},False)
+    with pytest.raises(RuntimeError,match='architecture'):
+        bench.validate_worker_ready(ready,{'commit':'a'*40},True)
+    ready['architecture']='lfm3'
+    bench.validate_worker_ready(ready,{'commit':'a'*40},True)
+
+
+def test_header_cache_readiness_and_phonon_exclusion():
+    ready={'llama_commit':'a'*40,'context_tokens':4096,'copy_draft':True,
+        'copy_draft_max':8,'prefix_reuse':True,'prefill_batch_tokens':128}
+    bench.validate_worker_ready(ready,{'commit':'a'*40},False)  # old worker, flag off
+    with pytest.raises(RuntimeError):
+        bench.validate_worker_ready(ready,{'commit':'a'*40},False,student_prefix_cache=True)
+    ready['student_prefix_cache']=True;ready['prefill_batch_tokens']=512
+    bench.validate_worker_ready(ready,{'commit':'a'*40},False,prefill_batch=512,student_prefix_cache=True)
+    with pytest.raises(RuntimeError):
+        bench.validate_worker_ready(ready,{'commit':'a'*40},False,prefill_batch=128,student_prefix_cache=True)
+    args=SimpleNamespace(prompt_contract='phonon',phonon_metadata=None,student_prefix_cache=True)
+    with pytest.raises(ValueError,match='forbids student prefix'):bench.load_prompt_contract(args)
+
+
+def test_header_cache_and_batch_forward_to_supervised_worker(tmp_path):
+    fake=tmp_path/'worker'
+    fake.write_text('#!'+sys.executable+'\nimport json,os,sys\n'
+        'print(json.dumps({"event":"ready","pid":os.getpid(),"model_sha256":"'+'0'*64+'",'
+        '"args":sys.argv[1:]}),flush=True)\n'
+        'for line in sys.stdin:\n'
+        ' if json.loads(line).get("op")=="shutdown": break\n')
+    fake.chmod(0o700)
+    client=bench.NativeClient(fake,'unused','0'*64,tmp_path/'stderr',student_prefix_cache=True,prefill_batch=512)
+    try:
+        assert '--student-prefix-cache' in client.ready['args']
+        assert '--prefill-batch=512' in client.ready['args']
+    finally:client.close()

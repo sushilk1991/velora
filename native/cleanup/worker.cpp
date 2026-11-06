@@ -4,6 +4,8 @@
 #include "chat.h"
 #include "log.h"
 #include "prefix_cache.h"
+#include "student_prefix.h"
+#include "student_prefix_test.h"
 #include "copy_draft.h"
 #include "runtime_experiments.h"
 #include "backend_output_filter.h"
@@ -86,9 +88,9 @@ struct Request {
     std::string id, system, user;
     int max_tokens, deadline_ms;
     std::string draft_text;
-    static Request parse(const json & r) {
+    static Request parse(const json & r,int output_limit=512) {
         Request q{field(r,"id",128),field(r,"system",16384),field(r,"user",65536),
-                  integer(r,"max_tokens",256,1,512),integer(r,"deadline_ms",10000,1,120000)};
+                  integer(r,"max_tokens",std::min(256,output_limit),1,output_limit),integer(r,"deadline_ms",10000,1,120000)};
         if(r.contains("draft_text")){
             if(!r.at("draft_text").is_string())throw std::runtime_error("invalid draft_text");
             q.draft_text=r.at("draft_text").get<std::string>();
@@ -127,6 +129,8 @@ struct Runtime {
     RuntimeTrace trace;
     uint64_t forward_calls=0,forward_tokens=0;
     uint64_t backend_sampled_tokens=0,filtered_rows_checked=0;
+    Clock::time_point request_start;
+    double first_decision_ms=-1;
     PrefixCache prefix_cache{32*1024*1024};
     PrefixIdentity cache_identity;
     Cancellation control;
@@ -135,7 +139,9 @@ struct Runtime {
     bool active = false;
     std::thread worker;
     Runtime(const std::string & path, const std::string & expected, int layers, int ctx, int max_mb, bool cache,bool copy,RuntimeExperiments options) : context_size(ctx), cache_enabled(cache),copy_enabled(copy),experiments(options) {
-        experiments.validate(copy);trace.enabled=experiments.trace;
+        experiments.validate(copy);
+        if(experiments.student_prefix_cache && !cache_enabled)throw std::runtime_error("student-prefix-cache requires prefix-cache");
+        trace.enabled=experiments.trace;
         if (expected.size()!=64 || expected.find_first_not_of("0123456789abcdef")!=std::string::npos) throw std::runtime_error("expected lowercase SHA256 required");
         std::unique_ptr<FILE, decltype(&fclose)> f(fopen(path.c_str(),"rb"),fclose);
         if (!f) throw std::runtime_error("local model file missing");
@@ -155,7 +161,10 @@ struct Runtime {
         if (arch!="lfm3" && arch!="qwen35" && arch!="qwen3") throw std::runtime_error("unqualified model architecture: "+arch);
         control.max_rss=uint64_t(max_mb)*1024*1024;
         control.deadline=Clock::time_point::max();
-        auto cp=llama_context_default_params();cp.n_ctx=ctx;cp.n_batch=128;cp.n_ubatch=128;cp.n_seq_max=1;
+        auto cp=llama_context_default_params();cp.n_ctx=ctx;cp.n_batch=experiments.prefill_batch;cp.n_ubatch=experiments.prefill_batch;cp.n_seq_max=1;
+        // Keep upstream's full-size SWA default unless this research arm opts in.
+        // The bounded hybrid cache retains window + microbatch cells, padded256.
+        if(experiments.bounded_swa)cp.swa_full=false;
         cp.n_threads=4;cp.n_threads_batch=4;cp.abort_callback=Cancellation::abort;cp.abort_callback_data=&control;
         if(experiments.recurrent_rollback)cp.n_rs_seq=experiments.draft_max-1;
         llama_sampler_seq_config sampler_config{};
@@ -172,16 +181,19 @@ struct Runtime {
         }
         context.reset(llama_init_from_model(model.get(),cp));
         if (!context) throw std::runtime_error("context allocation failed");
+        cp.n_batch=llama_n_batch(context.get());cp.n_ubatch=llama_n_ubatch(context.get());
         if(experiments.recurrent_rollback && llama_n_rs_seq(context.get())!=experiments.draft_max-1)
             throw std::runtime_error("requested recurrent rollback unsupported");
         templates=common_chat_templates_init(model.get(),"");
         if (!common_chat_templates_support_enable_thinking(templates.get())) throw std::runtime_error("model template lacks verified thinking toggle");
         cache_identity={expected,hash_text(common_chat_templates_source(templates.get())),
-            std::string(PIN)+":"+std::to_string(reinterpret_cast<uintptr_t>(context.get()))+":"+std::to_string(llama_n_ctx(context.get()))+":batch128:ubatch128:seq1:"+std::to_string(layers)+":"+std::to_string(cp.type_k)+":"+std::to_string(cp.type_v)+":rs"+std::to_string(cp.n_rs_seq)+":backend"+std::to_string(experiments.backend_sampling)+":tokenonly"+std::to_string(experiments.backend_token_only),""};
+            std::string(PIN)+":"+std::to_string(reinterpret_cast<uintptr_t>(context.get()))+":"+std::to_string(llama_n_ctx(context.get()))+":batch"+std::to_string(cp.n_batch)+":ubatch"+std::to_string(cp.n_ubatch)+":seq1:"+std::to_string(layers)+":"+std::to_string(cp.type_k)+":"+std::to_string(cp.type_v)+":rs"+std::to_string(cp.n_rs_seq)+":backend"+std::to_string(experiments.backend_sampling)+":tokenonly"+std::to_string(experiments.backend_token_only)+":swafull"+std::to_string(cp.swa_full)+":studentprefix"+std::to_string(experiments.student_prefix_cache),""};
         if (rss()>control.max_rss) throw std::runtime_error("resident memory limit exceeded during load");
         emit({{"event","ready"},{"pid",getpid()},{"protocol",1},{"llama_commit",PIN},{"architecture",arch},{"model_sha256",expected},
               {"template_sha256",hash_text(common_chat_templates_source(templates.get()))},{"vocab_size",llama_vocab_n_tokens(vocab)},
-              {"context_tokens",ctx},{"batch_tokens",128},{"max_rss_mb",max_mb},{"rss_bytes",rss()},{"copy_draft",copy_enabled},{"copy_draft_max",experiments.draft_max},{"prefix_reuse",cache_enabled},{"prefix_cache_limit_bytes",prefix_cache.limit()},
+              {"context_tokens",ctx},{"batch_tokens",cp.n_batch},{"ubatch_tokens",cp.n_ubatch},{"prefill_batch_tokens",experiments.prefill_batch},{"research_long_context",experiments.research_long_context},{"max_output_tokens",experiments.max_output_tokens},{"max_rss_mb",max_mb},{"rss_bytes",rss()},{"copy_draft",copy_enabled},{"copy_draft_max",experiments.draft_max},{"prefix_reuse",cache_enabled},{"prefix_cache_limit_bytes",prefix_cache.limit()},
+              {"bounded_swa",experiments.bounded_swa},{"swa_full",cp.swa_full},
+              {"student_prefix_cache",experiments.student_prefix_cache},{"student_prefix_max_tokens",1024},{"student_prefix_alignment","system_prefix_plus_prefill_batches"},
               {"recurrent_rollback",experiments.recurrent_rollback},{"recurrent_snapshots",llama_n_rs_seq(context.get())},{"sampling",experiments.backend_sampling?"backend_greedy":experiments.direct_argmax?"direct_cpu_argmax":"upstream_cpu_greedy"},{"sampling_output_reserve",cp.n_outputs_max_per_seq},{"backend_token_only",experiments.backend_token_only},{"trace_runtime",experiments.trace}});
     }
     ~Runtime() {control.cancelled=true;if(worker.joinable())worker.join();}
@@ -209,15 +221,42 @@ struct Runtime {
     }
     void prefill(const std::vector<llama_token> & tokens,int start,int end) {
         RuntimeTrace::Timer timer(trace,"prefill_submit_inclusive");
-        for(int offset=start;offset<end;offset+=128){if(auto reason=control.reason();!reason.empty())throw std::runtime_error(reason);
-            decode(std::vector<llama_token>(tokens.begin()+offset,tokens.begin()+std::min(end,offset+128)),offset);}
+        const int step=static_cast<int>(std::min(experiments.prefill_batch,size_t(llama_n_batch(context.get()))));
+        for(int offset=start;offset<end;offset+=step){if(auto reason=control.reason();!reason.empty())throw std::runtime_error(reason);
+            decode(std::vector<llama_token>(tokens.begin()+offset,tokens.begin()+std::min(end,offset+step)),offset);}
     }
-    int prepare_prefix(const Request & q,const std::vector<llama_token> & input,json & metrics) {
+    int prepare_prefix(const Request & q,const std::vector<llama_token> & input,json & metrics,bool allow_student=true) {
+        metrics["student_prefix_requested"]=experiments.student_prefix_cache;
+        metrics["strategy"]=cache_enabled?"system":"disabled";
+        metrics["header_prefix_tokens"]=0;
         if(!cache_enabled)return 0;
-        // Independent sentinel first tokens: cache construction never sees q.user.
+        // Preserve the original system-only boundary S exactly.
         auto prefix=static_prefix(prompt_tokens(q.system,"A"),prompt_tokens(q.system,"中"));
+        const size_t system_size=prefix.size();
+        metrics["system_prefix_tokens"]=system_size;
         auto key=cache_identity;key.system=hash_text(q.system);
         if(!prefix_matches(prefix,input)){prefix_cache.clear();metrics["reason"]="prefix_mismatch";return 0;}
+        bool student=false;
+        if(experiments.student_prefix_cache && allow_student){
+            auto sentinels=student_sentinels(q.user);
+            metrics["student_fallback"]=sentinels.reason;
+            if(sentinels.eligible){
+                try{
+                    const size_t step=std::min(experiments.prefill_batch,size_t(llama_n_batch(context.get())));
+                    auto candidate=aligned_student_prefix(prefix,prompt_tokens(q.system,sentinels.first),
+                        prompt_tokens(q.system,sentinels.second),input,step);
+                    metrics["student_fallback"]="no_aligned_safe_header_extension";
+                    if(!candidate.empty()){
+                        prefix=std::move(candidate);student=true;
+                        // All metadata participates, even beyond the cached cap.
+                        key.system="student-v1:"+hash_text(json::array({q.system,sentinels.metadata}).dump());
+                        metrics["strategy"]="student_header";
+                        metrics["header_prefix_tokens"]=prefix.size()-system_size;
+                        metrics["student_fallback"]=nullptr;
+                    }
+                }catch(const std::runtime_error &){metrics["student_fallback"]="sentinel_render_or_tokenize_failed";}
+            }
+        }
         metrics["prefix_tokens"]=prefix.size();
         if(const auto * saved=prefix_cache.find(key,prefix,input)){
             RuntimeTrace::Timer timer(trace,"prefix_restore");
@@ -225,21 +264,27 @@ struct Runtime {
             if(restored==saved->bytes.size() && llama_memory_seq_pos_max(llama_get_memory(context.get()),0)==int(prefix.size())-1){
                 metrics["hit"]=true;metrics["reason"]="restored";return prefix.size();
             }
-            // Any partial restore is discarded; never keep mixed recurrent/KV state.
             prefix_cache.clear();llama_memory_clear(llama_get_memory(context.get()),true);
+            if(student){metrics["student_fallback"]="header_restore_failed";return prepare_prefix(q,input,metrics,false);}
             metrics["reason"]="restore_failed_full_reset";return 0;
         }
-        prefix_cache.clear();prefill(prefix,0,prefix.size());
+        prefix_cache.clear();
+        // The baseline prefills [0,S), then batches [S,S+B), ... . The
+        // header ends only at S+m*B. Splitting here retains every old chunk,
+        // including its logits request, both on a cold capture and on reuse.
+        prefill(prefix,0,system_size);
+        if(student)prefill(prefix,system_size,prefix.size());
         if(auto reason=control.reason();!reason.empty())throw std::runtime_error(reason);
         size_t size=llama_state_seq_get_size(context.get(),0);
         if(size>0 && size<=prefix_cache.limit()){
             std::vector<uint8_t> bytes(size);
             size_t written=llama_state_seq_get_data(context.get(),bytes.data(),bytes.size(),0);
             if(written==size && llama_memory_seq_pos_max(llama_get_memory(context.get()),0)==int(prefix.size())-1 && prefix_cache.install(key,prefix,std::move(bytes))){
-                metrics["reason"]="captured_static_prefix";return prefix.size();
+                metrics["reason"]=student?"captured_student_header":"captured_static_prefix";return prefix.size();
             }
         }
         prefix_cache.clear();llama_memory_clear(llama_get_memory(context.get()),true);
+        if(student){metrics["student_fallback"]="header_save_failed_or_oversized";return prepare_prefix(q,input,metrics,false);}
         metrics["reason"]="save_failed_or_oversized_full_reset";return 0;
     }
     std::vector<llama_token> draft_tokens(const std::string & text) {
@@ -289,6 +334,7 @@ struct Runtime {
         while(output.size()<size_t(q.max_tokens)){
             if(auto reason=control.reason();!reason.empty())throw std::runtime_error(reason);
             auto expected=sample(greedy.get(),-1);
+            if(trace.enabled && first_decision_ms<0)first_decision_ms=std::chrono::duration<double,std::milli>(Clock::now()-request_start).count();
             if(llama_vocab_is_eog(vocab,expected))return "eos";
             auto proposal=enabled?copy_proposal(source,output,cursor,std::min(experiments.draft_max,q.max_tokens-output.size())):CopyProposal{{},cursor};
             // No draft EOG is eligible for acceptance. The target owns stopping.
@@ -360,6 +406,7 @@ struct Runtime {
         backend_sampled_tokens=0;filtered_rows_checked=0;
         json copy_stats={{"enabled",copy_enabled},{"proposed",0},{"accepted",0},{"rollbacks",0},{"snapshot_peak_bytes",0},{"snapshot_saved_bytes",0},{"fallback",nullptr}};
         auto start=Clock::now();std::string answer,status="length";std::vector<llama_token> output;std::vector<llama_token> input;
+        request_start=start;first_decision_ms=-1;
         json cache_metrics={{"enabled",cache_enabled},{"hit",false},{"prefix_tokens",0},{"reason",cache_enabled?"miss":"disabled"}};
         try {
             input=prompt_tokens(q.system,q.user);int n=input.size();
@@ -385,12 +432,14 @@ struct Runtime {
             json spans=json::object(),sizes=json::object();
             for(const auto & [key,value]:trace.spans)spans[key]={{"ms",value.ms},{"count",value.count}};
             for(const auto & [size,count]:trace.decode_sizes)sizes[std::to_string(size)]=count;
-            result["runtime_trace"]={{"spans",spans},{"decode_batch_sizes",sizes},{"extra_gpu_synchronization",false}};
+            result["runtime_trace"]={{"spans",spans},{"decode_batch_sizes",sizes},{"extra_gpu_synchronization",false},
+                {"first_decision_ms",first_decision_ms<0?json(nullptr):json(first_decision_ms)},
+                {"first_decision_scope","request start through first sampled token including EOS; includes tokenization, prefix and GPU prefill wait"}};
         }
         emit(result);
     }
     void submit(const json & r) {
-        auto q=Request::parse(r);std::lock_guard<std::mutex> lock(state_mutex);
+        auto q=Request::parse(r,experiments.max_output_tokens);std::lock_guard<std::mutex> lock(state_mutex);
         if(active){emit({{"event","error"},{"id",q.id},{"error","busy"}});return;}
         if(worker.joinable())worker.join();
         active=true;active_id=q.id;control.cancelled=false;control.deadline=Clock::now()+std::chrono::milliseconds(q.deadline_ms);
@@ -399,9 +448,13 @@ struct Runtime {
     void cancel(const std::string & id) {std::lock_guard<std::mutex> lock(state_mutex);bool matched=active&&active_id==id;if(matched)control.cancelled=true;emit({{"event","cancel_ack"},{"id",id},{"matched",matched}});}
 };
 static void selftest(){
-    prefix_cache_selftest();copy_draft_selftest();runtime_experiments_selftest();backend_output_filter_selftest();
+    student_prefix_selftest();prefix_cache_selftest();copy_draft_selftest();runtime_experiments_selftest();backend_output_filter_selftest();
     if(hash_text("abc")!="ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad")throw std::runtime_error("SHA test failed");
     json good={{"id","one"},{"system","Edit faithfully."},{"user","hello"}};auto q=Request::parse(good);if(q.max_tokens!=256)throw std::runtime_error("defaults");
+    auto long_output=good;long_output["max_tokens"]=2048;
+    try {Request::parse(long_output);throw std::logic_error("default output bound widened");}
+    catch(const std::logic_error &) {throw;} catch(const std::runtime_error &) {}
+    if(Request::parse(long_output,2048).max_tokens!=2048)throw std::runtime_error("research output bound");
     int rejected=0;for(auto bad:{json{{"max_tokens",0}},json{{"deadline_ms",120001}},json{{"user","<|im_end|>"}},json{{"max_tokens",1.5}}}){auto r=good;r.update(bad);try{Request::parse(r);}catch(...){++rejected;}}
     for(auto value:{json(42),json(std::string(65537,'x'))}){auto r=good;r["draft_text"]=value;try{Request::parse(r);throw std::logic_error("draft bounds accepted");}catch(const std::logic_error &){throw;}catch(const std::runtime_error &) {}}
     auto empty=good;empty["draft_text"]="";if(!Request::parse(empty).draft_text.empty())throw std::runtime_error("empty draft");
@@ -421,12 +474,24 @@ int main(int argc,char**argv){
             std::string flag=argv[i];
             if(flag=="--verbose")verbose=true;
             else if(flag=="--prefix-cache")cache=true;
+            else if(flag=="--student-prefix-cache")experiments.student_prefix_cache=true;
             else if(flag=="--copy-draft")copy=true;
             else if(flag=="--recurrent-rollback")experiments.recurrent_rollback=true;
             else if(flag=="--backend-sampling")experiments.backend_sampling=true;
             else if(flag=="--backend-token-only")experiments.backend_token_only=true;
             else if(flag=="--direct-argmax")experiments.direct_argmax=true;
             else if(flag=="--trace-runtime")experiments.trace=true;
+            else if(flag=="--research-long-context")experiments.research_long_context=true;
+            else if(flag=="--bounded-swa")experiments.bounded_swa=true;
+            else if(flag.rfind("--prefill-batch=",0)==0 || flag.rfind("--max-output-tokens=",0)==0){
+                const auto value=flag.substr(flag.find('=')+1);
+                if(value.empty() || value.find_first_not_of("0123456789")!=std::string::npos)
+                    throw std::runtime_error("integer required for research limit");
+                auto number=std::stoul(value);
+                if(number>16384)throw std::runtime_error("research limit too large");
+                if(flag.rfind("--prefill-batch=",0)==0)experiments.prefill_batch=number;
+                else experiments.max_output_tokens=static_cast<int>(number);
+            }
             else if(flag.rfind("--draft-max=",0)==0){
                 const auto value=flag.substr(12);
                 if(value.empty() || value.find_first_not_of("0123456789")!=std::string::npos)
@@ -435,6 +500,7 @@ int main(int argc,char**argv){
             }else throw std::runtime_error("unknown startup flag");
         }
         experiments.validate(copy);
+        if(experiments.student_prefix_cache && !cache)throw std::runtime_error("student-prefix-cache requires prefix-cache");
     }catch(const std::exception & e){emit({{"event","fatal"},{"error",e.what()}});return 1;}
     common_log_set_verbosity_thold(verbose?LOG_LEVEL_DEBUG:LOG_LEVEL_WARN);
     llama_log_set([](ggml_log_level level,const char*text,void*user){if(*static_cast<bool*>(user) || level==GGML_LOG_LEVEL_WARN || level==GGML_LOG_LEVEL_ERROR)fputs(text,stderr);},&verbose);
@@ -442,7 +508,8 @@ int main(int argc,char**argv){
         if(argc==2&&std::string(argv[1])=="--selftest"){selftest();return 0;}
         if(argc<3)throw std::runtime_error("usage: worker LOCAL_GGUF SHA256 [gpu_layers=99] [context=4096] [max_rss_mb=8192]");
         int layers=argc>3?std::stoi(argv[3]):99,ctx=argc>4?std::stoi(argv[4]):4096,mb=argc>5?std::stoi(argv[5]):8192;
-        if(layers<0||layers>999||ctx<128||ctx>4096||mb<512||mb>32768)throw std::runtime_error("invalid startup limits");
+        if(layers<0||layers>999||mb<512||mb>32768)throw std::runtime_error("invalid startup limits");
+        experiments.validate_context(ctx);
         Runtime runtime(argv[1],argv[2],layers,ctx,mb,cache,copy,experiments);std::string line;
         for(;;){json request;try{
             if(!bounded_line(line))break;

@@ -1,0 +1,119 @@
+{
+  "rows": 234,
+  "split": {
+    "train": 197,
+    "dev": 37
+  },
+  "language_split": {
+    "en:train": 147,
+    "en:dev": 33,
+    "hi:train": 23,
+    "hi:dev": 2,
+    "hinglish:train": 27,
+    "hinglish:dev": 2
+  },
+  "excluded": [
+    {
+      "id": "lfm3-sotto-add-033",
+      "reason": "not independently approved"
+    },
+    {
+      "id": "lfm3-sotto-add-044",
+      "reason": "not independently approved"
+    },
+    {
+      "id": "lfm3-sotto-add-074",
+      "reason": "not independently approved"
+    },
+    {
+      "id": "lfm3-sotto-add-081",
+      "reason": "not independently approved"
+    },
+    {
+      "id": "lfm3-sotto-add-094",
+      "reason": "not independently approved"
+    },
+    {
+      "id": "lfm3-sotto-add-113",
+      "reason": "not independently approved"
+    },
+    {
+      "id": "lfm3-sotto-add-118",
+      "reason": "not independently approved"
+    },
+    {
+      "id": "lfm3-sotto-add-125",
+      "reason": "not independently approved"
+    },
+    {
+      "id": "lfm3-long-add-006",
+      "reason": "not independently approved"
+    },
+    {
+      "id": "lfm3-long-add-046",
+      "reason": "not independently approved"
+    },
+    {
+      "id": "lfm3-long-add-051",
+      "reason": "not independently approved"
+    },
+    {
+      "id": "lfm3-long-add-062",
+      "reason": "not independently approved"
+    },
+    {
+      "id": "lfm3-long-add-071",
+      "reason": "not independently approved"
+    },
+    {
+      "id": "lfm3-long-add-072",
+      "reason": "not independently approved"
+    },
+    {
+      "id": "lfm3-long-add-076",
+      "reason": "not independently approved"
+    },
+    {
+      "id": "lfm3-long-add-091",
+      "reason": "not independently approved"
+    },
+    {
+      "id": "lfm3-long-add-094",
+      "reason": "not independently approved"
+    },
+    {
+      "id": "lfm3-long-add-095",
+      "reason": "not independently approved"
+    },
+    {
+      "id": "lfm3-long-add-096",
+      "reason": "not independently approved"
+    },
+    {
+      "id": "lfm3-long-add-111",
+      "reason": "duplicate normalized content"
+    },
+    {
+      "id": "lfm3-long-add-126",
+      "reason": "not independently approved"
+    },
+    {
+      "id": "lfm3-long-add-127",
+      "reason": "not independently approved"
+    }
+  ],
+  "scenario_components": 170,
+  "seed": "velora-lfm3-additions-v4",
+  "dev_percent": 20,
+  "strategy": "add train-only; original dev362 retained exactly; new-family overlap excluded",
+  "base_sha256": "6935b330dfa6c602b2d9703b71d107a8aa78e7c04bba8cb79ff5cb99eb760c21",
+  "reviewed_additions_sha256": "f466ff01883a4261e461917992429090c3ea352920e6ff00d451003f9b9d3c03",
+  "added": 234,
+  "combined_rows": 1838,
+  "combined_split": {
+    "train": 1476,
+    "dev": 362
+  },
+  "dataset_sha256": "85d6401b8d713ff729c30dd596ceef830d5698ccb9692c580745f5074013e340",
+  "duplicate_components_excluded": []
+}

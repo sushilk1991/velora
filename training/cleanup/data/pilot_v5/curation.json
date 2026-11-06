@@ -1,0 +1,4570 @@
+{
+  "seed": "velora-public-lfm3-v5-20261107",
+  "dev_percent": 20,
+  "original_rows_preserved": true,
+  "base_excluded": [],
+  "addition_excluded": [
+    {
+      "id": "lfm3-final-sotto-043",
+      "reason": "duplicate normalized content"
+    },
+    {
+      "id": "lfm3-final-syn-148",
+      "reason": "not independently approved"
+    },
+    {
+      "id": "lfm3-final-syn-236",
+      "reason": "not independently approved"
+    },
+    {
+      "id": "lfm3-final-syn-252",
+      "reason": "duplicate normalized content"
+    },
+    {
+      "id": "lfm3-final-syn-129",
+      "reason": "component contains exact duplicate of base"
+    },
+    {
+      "id": "lfm3-final-syn-161",
+      "reason": "component contains exact duplicate of base"
+    }
+  ],
+  "addition_curation": {
+    "rows": 380,
+    "split": {
+      "dev": 55,
+      "train": 325
+    },
+    "language_split": {
+      "en:dev": 37,
+      "en:train": 220,
+      "hi:train": 54,
+      "hi:dev": 7,
+      "hinglish:train": 51,
+      "hinglish:dev": 11
+    },
+    "excluded": [
+      {
+        "id": "lfm3-final-sotto-043",
+        "reason": "duplicate normalized content"
+      },
+      {
+        "id": "lfm3-final-syn-148",
+        "reason": "not independently approved"
+      },
+      {
+        "id": "lfm3-final-syn-236",
+        "reason": "not independently approved"
+      },
+      {
+        "id": "lfm3-final-syn-252",
+        "reason": "duplicate normalized content"
+      }
+    ],
+    "scenario_components": 273,
+    "seed": "velora-public-lfm3-v5-20261107",
+    "dev_percent": 20
+  },
+  "component_decisions": [
+    {
+      "component": "v5-add-component-lfm3-final-sotto-001",
+      "ids": [
+        "lfm3-final-sotto-001"
+      ],
+      "original_scenario_groups": [
+        "nat-sotto-001"
+      ],
+      "touched_original_splits": [],
+      "split": "dev",
+      "decision": "seeded component assignment"
+    },
+    {
+      "component": "v5-add-component-lfm3-final-sotto-002",
+      "ids": [
+        "lfm3-final-sotto-002"
+      ],
+      "original_scenario_groups": [
+        "nat-sotto-002"
+      ],
+      "touched_original_splits": [],
+      "split": "train",
+      "decision": "seeded component assignment"
+    },
+    {
+      "component": "v5-add-component-lfm3-final-sotto-003",
+      "ids": [
+        "lfm3-final-sotto-003"
+      ],
+      "original_scenario_groups": [
+        "nat-sotto-003"
+      ],
+      "touched_original_splits": [],
+      "split": "train",
+      "decision": "seeded component assignment"
+    },
+    {
+      "component": "v5-add-component-lfm3-final-sotto-004",
+      "ids": [
+        "lfm3-final-sotto-004"
+      ],
+      "original_scenario_groups": [
+        "nat-sotto-004"
+      ],
+      "touched_original_splits": [],
+      "split": "train",
+      "decision": "seeded component assignment"
+    },
+    {
+      "component": "v5-add-component-lfm3-final-sotto-005",
+      "ids": [
+        "lfm3-final-sotto-005"
+      ],
+      "original_scenario_groups": [
+        "nat-sotto-005"
+      ],
+      "touched_original_splits": [],
+      "split": "train",
+      "decision": "seeded component assignment"
+    },
+    {
+      "component": "v5-add-component-lfm3-final-sotto-006",
+      "ids": [
+        "lfm3-final-sotto-006"
+      ],
+      "original_scenario_groups": [
+        "nat-sotto-006"
+      ],
+      "touched_original_splits": [],
+      "split": "dev",
+      "decision": "seeded component assignment"
+    },
+    {
+      "component": "v5-add-component-lfm3-final-sotto-007",
+      "ids": [
+        "lfm3-final-sotto-007"
+      ],
+      "original_scenario_groups": [
+        "nat-sotto-007"
+      ],
+      "touched_original_splits": [],
+      "split": "dev",
+      "decision": "seeded component assignment"
+    },
+    {
+      "component": "v5-add-component-lfm3-final-sotto-008",
+      "ids": [
+        "lfm3-final-sotto-008"
+      ],
+      "original_scenario_groups": [
+        "nat-sotto-008"
+      ],
+      "touched_original_splits": [],
+      "split": "train",
+      "decision": "seeded component assignment"
+    },
+    {
+      "component": "v5-add-component-lfm3-final-sotto-009",
+      "ids": [
+        "lfm3-final-sotto-009"
+      ],
+      "original_scenario_groups": [
+        "nat-sotto-009"
+      ],
+      "touched_original_splits": [],
+      "split": "dev",
+      "decision": "seeded component assignment"
+    },
+    {
+      "component": "v5-add-component-lfm3-final-sotto-010",
+      "ids": [
+        "lfm3-final-sotto-010"
+      ],
+      "original_scenario_groups": [
+        "nat-sotto-010"
+      ],
+      "touched_original_splits": [],
+      "split": "train",
+      "decision": "seeded component assignment"
+    },
+    {
+      "component": "v5-add-component-lfm3-final-sotto-011",
+      "ids": [
+        "lfm3-final-sotto-011"
+      ],
+      "original_scenario_groups": [
+        "nat-sotto-011"
+      ],
+      "touched_original_splits": [],
+      "split": "train",
+      "decision": "seeded component assignment"
+    },
+    {
+      "component": "v5-add-component-lfm3-final-sotto-012",
+      "ids": [
+        "lfm3-final-sotto-012"
+      ],
+      "original_scenario_groups": [
+        "nat-sotto-012"
+      ],
+      "touched_original_splits": [],
+      "split": "train",
+      "decision": "seeded component assignment"
+    },
+    {
+      "component": "v5-add-component-lfm3-final-sotto-013",
+      "ids": [
+        "lfm3-final-sotto-013"
+      ],
+      "original_scenario_groups": [
+        "nat-sotto-013"
+      ],
+      "touched_original_splits": [],
+      "split": "train",
+      "decision": "seeded component assignment"
+    },
+    {
+      "component": "v5-add-component-lfm3-final-sotto-014",
+      "ids": [
+        "lfm3-final-sotto-014"
+      ],
+      "original_scenario_groups": [
+        "nat-sotto-014"
+      ],
+      "touched_original_splits": [],
+      "split": "train",
+      "decision": "seeded component assignment"
+    },
+    {
+      "component": "v5-add-component-lfm3-final-sotto-015",
+      "ids": [
+        "lfm3-final-sotto-015"
+      ],
+      "original_scenario_groups": [
+        "nat-sotto-015"
+      ],
+      "touched_original_splits": [],
+      "split": "train",
+      "decision": "seeded component assignment"
+    },
+    {
+      "component": "v5-add-component-lfm3-final-sotto-016",
+      "ids": [
+        "lfm3-final-sotto-016"
+      ],
+      "original_scenario_groups": [
+        "nat-sotto-016"
+      ],
+      "touched_original_splits": [],
+      "split": "train",
+      "decision": "seeded component assignment"
+    },
+    {
+      "component": "v5-add-component-lfm3-final-sotto-017",
+      "ids": [
+        "lfm3-final-sotto-017"
+      ],
+      "original_scenario_groups": [
+        "nat-sotto-017"
+      ],
+      "touched_original_splits": [],
+      "split": "train",
+      "decision": "seeded component assignment"
+    },
+    {
+      "component": "v5-add-component-lfm3-final-sotto-018",
+      "ids": [
+        "lfm3-final-sotto-018"
+      ],
+      "original_scenario_groups": [
+        "nat-sotto-018"
+      ],
+      "touched_original_splits": [],
+      "split": "dev",
+      "decision": "seeded component assignment"
+    },
+    {
+      "component": "v5-add-component-lfm3-final-sotto-019",
+      "ids": [
+        "lfm3-final-sotto-019"
+      ],
+      "original_scenario_groups": [
+        "nat-sotto-019"
+      ],
+      "touched_original_splits": [],
+      "split": "dev",
+      "decision": "seeded component assignment"
+    },
+    {
+      "component": "v5-add-component-lfm3-final-sotto-020",
+      "ids": [
+        "lfm3-final-sotto-020"
+      ],
+      "original_scenario_groups": [
+        "nat-sotto-020"
+      ],
+      "touched_original_splits": [],
+      "split": "train",
+      "decision": "seeded component assignment"
+    },
+    {
+      "component": "v5-add-component-lfm3-final-sotto-021",
+      "ids": [
+        "lfm3-final-sotto-021"
+      ],
+      "original_scenario_groups": [
+        "nat-sotto-021"
+      ],
+      "touched_original_splits": [],
+      "split": "train",
+      "decision": "seeded component assignment"
+    },
+    {
+      "component": "v5-add-component-lfm3-final-sotto-022",
+      "ids": [
+        "lfm3-final-sotto-022"
+      ],
+      "original_scenario_groups": [
+        "nat-sotto-022"
+      ],
+      "touched_original_splits": [],
+      "split": "train",
+      "decision": "seeded component assignment"
+    },
+    {
+      "component": "v5-add-component-lfm3-final-sotto-023",
+      "ids": [
+        "lfm3-final-sotto-023"
+      ],
+      "original_scenario_groups": [
+        "nat-sotto-023"
+      ],
+      "touched_original_splits": [],
+      "split": "train",
+      "decision": "seeded component assignment"
+    },
+    {
+      "component": "v5-add-component-lfm3-final-sotto-024",
+      "ids": [
+        "lfm3-final-sotto-024"
+      ],
+      "original_scenario_groups": [
+        "nat-sotto-024"
+      ],
+      "touched_original_splits": [],
+      "split": "train",
+      "decision": "seeded component assignment"
+    },
+    {
+      "component": "v5-add-component-lfm3-final-sotto-025",
+      "ids": [
+        "lfm3-final-sotto-025"
+      ],
+      "original_scenario_groups": [
+        "nat-sotto-025"
+      ],
+      "touched_original_splits": [],
+      "split": "train",
+      "decision": "seeded component assignment"
+    },
+    {
+      "component": "v5-add-component-lfm3-final-sotto-026",
+      "ids": [
+        "lfm3-final-sotto-026"
+      ],
+      "original_scenario_groups": [
+        "nat-sotto-026"
+      ],
+      "touched_original_splits": [],
+      "split": "train",
+      "decision": "seeded component assignment"
+    },
+    {
+      "component": "v5-add-component-lfm3-final-sotto-027",
+      "ids": [
+        "lfm3-final-sotto-027"
+      ],
+      "original_scenario_groups": [
+        "nat-sotto-027"
+      ],
+      "touched_original_splits": [],
+      "split": "train",
+      "decision": "seeded component assignment"
+    },
+    {
+      "component": "v5-add-component-lfm3-final-sotto-028",
+      "ids": [
+        "lfm3-final-sotto-028"
+      ],
+      "original_scenario_groups": [
+        "nat-sotto-028"
+      ],
+      "touched_original_splits": [],
+      "split": "dev",
+      "decision": "seeded component assignment"
+    },
+    {
+      "component": "v5-add-component-lfm3-final-sotto-029",
+      "ids": [
+        "lfm3-final-sotto-029"
+      ],
+      "original_scenario_groups": [
+        "nat-sotto-029"
+      ],
+      "touched_original_splits": [],
+      "split": "train",
+      "decision": "seeded component assignment"
+    },
+    {
+      "component": "v5-add-component-lfm3-final-sotto-030",
+      "ids": [
+        "lfm3-final-sotto-030"
+      ],
+      "original_scenario_groups": [
+        "nat-sotto-030"
+      ],
+      "touched_original_splits": [],
+      "split": "train",
+      "decision": "seeded component assignment"
+    },
+    {
+      "component": "v5-add-component-lfm3-final-sotto-031",
+      "ids": [
+        "lfm3-final-sotto-031"
+      ],
+      "original_scenario_groups": [
+        "nat-sotto-031"
+      ],
+      "touched_original_splits": [],
+      "split": "train",
+      "decision": "seeded component assignment"
+    },
+    {
+      "component": "v5-add-component-lfm3-final-sotto-032",
+      "ids": [
+        "lfm3-final-sotto-032"
+      ],
+      "original_scenario_groups": [
+        "nat-sotto-032"
+      ],
+      "touched_original_splits": [],
+      "split": "train",
+      "decision": "seeded component assignment"
+    },
+    {
+      "component": "v5-add-component-lfm3-final-sotto-033",
+      "ids": [
+        "lfm3-final-sotto-033"
+      ],
+      "original_scenario_groups": [
+        "nat-sotto-033"
+      ],
+      "touched_original_splits": [],
+      "split": "train",
+      "decision": "seeded component assignment"
+    },
+    {
+      "component": "v5-add-component-lfm3-final-sotto-034",
+      "ids": [
+        "lfm3-final-sotto-034"
+      ],
+      "original_scenario_groups": [
+        "nat-sotto-034"
+      ],
+      "touched_original_splits": [],
+      "split": "train",
+      "decision": "seeded component assignment"
+    },
+    {
+      "component": "v5-add-component-lfm3-final-sotto-035",
+      "ids": [
+        "lfm3-final-sotto-035"
+      ],
+      "original_scenario_groups": [
+        "nat-sotto-035"
+      ],
+      "touched_original_splits": [],
+      "split": "train",
+      "decision": "seeded component assignment"
+    },
+    {
+      "component": "v5-add-component-lfm3-final-sotto-036",
+      "ids": [
+        "lfm3-final-sotto-036"
+      ],
+      "original_scenario_groups": [
+        "nat-sotto-036"
+      ],
+      "touched_original_splits": [],
+      "split": "train",
+      "decision": "seeded component assignment"
+    },
+    {
+      "component": "v5-add-component-lfm3-final-sotto-037",
+      "ids": [
+        "lfm3-final-sotto-037"
+      ],
+      "original_scenario_groups": [
+        "nat-sotto-037"
+      ],
+      "touched_original_splits": [],
+      "split": "train",
+      "decision": "seeded component assignment"
+    },
+    {
+      "component": "v5-add-component-lfm3-final-sotto-038",
+      "ids": [
+        "lfm3-final-sotto-038"
+      ],
+      "original_scenario_groups": [
+        "nat-sotto-038"
+      ],
+      "touched_original_splits": [],
+      "split": "train",
+      "decision": "seeded component assignment"
+    },
+    {
+      "component": "v5-add-component-lfm3-final-sotto-039",
+      "ids": [
+        "lfm3-final-sotto-039"
+      ],
+      "original_scenario_groups": [
+        "nat-deadline-unrealistic"
+      ],
+      "touched_original_splits": [],
+      "split": "train",
+      "decision": "seeded component assignment"
+    },
+    {
+      "component": "v5-add-component-lfm3-final-sotto-040",
+      "ids": [
+        "lfm3-final-sotto-040"
+      ],
+      "original_scenario_groups": [
+        "nat-sotto-040"
+      ],
+      "touched_original_splits": [],
+      "split": "dev",
+      "decision": "seeded component assignment"
+    },
+    {
+      "component": "v5-add-component-lfm3-final-sotto-041",
+      "ids": [
+        "lfm3-final-sotto-041"
+      ],
+      "original_scenario_groups": [
+        "nat-sotto-041"
+      ],
+      "touched_original_splits": [],
+      "split": "train",
+      "decision": "seeded component assignment"
+    },
+    {
+      "component": "v5-add-component-lfm3-final-sotto-042",
+      "ids": [
+        "lfm3-final-sotto-042"
+      ],
+      "original_scenario_groups": [
+        "nat-sotto-042"
+      ],
+      "touched_original_splits": [],
+      "split": "train",
+      "decision": "seeded component assignment"
+    },
+    {
+      "component": "v5-add-component-lfm3-final-sotto-044",
+      "ids": [
+        "lfm3-final-sotto-044"
+      ],
+      "original_scenario_groups": [
+        "nat-sotto-044"
+      ],
+      "touched_original_splits": [],
+      "split": "train",
+      "decision": "seeded component assignment"
+    },
+    {
+      "component": "v5-add-component-lfm3-final-sotto-045",
+      "ids": [
+        "lfm3-final-sotto-045"
+      ],
+      "original_scenario_groups": [
+        "nat-sotto-045"
+      ],
+      "touched_original_splits": [],
+      "split": "train",
+      "decision": "seeded component assignment"
+    },
+    {
+      "component": "v5-add-component-lfm3-final-sotto-046",
+      "ids": [
+        "lfm3-final-sotto-046"
+      ],
+      "original_scenario_groups": [
+        "nat-sotto-046"
+      ],
+      "touched_original_splits": [],
+      "split": "train",
+      "decision": "seeded component assignment"
+    },
+    {
+      "component": "v5-add-component-lfm3-final-sotto-047",
+      "ids": [
+        "lfm3-final-sotto-047"
+      ],
+      "original_scenario_groups": [
+        "nat-sotto-047"
+      ],
+      "touched_original_splits": [],
+      "split": "train",
+      "decision": "seeded component assignment"
+    },
+    {
+      "component": "v5-add-component-lfm3-final-sotto-048",
+      "ids": [
+        "lfm3-final-sotto-048"
+      ],
+      "original_scenario_groups": [
+        "nat-sotto-048"
+      ],
+      "touched_original_splits": [],
+      "split": "train",
+      "decision": "seeded component assignment"
+    },
+    {
+      "component": "v5-add-component-lfm3-final-sotto-049",
+      "ids": [
+        "lfm3-final-sotto-049"
+      ],
+      "original_scenario_groups": [
+        "nat-sotto-049"
+      ],
+      "touched_original_splits": [],
+      "split": "train",
+      "decision": "seeded component assignment"
+    },
+    {
+      "component": "v5-add-component-lfm3-final-sotto-050",
+      "ids": [
+        "lfm3-final-sotto-050"
+      ],
+      "original_scenario_groups": [
+        "nat-sotto-050"
+      ],
+      "touched_original_splits": [],
+      "split": "train",
+      "decision": "seeded component assignment"
+    },
+    {
+      "component": "v5-add-component-lfm3-final-sotto-051",
+      "ids": [
+        "lfm3-final-sotto-051"
+      ],
+      "original_scenario_groups": [
+        "nat-sotto-051"
+      ],
+      "touched_original_splits": [],
+      "split": "train",
+      "decision": "seeded component assignment"
+    },
+    {
+      "component": "v5-add-component-lfm3-final-sotto-052",
+      "ids": [
+        "lfm3-final-sotto-052"
+      ],
+      "original_scenario_groups": [
+        "nat-sotto-052"
+      ],
+      "touched_original_splits": [],
+      "split": "train",
+      "decision": "seeded component assignment"
+    },
+    {
+      "component": "v5-add-component-lfm3-final-sotto-053",
+      "ids": [
+        "lfm3-final-sotto-053"
+      ],
+      "original_scenario_groups": [
+        "nat-sotto-053"
+      ],
+      "touched_original_splits": [],
+      "split": "train",
+      "decision": "seeded component assignment"
+    },
+    {
+      "component": "v5-add-component-lfm3-final-sotto-054",
+      "ids": [
+        "lfm3-final-sotto-054"
+      ],
+      "original_scenario_groups": [
+        "nat-sotto-054"
+      ],
+      "touched_original_splits": [],
+      "split": "train",
+      "decision": "seeded component assignment"
+    },
+    {
+      "component": "v5-add-component-lfm3-final-sotto-055",
+      "ids": [
+        "lfm3-final-sotto-055"
+      ],
+      "original_scenario_groups": [
+        "nat-sotto-055"
+      ],
+      "touched_original_splits": [],
+      "split": "train",
+      "decision": "seeded component assignment"
+    },
+    {
+      "component": "v5-add-component-lfm3-final-sotto-056",
+      "ids": [
+        "lfm3-final-sotto-056"
+      ],
+      "original_scenario_groups": [
+        "nat-sotto-056"
+      ],
+      "touched_original_splits": [],
+      "split": "train",
+      "decision": "seeded component assignment"
+    },
+    {
+      "component": "v5-add-component-lfm3-final-sotto-057",
+      "ids": [
+        "lfm3-final-sotto-057"
+      ],
+      "original_scenario_groups": [
+        "nat-sotto-057"
+      ],
+      "touched_original_splits": [],
+      "split": "train",
+      "decision": "seeded component assignment"
+    },
+    {
+      "component": "v5-add-component-lfm3-final-sotto-058",
+      "ids": [
+        "lfm3-final-sotto-058"
+      ],
+      "original_scenario_groups": [
+        "nat-sotto-058"
+      ],
+      "touched_original_splits": [],
+      "split": "dev",
+      "decision": "seeded component assignment"
+    },
+    {
+      "component": "v5-add-component-lfm3-final-sotto-059",
+      "ids": [
+        "lfm3-final-sotto-059"
+      ],
+      "original_scenario_groups": [
+        "nat-sotto-059"
+      ],
+      "touched_original_splits": [],
+      "split": "dev",
+      "decision": "seeded component assignment"
+    },
+    {
+      "component": "v5-add-component-lfm3-final-sotto-060",
+      "ids": [
+        "lfm3-final-sotto-060"
+      ],
+      "original_scenario_groups": [
+        "nat-sotto-060"
+      ],
+      "touched_original_splits": [],
+      "split": "train",
+      "decision": "seeded component assignment"
+    },
+    {
+      "component": "v5-add-component-lfm3-final-sotto-061",
+      "ids": [
+        "lfm3-final-sotto-061"
+      ],
+      "original_scenario_groups": [
+        "nat-sotto-061"
+      ],
+      "touched_original_splits": [],
+      "split": "train",
+      "decision": "seeded component assignment"
+    },
+    {
+      "component": "v5-add-component-lfm3-final-sotto-062",
+      "ids": [
+        "lfm3-final-sotto-062"
+      ],
+      "original_scenario_groups": [
+        "nat-sotto-062"
+      ],
+      "touched_original_splits": [],
+      "split": "train",
+      "decision": "seeded component assignment"
+    },
+    {
+      "component": "v5-add-component-lfm3-final-sotto-063",
+      "ids": [
+        "lfm3-final-sotto-063"
+      ],
+      "original_scenario_groups": [
+        "nat-sotto-063"
+      ],
+      "touched_original_splits": [],
+      "split": "train",
+      "decision": "seeded component assignment"
+    },
+    {
+      "component": "v5-add-component-lfm3-final-sotto-064",
+      "ids": [
+        "lfm3-final-sotto-064"
+      ],
+      "original_scenario_groups": [
+        "nat-sotto-064"
+      ],
+      "touched_original_splits": [],
+      "split": "train",
+      "decision": "seeded component assignment"
+    },
+    {
+      "component": "v5-add-component-lfm3-final-sotto-065",
+      "ids": [
+        "lfm3-final-sotto-065"
+      ],
+      "original_scenario_groups": [
+        "nat-sotto-065"
+      ],
+      "touched_original_splits": [],
+      "split": "dev",
+      "decision": "seeded component assignment"
+    },
+    {
+      "component": "v5-add-component-lfm3-final-sotto-066",
+      "ids": [
+        "lfm3-final-sotto-066"
+      ],
+      "original_scenario_groups": [
+        "nat-sotto-066"
+      ],
+      "touched_original_splits": [],
+      "split": "train",
+      "decision": "seeded component assignment"
+    },
+    {
+      "component": "v5-add-component-lfm3-final-sotto-067",
+      "ids": [
+        "lfm3-final-sotto-067"
+      ],
+      "original_scenario_groups": [
+        "nat-sotto-067"
+      ],
+      "touched_original_splits": [],
+      "split": "train",
+      "decision": "seeded component assignment"
+    },
+    {
+      "component": "v5-add-component-lfm3-final-sotto-068",
+      "ids": [
+        "lfm3-final-sotto-068"
+      ],
+      "original_scenario_groups": [
+        "nat-sotto-068"
+      ],
+      "touched_original_splits": [],
+      "split": "train",
+      "decision": "seeded component assignment"
+    },
+    {
+      "component": "v5-add-component-lfm3-final-sotto-069",
+      "ids": [
+        "lfm3-final-sotto-069"
+      ],
+      "original_scenario_groups": [
+        "nat-sotto-069"
+      ],
+      "touched_original_splits": [],
+      "split": "dev",
+      "decision": "seeded component assignment"
+    },
+    {
+      "component": "v5-add-component-lfm3-final-sotto-070",
+      "ids": [
+        "lfm3-final-sotto-070"
+      ],
+      "original_scenario_groups": [
+        "nat-sotto-070"
+      ],
+      "touched_original_splits": [],
+      "split": "train",
+      "decision": "seeded component assignment"
+    },
+    {
+      "component": "v5-add-component-lfm3-final-sotto-071",
+      "ids": [
+        "lfm3-final-sotto-071"
+      ],
+      "original_scenario_groups": [
+        "nat-sotto-071"
+      ],
+      "touched_original_splits": [],
+      "split": "train",
+      "decision": "seeded component assignment"
+    },
+    {
+      "component": "v5-add-component-lfm3-final-sotto-072",
+      "ids": [
+        "lfm3-final-sotto-072"
+      ],
+      "original_scenario_groups": [
+        "nat-sotto-072"
+      ],
+      "touched_original_splits": [],
+      "split": "train",
+      "decision": "seeded component assignment"
+    },
+    {
+      "component": "v5-add-component-lfm3-final-sotto-073",
+      "ids": [
+        "lfm3-final-sotto-073"
+      ],
+      "original_scenario_groups": [
+        "nat-sotto-073"
+      ],
+      "touched_original_splits": [],
+      "split": "dev",
+      "decision": "seeded component assignment"
+    },
+    {
+      "component": "v5-add-component-lfm3-final-sotto-074",
+      "ids": [
+        "lfm3-final-sotto-074"
+      ],
+      "original_scenario_groups": [
+        "nat-sotto-074"
+      ],
+      "touched_original_splits": [],
+      "split": "train",
+      "decision": "seeded component assignment"
+    },
+    {
+      "component": "v5-add-component-lfm3-final-sotto-075",
+      "ids": [
+        "lfm3-final-sotto-075"
+      ],
+      "original_scenario_groups": [
+        "nat-sotto-075"
+      ],
+      "touched_original_splits": [],
+      "split": "train",
+      "decision": "seeded component assignment"
+    },
+    {
+      "component": "v5-add-component-lfm3-final-sotto-076",
+      "ids": [
+        "lfm3-final-sotto-076"
+      ],
+      "original_scenario_groups": [
+        "nat-sotto-076"
+      ],
+      "touched_original_splits": [],
+      "split": "train",
+      "decision": "seeded component assignment"
+    },
+    {
+      "component": "v5-add-component-lfm3-final-sotto-077",
+      "ids": [
+        "lfm3-final-sotto-077"
+      ],
+      "original_scenario_groups": [
+        "nat-sotto-077"
+      ],
+      "touched_original_splits": [],
+      "split": "train",
+      "decision": "seeded component assignment"
+    },
+    {
+      "component": "v5-add-component-lfm3-final-sotto-078",
+      "ids": [
+        "lfm3-final-sotto-078"
+      ],
+      "original_scenario_groups": [
+        "nat-sotto-078"
+      ],
+      "touched_original_splits": [],
+      "split": "train",
+      "decision": "seeded component assignment"
+    },
+    {
+      "component": "v5-add-component-lfm3-final-sotto-079",
+      "ids": [
+        "lfm3-final-sotto-079"
+      ],
+      "original_scenario_groups": [
+        "nat-sotto-079"
+      ],
+      "touched_original_splits": [],
+      "split": "train",
+      "decision": "seeded component assignment"
+    },
+    {
+      "component": "v5-add-component-lfm3-final-sotto-080",
+      "ids": [
+        "lfm3-final-sotto-080"
+      ],
+      "original_scenario_groups": [
+        "nat-sotto-080"
+      ],
+      "touched_original_splits": [],
+      "split": "train",
+      "decision": "seeded component assignment"
+    },
+    {
+      "component": "v5-add-component-lfm3-final-sotto-081",
+      "ids": [
+        "lfm3-final-sotto-081"
+      ],
+      "original_scenario_groups": [
+        "nat-sotto-081"
+      ],
+      "touched_original_splits": [],
+      "split": "train",
+      "decision": "seeded component assignment"
+    },
+    {
+      "component": "v5-add-component-lfm3-final-sotto-082",
+      "ids": [
+        "lfm3-final-sotto-082"
+      ],
+      "original_scenario_groups": [
+        "nat-sotto-082"
+      ],
+      "touched_original_splits": [],
+      "split": "train",
+      "decision": "seeded component assignment"
+    },
+    {
+      "component": "v5-add-component-lfm3-final-sotto-083",
+      "ids": [
+        "lfm3-final-sotto-083"
+      ],
+      "original_scenario_groups": [
+        "nat-sotto-083"
+      ],
+      "touched_original_splits": [],
+      "split": "train",
+      "decision": "seeded component assignment"
+    },
+    {
+      "component": "v5-add-component-lfm3-final-sotto-084",
+      "ids": [
+        "lfm3-final-sotto-084"
+      ],
+      "original_scenario_groups": [
+        "nat-sotto-084"
+      ],
+      "touched_original_splits": [],
+      "split": "train",
+      "decision": "seeded component assignment"
+    },
+    {
+      "component": "v5-add-component-lfm3-final-sotto-085",
+      "ids": [
+        "lfm3-final-sotto-085"
+      ],
+      "original_scenario_groups": [
+        "nat-sotto-085"
+      ],
+      "touched_original_splits": [],
+      "split": "dev",
+      "decision": "seeded component assignment"
+    },
+    {
+      "component": "v5-add-component-lfm3-final-sotto-086",
+      "ids": [
+        "lfm3-final-sotto-086"
+      ],
+      "original_scenario_groups": [
+        "nat-sotto-086"
+      ],
+      "touched_original_splits": [],
+      "split": "train",
+      "decision": "seeded component assignment"
+    },
+    {
+      "component": "v5-add-component-lfm3-final-sotto-087",
+      "ids": [
+        "lfm3-final-sotto-087"
+      ],
+      "original_scenario_groups": [
+        "nat-sotto-087"
+      ],
+      "touched_original_splits": [],
+      "split": "dev",
+      "decision": "seeded component assignment"
+    },
+    {
+      "component": "v5-add-component-lfm3-final-sotto-088",
+      "ids": [
+        "lfm3-final-sotto-088"
+      ],
+      "original_scenario_groups": [
+        "nat-sotto-088"
+      ],
+      "touched_original_splits": [],
+      "split": "train",
+      "decision": "seeded component assignment"
+    },
+    {
+      "component": "v5-add-component-lfm3-final-sotto-089",
+      "ids": [
+        "lfm3-final-sotto-089"
+      ],
+      "original_scenario_groups": [
+        "nat-sotto-089"
+      ],
+      "touched_original_splits": [],
+      "split": "train",
+      "decision": "seeded component assignment"
+    },
+    {
+      "component": "v5-add-component-lfm3-final-sotto-090",
+      "ids": [
+        "lfm3-final-sotto-090"
+      ],
+      "original_scenario_groups": [
+        "nat-sotto-090"
+      ],
+      "touched_original_splits": [],
+      "split": "train",
+      "decision": "seeded component assignment"
+    },
+    {
+      "component": "v5-add-component-lfm3-final-sotto-091",
+      "ids": [
+        "lfm3-final-sotto-091"
+      ],
+      "original_scenario_groups": [
+        "nat-sotto-091"
+      ],
+      "touched_original_splits": [],
+      "split": "train",
+      "decision": "seeded component assignment"
+    },
+    {
+      "component": "v5-add-component-lfm3-final-sotto-092",
+      "ids": [
+        "lfm3-final-sotto-092"
+      ],
+      "original_scenario_groups": [
+        "nat-sotto-092"
+      ],
+      "touched_original_splits": [],
+      "split": "dev",
+      "decision": "seeded component assignment"
+    },
+    {
+      "component": "v5-add-component-lfm3-final-sotto-093",
+      "ids": [
+        "lfm3-final-sotto-093"
+      ],
+      "original_scenario_groups": [
+        "nat-sotto-093"
+      ],
+      "touched_original_splits": [],
+      "split": "train",
+      "decision": "seeded component assignment"
+    },
+    {
+      "component": "v5-add-component-lfm3-final-sotto-094",
+      "ids": [
+        "lfm3-final-sotto-094"
+      ],
+      "original_scenario_groups": [
+        "nat-sotto-094"
+      ],
+      "touched_original_splits": [],
+      "split": "dev",
+      "decision": "seeded component assignment"
+    },
+    {
+      "component": "v5-add-component-lfm3-final-sotto-095",
+      "ids": [
+        "lfm3-final-sotto-095"
+      ],
+      "original_scenario_groups": [
+        "nat-sotto-095"
+      ],
+      "touched_original_splits": [],
+      "split": "train",
+      "decision": "seeded component assignment"
+    },
+    {
+      "component": "v5-add-component-lfm3-final-sotto-096",
+      "ids": [
+        "lfm3-final-sotto-096"
+      ],
+      "original_scenario_groups": [
+        "nat-sotto-096"
+      ],
+      "touched_original_splits": [],
+      "split": "train",
+      "decision": "seeded component assignment"
+    },
+    {
+      "component": "v5-add-component-lfm3-final-sotto-097",
+      "ids": [
+        "lfm3-final-sotto-097"
+      ],
+      "original_scenario_groups": [
+        "nat-sotto-097"
+      ],
+      "touched_original_splits": [],
+      "split": "train",
+      "decision": "seeded component assignment"
+    },
+    {
+      "component": "v5-add-component-lfm3-final-sotto-098",
+      "ids": [
+        "lfm3-final-sotto-098"
+      ],
+      "original_scenario_groups": [
+        "nat-sotto-098"
+      ],
+      "touched_original_splits": [],
+      "split": "train",
+      "decision": "seeded component assignment"
+    },
+    {
+      "component": "v5-add-component-lfm3-final-sotto-099",
+      "ids": [
+        "lfm3-final-sotto-099"
+      ],
+      "original_scenario_groups": [
+        "nat-sotto-099"
+      ],
+      "touched_original_splits": [],
+      "split": "train",
+      "decision": "seeded component assignment"
+    },
+    {
+      "component": "v5-add-component-lfm3-final-sotto-100",
+      "ids": [
+        "lfm3-final-sotto-100"
+      ],
+      "original_scenario_groups": [
+        "nat-sotto-100"
+      ],
+      "touched_original_splits": [],
+      "split": "train",
+      "decision": "seeded component assignment"
+    },
+    {
+      "component": "v5-add-component-lfm3-final-sotto-101",
+      "ids": [
+        "lfm3-final-sotto-101"
+      ],
+      "original_scenario_groups": [
+        "nat-sotto-101"
+      ],
+      "touched_original_splits": [],
+      "split": "train",
+      "decision": "seeded component assignment"
+    },
+    {
+      "component": "v5-add-component-lfm3-final-sotto-102",
+      "ids": [
+        "lfm3-final-sotto-102"
+      ],
+      "original_scenario_groups": [
+        "nat-sotto-102"
+      ],
+      "touched_original_splits": [],
+      "split": "train",
+      "decision": "seeded component assignment"
+    },
+    {
+      "component": "v5-add-component-lfm3-final-sotto-103",
+      "ids": [
+        "lfm3-final-sotto-103"
+      ],
+      "original_scenario_groups": [
+        "nat-sotto-103"
+      ],
+      "touched_original_splits": [],
+      "split": "train",
+      "decision": "seeded component assignment"
+    },
+    {
+      "component": "v5-add-component-lfm3-final-sotto-104",
+      "ids": [
+        "lfm3-final-sotto-104"
+      ],
+      "original_scenario_groups": [
+        "nat-sotto-104"
+      ],
+      "touched_original_splits": [],
+      "split": "train",
+      "decision": "seeded component assignment"
+    },
+    {
+      "component": "v5-add-component-lfm3-final-sotto-105",
+      "ids": [
+        "lfm3-final-sotto-105"
+      ],
+      "original_scenario_groups": [
+        "nat-sotto-105"
+      ],
+      "touched_original_splits": [],
+      "split": "train",
+      "decision": "seeded component assignment"
+    },
+    {
+      "component": "v5-add-component-lfm3-final-sotto-106",
+      "ids": [
+        "lfm3-final-sotto-106"
+      ],
+      "original_scenario_groups": [
+        "nat-sotto-106"
+      ],
+      "touched_original_splits": [],
+      "split": "train",
+      "decision": "seeded component assignment"
+    },
+    {
+      "component": "v5-add-component-lfm3-final-sotto-107",
+      "ids": [
+        "lfm3-final-sotto-107"
+      ],
+      "original_scenario_groups": [
+        "nat-sotto-107"
+      ],
+      "touched_original_splits": [],
+      "split": "train",
+      "decision": "seeded component assignment"
+    },
+    {
+      "component": "v5-add-component-lfm3-final-sotto-108",
+      "ids": [
+        "lfm3-final-sotto-108",
+        "lfm3-final-sotto-122"
+      ],
+      "original_scenario_groups": [
+        "nat-sotto-108",
+        "nat-sotto-122"
+      ],
+      "touched_original_splits": [],
+      "split": "dev",
+      "decision": "seeded component assignment"
+    },
+    {
+      "component": "v5-add-component-lfm3-final-sotto-109",
+      "ids": [
+        "lfm3-final-sotto-109"
+      ],
+      "original_scenario_groups": [
+        "nat-sotto-109"
+      ],
+      "touched_original_splits": [],
+      "split": "train",
+      "decision": "seeded component assignment"
+    },
+    {
+      "component": "v5-add-component-lfm3-final-sotto-110",
+      "ids": [
+        "lfm3-final-sotto-110"
+      ],
+      "original_scenario_groups": [
+        "nat-sotto-110"
+      ],
+      "touched_original_splits": [],
+      "split": "train",
+      "decision": "seeded component assignment"
+    },
+    {
+      "component": "v5-add-component-lfm3-final-sotto-111",
+      "ids": [
+        "lfm3-final-sotto-111"
+      ],
+      "original_scenario_groups": [
+        "nat-sotto-111"
+      ],
+      "touched_original_splits": [],
+      "split": "train",
+      "decision": "seeded component assignment"
+    },
+    {
+      "component": "v5-add-component-lfm3-final-sotto-112",
+      "ids": [
+        "lfm3-final-sotto-112"
+      ],
+      "original_scenario_groups": [
+        "nat-sotto-112"
+      ],
+      "touched_original_splits": [],
+      "split": "train",
+      "decision": "seeded component assignment"
+    },
+    {
+      "component": "v5-add-component-lfm3-final-sotto-113",
+      "ids": [
+        "lfm3-final-sotto-113"
+      ],
+      "original_scenario_groups": [
+        "nat-sotto-113"
+      ],
+      "touched_original_splits": [],
+      "split": "train",
+      "decision": "seeded component assignment"
+    },
+    {
+      "component": "v5-add-component-lfm3-final-sotto-114",
+      "ids": [
+        "lfm3-final-sotto-114"
+      ],
+      "original_scenario_groups": [
+        "nat-sotto-114"
+      ],
+      "touched_original_splits": [],
+      "split": "train",
+      "decision": "seeded component assignment"
+    },
+    {
+      "component": "v5-add-component-lfm3-final-sotto-115",
+      "ids": [
+        "lfm3-final-sotto-115"
+      ],
+      "original_scenario_groups": [
+        "nat-sotto-115"
+      ],
+      "touched_original_splits": [],
+      "split": "train",
+      "decision": "seeded component assignment"
+    },
+    {
+      "component": "v5-add-component-lfm3-final-sotto-116",
+      "ids": [
+        "lfm3-final-sotto-116"
+      ],
+      "original_scenario_groups": [
+        "nat-sotto-116"
+      ],
+      "touched_original_splits": [],
+      "split": "train",
+      "decision": "seeded component assignment"
+    },
+    {
+      "component": "v5-add-component-lfm3-final-sotto-117",
+      "ids": [
+        "lfm3-final-sotto-117"
+      ],
+      "original_scenario_groups": [
+        "nat-sotto-117"
+      ],
+      "touched_original_splits": [],
+      "split": "train",
+      "decision": "seeded component assignment"
+    },
+    {
+      "component": "v5-add-component-lfm3-final-sotto-118",
+      "ids": [
+        "lfm3-final-sotto-118"
+      ],
+      "original_scenario_groups": [
+        "nat-sotto-118"
+      ],
+      "touched_original_splits": [],
+      "split": "train",
+      "decision": "seeded component assignment"
+    },
+    {
+      "component": "v5-add-component-lfm3-final-sotto-119",
+      "ids": [
+        "lfm3-final-sotto-119"
+      ],
+      "original_scenario_groups": [
+        "nat-sotto-119"
+      ],
+      "touched_original_splits": [],
+      "split": "train",
+      "decision": "seeded component assignment"
+    },
+    {
+      "component": "v5-add-component-lfm3-final-sotto-120",
+      "ids": [
+        "lfm3-final-sotto-120"
+      ],
+      "original_scenario_groups": [
+        "nat-sotto-120"
+      ],
+      "touched_original_splits": [],
+      "split": "train",
+      "decision": "seeded component assignment"
+    },
+    {
+      "component": "v5-add-component-lfm3-final-sotto-121",
+      "ids": [
+        "lfm3-final-sotto-121"
+      ],
+      "original_scenario_groups": [
+        "nat-sotto-121"
+      ],
+      "touched_original_splits": [],
+      "split": "train",
+      "decision": "seeded component assignment"
+    },
+    {
+      "component": "v5-add-component-lfm3-final-sotto-123",
+      "ids": [
+        "lfm3-final-sotto-123"
+      ],
+      "original_scenario_groups": [
+        "nat-sotto-123"
+      ],
+      "touched_original_splits": [],
+      "split": "train",
+      "decision": "seeded component assignment"
+    },
+    {
+      "component": "v5-add-component-lfm3-final-sotto-124",
+      "ids": [
+        "lfm3-final-sotto-124"
+      ],
+      "original_scenario_groups": [
+        "nat-sotto-124"
+      ],
+      "touched_original_splits": [],
+      "split": "train",
+      "decision": "seeded component assignment"
+    },
+    {
+      "component": "v5-add-component-lfm3-final-sotto-125",
+      "ids": [
+        "lfm3-final-sotto-125"
+      ],
+      "original_scenario_groups": [
+        "nat-sotto-125"
+      ],
+      "touched_original_splits": [],
+      "split": "train",
+      "decision": "seeded component assignment"
+    },
+    {
+      "component": "v5-add-component-lfm3-final-sotto-126",
+      "ids": [
+        "lfm3-final-sotto-126"
+      ],
+      "original_scenario_groups": [
+        "nat-sotto-126"
+      ],
+      "touched_original_splits": [],
+      "split": "train",
+      "decision": "seeded component assignment"
+    },
+    {
+      "component": "v5-add-component-lfm3-final-sotto-127",
+      "ids": [
+        "lfm3-final-sotto-127"
+      ],
+      "original_scenario_groups": [
+        "nat-sotto-127"
+      ],
+      "touched_original_splits": [],
+      "split": "train",
+      "decision": "seeded component assignment"
+    },
+    {
+      "component": "v5-add-component-lfm3-final-sotto-128",
+      "ids": [
+        "lfm3-final-sotto-128"
+      ],
+      "original_scenario_groups": [
+        "nat-sotto-128"
+      ],
+      "touched_original_splits": [],
+      "split": "dev",
+      "decision": "seeded component assignment"
+    },
+    {
+      "component": "v5-add-component-lfm3-final-syn-001",
+      "ids": [
+        "lfm3-final-syn-001",
+        "lfm3-final-syn-002"
+      ],
+      "original_scenario_groups": [
+        "contrast-fam-01"
+      ],
+      "touched_original_splits": [],
+      "split": "train",
+      "decision": "seeded component assignment"
+    },
+    {
+      "component": "v5-add-component-lfm3-final-syn-003",
+      "ids": [
+        "lfm3-final-syn-003",
+        "lfm3-final-syn-004"
+      ],
+      "original_scenario_groups": [
+        "contrast-fam-02"
+      ],
+      "touched_original_splits": [],
+      "split": "train",
+      "decision": "seeded component assignment"
+    },
+    {
+      "component": "v5-add-component-lfm3-final-syn-005",
+      "ids": [
+        "lfm3-final-syn-005",
+        "lfm3-final-syn-006"
+      ],
+      "original_scenario_groups": [
+        "contrast-fam-03"
+      ],
+      "touched_original_splits": [],
+      "split": "train",
+      "decision": "seeded component assignment"
+    },
+    {
+      "component": "v5-add-component-lfm3-final-syn-007",
+      "ids": [
+        "lfm3-final-syn-007",
+        "lfm3-final-syn-008"
+      ],
+      "original_scenario_groups": [
+        "contrast-fam-04"
+      ],
+      "touched_original_splits": [],
+      "split": "train",
+      "decision": "seeded component assignment"
+    },
+    {
+      "component": "v5-add-component-lfm3-final-syn-009",
+      "ids": [
+        "lfm3-final-syn-009",
+        "lfm3-final-syn-010"
+      ],
+      "original_scenario_groups": [
+        "contrast-fam-05"
+      ],
+      "touched_original_splits": [],
+      "split": "train",
+      "decision": "seeded component assignment"
+    },
+    {
+      "component": "v5-add-component-lfm3-final-syn-011",
+      "ids": [
+        "lfm3-final-syn-011",
+        "lfm3-final-syn-012",
+        "lfm3-final-syn-017",
+        "lfm3-final-syn-018"
+      ],
+      "original_scenario_groups": [
+        "contrast-fam-06",
+        "contrast-fam-09"
+      ],
+      "touched_original_splits": [],
+      "split": "train",
+      "decision": "seeded component assignment"
+    },
+    {
+      "component": "v5-add-component-lfm3-final-syn-013",
+      "ids": [
+        "lfm3-final-syn-013",
+        "lfm3-final-syn-014"
+      ],
+      "original_scenario_groups": [
+        "contrast-fam-07"
+      ],
+      "touched_original_splits": [],
+      "split": "train",
+      "decision": "seeded component assignment"
+    },
+    {
+      "component": "v5-add-component-lfm3-final-syn-015",
+      "ids": [
+        "lfm3-final-syn-015",
+        "lfm3-final-syn-016"
+      ],
+      "original_scenario_groups": [
+        "contrast-fam-08"
+      ],
+      "touched_original_splits": [],
+      "split": "train",
+      "decision": "seeded component assignment"
+    },
+    {
+      "component": "v5-add-component-lfm3-final-syn-019",
+      "ids": [
+        "lfm3-final-syn-019",
+        "lfm3-final-syn-020"
+      ],
+      "original_scenario_groups": [
+        "contrast-fam-10"
+      ],
+      "touched_original_splits": [],
+      "split": "train",
+      "decision": "seeded component assignment"
+    },
+    {
+      "component": "v5-add-component-lfm3-final-syn-021",
+      "ids": [
+        "lfm3-final-syn-021",
+        "lfm3-final-syn-022"
+      ],
+      "original_scenario_groups": [
+        "contrast-fam-11"
+      ],
+      "touched_original_splits": [],
+      "split": "dev",
+      "decision": "seeded component assignment"
+    },
+    {
+      "component": "v5-add-component-lfm3-final-syn-023",
+      "ids": [
+        "lfm3-final-syn-023",
+        "lfm3-final-syn-024"
+      ],
+      "original_scenario_groups": [
+        "contrast-fam-12"
+      ],
+      "touched_original_splits": [],
+      "split": "train",
+      "decision": "seeded component assignment"
+    },
+    {
+      "component": "v5-add-component-lfm3-final-syn-025",
+      "ids": [
+        "lfm3-final-syn-025",
+        "lfm3-final-syn-026"
+      ],
+      "original_scenario_groups": [
+        "contrast-fam-13"
+      ],
+      "touched_original_splits": [],
+      "split": "train",
+      "decision": "seeded component assignment"
+    },
+    {
+      "component": "v5-add-component-lfm3-final-syn-027",
+      "ids": [
+        "lfm3-final-syn-027",
+        "lfm3-final-syn-028"
+      ],
+      "original_scenario_groups": [
+        "contrast-fam-14"
+      ],
+      "touched_original_splits": [],
+      "split": "train",
+      "decision": "seeded component assignment"
+    },
+    {
+      "component": "v5-add-component-lfm3-final-syn-029",
+      "ids": [
+        "lfm3-final-syn-029",
+        "lfm3-final-syn-030"
+      ],
+      "original_scenario_groups": [
+        "contrast-fam-15"
+      ],
+      "touched_original_splits": [],
+      "split": "train",
+      "decision": "seeded component assignment"
+    },
+    {
+      "component": "v5-add-component-lfm3-final-syn-031",
+      "ids": [
+        "lfm3-final-syn-031",
+        "lfm3-final-syn-032"
+      ],
+      "original_scenario_groups": [
+        "contrast-fam-16"
+      ],
+      "touched_original_splits": [],
+      "split": "train",
+      "decision": "seeded component assignment"
+    },
+    {
+      "component": "v5-add-component-lfm3-final-syn-033",
+      "ids": [
+        "lfm3-final-syn-033",
+        "lfm3-final-syn-034"
+      ],
+      "original_scenario_groups": [
+        "contrast-fam-17"
+      ],
+      "touched_original_splits": [],
+      "split": "train",
+      "decision": "seeded component assignment"
+    },
+    {
+      "component": "v5-add-component-lfm3-final-syn-035",
+      "ids": [
+        "lfm3-final-syn-035",
+        "lfm3-final-syn-036"
+      ],
+      "original_scenario_groups": [
+        "contrast-fam-18"
+      ],
+      "touched_original_splits": [],
+      "split": "train",
+      "decision": "seeded component assignment"
+    },
+    {
+      "component": "v5-add-component-lfm3-final-syn-037",
+      "ids": [
+        "lfm3-final-syn-037",
+        "lfm3-final-syn-038",
+        "lfm3-final-syn-061",
+        "lfm3-final-syn-062"
+      ],
+      "original_scenario_groups": [
+        "contrast-fam-19",
+        "contrast-fam-31"
+      ],
+      "touched_original_splits": [],
+      "split": "train",
+      "decision": "seeded component assignment"
+    },
+    {
+      "component": "v5-add-component-lfm3-final-syn-039",
+      "ids": [
+        "lfm3-final-syn-039",
+        "lfm3-final-syn-040"
+      ],
+      "original_scenario_groups": [
+        "contrast-fam-20"
+      ],
+      "touched_original_splits": [],
+      "split": "train",
+      "decision": "seeded component assignment"
+    },
+    {
+      "component": "v5-add-component-lfm3-final-syn-041",
+      "ids": [
+        "lfm3-final-syn-041",
+        "lfm3-final-syn-042"
+      ],
+      "original_scenario_groups": [
+        "contrast-fam-21"
+      ],
+      "touched_original_splits": [],
+      "split": "train",
+      "decision": "seeded component assignment"
+    },
+    {
+      "component": "v5-add-component-lfm3-final-syn-043",
+      "ids": [
+        "lfm3-final-syn-043",
+        "lfm3-final-syn-044"
+      ],
+      "original_scenario_groups": [
+        "contrast-fam-22"
+      ],
+      "touched_original_splits": [],
+      "split": "train",
+      "decision": "seeded component assignment"
+    },
+    {
+      "component": "v5-add-component-lfm3-final-syn-045",
+      "ids": [
+        "lfm3-final-syn-045",
+        "lfm3-final-syn-046"
+      ],
+      "original_scenario_groups": [
+        "contrast-fam-23"
+      ],
+      "touched_original_splits": [],
+      "split": "train",
+      "decision": "seeded component assignment"
+    },
+    {
+      "component": "v5-add-component-lfm3-final-syn-047",
+      "ids": [
+        "lfm3-final-syn-047",
+        "lfm3-final-syn-048"
+      ],
+      "original_scenario_groups": [
+        "contrast-fam-24"
+      ],
+      "touched_original_splits": [],
+      "split": "train",
+      "decision": "seeded component assignment"
+    },
+    {
+      "component": "v5-add-component-lfm3-final-syn-049",
+      "ids": [
+        "lfm3-final-syn-049",
+        "lfm3-final-syn-050"
+      ],
+      "original_scenario_groups": [
+        "contrast-fam-25"
+      ],
+      "touched_original_splits": [],
+      "split": "train",
+      "decision": "seeded component assignment"
+    },
+    {
+      "component": "v5-add-component-lfm3-final-syn-051",
+      "ids": [
+        "lfm3-final-syn-051",
+        "lfm3-final-syn-052"
+      ],
+      "original_scenario_groups": [
+        "contrast-fam-26"
+      ],
+      "touched_original_splits": [],
+      "split": "train",
+      "decision": "seeded component assignment"
+    },
+    {
+      "component": "v5-add-component-lfm3-final-syn-053",
+      "ids": [
+        "lfm3-final-syn-053",
+        "lfm3-final-syn-054"
+      ],
+      "original_scenario_groups": [
+        "contrast-fam-27"
+      ],
+      "touched_original_splits": [],
+      "split": "train",
+      "decision": "seeded component assignment"
+    },
+    {
+      "component": "v5-add-component-lfm3-final-syn-055",
+      "ids": [
+        "lfm3-final-syn-055",
+        "lfm3-final-syn-056"
+      ],
+      "original_scenario_groups": [
+        "contrast-fam-28"
+      ],
+      "touched_original_splits": [],
+      "split": "train",
+      "decision": "seeded component assignment"
+    },
+    {
+      "component": "v5-add-component-lfm3-final-syn-057",
+      "ids": [
+        "lfm3-final-syn-057",
+        "lfm3-final-syn-058"
+      ],
+      "original_scenario_groups": [
+        "contrast-fam-29"
+      ],
+      "touched_original_splits": [],
+      "split": "train",
+      "decision": "seeded component assignment"
+    },
+    {
+      "component": "v5-add-component-lfm3-final-syn-059",
+      "ids": [
+        "lfm3-final-syn-059",
+        "lfm3-final-syn-060"
+      ],
+      "original_scenario_groups": [
+        "contrast-fam-30"
+      ],
+      "touched_original_splits": [],
+      "split": "train",
+      "decision": "seeded component assignment"
+    },
+    {
+      "component": "v5-add-component-lfm3-final-syn-063",
+      "ids": [
+        "lfm3-final-syn-063",
+        "lfm3-final-syn-064"
+      ],
+      "original_scenario_groups": [
+        "contrast-fam-32"
+      ],
+      "touched_original_splits": [],
+      "split": "train",
+      "decision": "seeded component assignment"
+    },
+    {
+      "component": "v5-add-component-lfm3-final-syn-065",
+      "ids": [
+        "lfm3-final-syn-065",
+        "lfm3-final-syn-066"
+      ],
+      "original_scenario_groups": [
+        "contrast-fam-33"
+      ],
+      "touched_original_splits": [],
+      "split": "train",
+      "decision": "seeded component assignment"
+    },
+    {
+      "component": "v5-add-component-lfm3-final-syn-067",
+      "ids": [
+        "lfm3-final-syn-067",
+        "lfm3-final-syn-068"
+      ],
+      "original_scenario_groups": [
+        "contrast-fam-34"
+      ],
+      "touched_original_splits": [],
+      "split": "dev",
+      "decision": "seeded component assignment"
+    },
+    {
+      "component": "v5-add-component-lfm3-final-syn-069",
+      "ids": [
+        "lfm3-final-syn-069",
+        "lfm3-final-syn-070"
+      ],
+      "original_scenario_groups": [
+        "contrast-fam-35"
+      ],
+      "touched_original_splits": [],
+      "split": "dev",
+      "decision": "seeded component assignment"
+    },
+    {
+      "component": "v5-add-component-lfm3-final-syn-071",
+      "ids": [
+        "lfm3-final-syn-071",
+        "lfm3-final-syn-072"
+      ],
+      "original_scenario_groups": [
+        "contrast-fam-36"
+      ],
+      "touched_original_splits": [],
+      "split": "train",
+      "decision": "seeded component assignment"
+    },
+    {
+      "component": "v5-add-component-lfm3-final-syn-073",
+      "ids": [
+        "lfm3-final-syn-073",
+        "lfm3-final-syn-074"
+      ],
+      "original_scenario_groups": [
+        "contrast-fam-37"
+      ],
+      "touched_original_splits": [],
+      "split": "train",
+      "decision": "seeded component assignment"
+    },
+    {
+      "component": "v5-add-component-lfm3-final-syn-075",
+      "ids": [
+        "lfm3-final-syn-075",
+        "lfm3-final-syn-076"
+      ],
+      "original_scenario_groups": [
+        "contrast-fam-38"
+      ],
+      "touched_original_splits": [],
+      "split": "train",
+      "decision": "seeded component assignment"
+    },
+    {
+      "component": "v5-add-component-lfm3-final-syn-077",
+      "ids": [
+        "lfm3-final-syn-077",
+        "lfm3-final-syn-078"
+      ],
+      "original_scenario_groups": [
+        "contrast-fam-39"
+      ],
+      "touched_original_splits": [],
+      "split": "train",
+      "decision": "seeded component assignment"
+    },
+    {
+      "component": "v5-add-component-lfm3-final-syn-079",
+      "ids": [
+        "lfm3-final-syn-079",
+        "lfm3-final-syn-080"
+      ],
+      "original_scenario_groups": [
+        "contrast-fam-40"
+      ],
+      "touched_original_splits": [],
+      "split": "train",
+      "decision": "seeded component assignment"
+    },
+    {
+      "component": "v5-add-component-lfm3-final-syn-081",
+      "ids": [
+        "lfm3-final-syn-081",
+        "lfm3-final-syn-082"
+      ],
+      "original_scenario_groups": [
+        "contrast-fam-41"
+      ],
+      "touched_original_splits": [],
+      "split": "train",
+      "decision": "seeded component assignment"
+    },
+    {
+      "component": "v5-add-component-lfm3-final-syn-083",
+      "ids": [
+        "lfm3-final-syn-083",
+        "lfm3-final-syn-084"
+      ],
+      "original_scenario_groups": [
+        "contrast-fam-42"
+      ],
+      "touched_original_splits": [],
+      "split": "train",
+      "decision": "seeded component assignment"
+    },
+    {
+      "component": "v5-add-component-lfm3-final-syn-085",
+      "ids": [
+        "lfm3-final-syn-085",
+        "lfm3-final-syn-086"
+      ],
+      "original_scenario_groups": [
+        "contrast-fam-43"
+      ],
+      "touched_original_splits": [],
+      "split": "train",
+      "decision": "seeded component assignment"
+    },
+    {
+      "component": "v5-add-component-lfm3-final-syn-087",
+      "ids": [
+        "lfm3-final-syn-087",
+        "lfm3-final-syn-088"
+      ],
+      "original_scenario_groups": [
+        "contrast-fam-44"
+      ],
+      "touched_original_splits": [],
+      "split": "train",
+      "decision": "seeded component assignment"
+    },
+    {
+      "component": "v5-add-component-lfm3-final-syn-089",
+      "ids": [
+        "lfm3-final-syn-089",
+        "lfm3-final-syn-090"
+      ],
+      "original_scenario_groups": [
+        "contrast-fam-45"
+      ],
+      "touched_original_splits": [],
+      "split": "train",
+      "decision": "seeded component assignment"
+    },
+    {
+      "component": "v5-add-component-lfm3-final-syn-091",
+      "ids": [
+        "lfm3-final-syn-091",
+        "lfm3-final-syn-092"
+      ],
+      "original_scenario_groups": [
+        "contrast-fam-46"
+      ],
+      "touched_original_splits": [],
+      "split": "train",
+      "decision": "seeded component assignment"
+    },
+    {
+      "component": "v5-add-component-lfm3-final-syn-093",
+      "ids": [
+        "lfm3-final-syn-093",
+        "lfm3-final-syn-094"
+      ],
+      "original_scenario_groups": [
+        "contrast-fam-47"
+      ],
+      "touched_original_splits": [],
+      "split": "train",
+      "decision": "seeded component assignment"
+    },
+    {
+      "component": "v5-add-component-lfm3-final-syn-095",
+      "ids": [
+        "lfm3-final-syn-095",
+        "lfm3-final-syn-096"
+      ],
+      "original_scenario_groups": [
+        "contrast-fam-48"
+      ],
+      "touched_original_splits": [],
+      "split": "train",
+      "decision": "seeded component assignment"
+    },
+    {
+      "component": "v5-add-component-lfm3-final-syn-097",
+      "ids": [
+        "lfm3-final-syn-097",
+        "lfm3-final-syn-098"
+      ],
+      "original_scenario_groups": [
+        "contrast-fam-49"
+      ],
+      "touched_original_splits": [],
+      "split": "train",
+      "decision": "seeded component assignment"
+    },
+    {
+      "component": "v5-add-component-lfm3-final-syn-099",
+      "ids": [
+        "lfm3-final-syn-099",
+        "lfm3-final-syn-100"
+      ],
+      "original_scenario_groups": [
+        "contrast-fam-50"
+      ],
+      "touched_original_splits": [],
+      "split": "train",
+      "decision": "seeded component assignment"
+    },
+    {
+      "component": "v5-add-component-lfm3-final-syn-101",
+      "ids": [
+        "lfm3-final-syn-101",
+        "lfm3-final-syn-102"
+      ],
+      "original_scenario_groups": [
+        "contrast-fam-51"
+      ],
+      "touched_original_splits": [],
+      "split": "train",
+      "decision": "seeded component assignment"
+    },
+    {
+      "component": "v5-add-component-lfm3-final-syn-103",
+      "ids": [
+        "lfm3-final-syn-103",
+        "lfm3-final-syn-104"
+      ],
+      "original_scenario_groups": [
+        "contrast-fam-52"
+      ],
+      "touched_original_splits": [],
+      "split": "train",
+      "decision": "seeded component assignment"
+    },
+    {
+      "component": "v5-add-component-lfm3-final-syn-105",
+      "ids": [
+        "lfm3-final-syn-105",
+        "lfm3-final-syn-106"
+      ],
+      "original_scenario_groups": [
+        "contrast-fam-53"
+      ],
+      "touched_original_splits": [],
+      "split": "dev",
+      "decision": "seeded component assignment"
+    },
+    {
+      "component": "v5-add-component-lfm3-final-syn-107",
+      "ids": [
+        "lfm3-final-syn-107",
+        "lfm3-final-syn-108"
+      ],
+      "original_scenario_groups": [
+        "contrast-fam-54"
+      ],
+      "touched_original_splits": [],
+      "split": "train",
+      "decision": "seeded component assignment"
+    },
+    {
+      "component": "v5-add-component-lfm3-final-syn-109",
+      "ids": [
+        "lfm3-final-syn-109",
+        "lfm3-final-syn-110"
+      ],
+      "original_scenario_groups": [
+        "contrast-fam-55"
+      ],
+      "touched_original_splits": [],
+      "split": "train",
+      "decision": "seeded component assignment"
+    },
+    {
+      "component": "v5-add-component-lfm3-final-syn-111",
+      "ids": [
+        "lfm3-final-syn-111",
+        "lfm3-final-syn-112"
+      ],
+      "original_scenario_groups": [
+        "contrast-fam-56"
+      ],
+      "touched_original_splits": [],
+      "split": "train",
+      "decision": "seeded component assignment"
+    },
+    {
+      "component": "v5-add-component-lfm3-final-syn-113",
+      "ids": [
+        "lfm3-final-syn-113",
+        "lfm3-final-syn-114"
+      ],
+      "original_scenario_groups": [
+        "contrast-fam-57"
+      ],
+      "touched_original_splits": [],
+      "split": "train",
+      "decision": "seeded component assignment"
+    },
+    {
+      "component": "v5-add-component-lfm3-final-syn-115",
+      "ids": [
+        "lfm3-final-syn-115",
+        "lfm3-final-syn-116"
+      ],
+      "original_scenario_groups": [
+        "contrast-fam-58"
+      ],
+      "touched_original_splits": [],
+      "split": "dev",
+      "decision": "seeded component assignment"
+    },
+    {
+      "component": "v5-add-component-lfm3-final-syn-117",
+      "ids": [
+        "lfm3-final-syn-117",
+        "lfm3-final-syn-118"
+      ],
+      "original_scenario_groups": [
+        "contrast-fam-59"
+      ],
+      "touched_original_splits": [],
+      "split": "train",
+      "decision": "seeded component assignment"
+    },
+    {
+      "component": "v5-add-component-lfm3-final-syn-119",
+      "ids": [
+        "lfm3-final-syn-119",
+        "lfm3-final-syn-120"
+      ],
+      "original_scenario_groups": [
+        "contrast-fam-60"
+      ],
+      "touched_original_splits": [],
+      "split": "train",
+      "decision": "seeded component assignment"
+    },
+    {
+      "component": "v5-add-component-lfm3-final-syn-121",
+      "ids": [
+        "lfm3-final-syn-121",
+        "lfm3-final-syn-122"
+      ],
+      "original_scenario_groups": [
+        "contrast-fam-61"
+      ],
+      "touched_original_splits": [],
+      "split": "train",
+      "decision": "seeded component assignment"
+    },
+    {
+      "component": "v5-add-component-lfm3-final-syn-123",
+      "ids": [
+        "lfm3-final-syn-123",
+        "lfm3-final-syn-124"
+      ],
+      "original_scenario_groups": [
+        "contrast-fam-62"
+      ],
+      "touched_original_splits": [],
+      "split": "train",
+      "decision": "seeded component assignment"
+    },
+    {
+      "component": "v5-add-component-lfm3-final-syn-125",
+      "ids": [
+        "lfm3-final-syn-125",
+        "lfm3-final-syn-126"
+      ],
+      "original_scenario_groups": [
+        "contrast-fam-63"
+      ],
+      "touched_original_splits": [],
+      "split": "train",
+      "decision": "seeded component assignment"
+    },
+    {
+      "component": "v5-add-component-lfm3-final-syn-127",
+      "ids": [
+        "lfm3-final-syn-127",
+        "lfm3-final-syn-128"
+      ],
+      "original_scenario_groups": [
+        "contrast-fam-64"
+      ],
+      "touched_original_splits": [],
+      "split": "dev",
+      "decision": "seeded component assignment"
+    },
+    {
+      "component": "v5-add-component-lfm3-final-syn-129",
+      "ids": [
+        "lfm3-final-syn-129",
+        "lfm3-final-syn-161"
+      ],
+      "original_scenario_groups": [
+        "pair-sym-01"
+      ],
+      "touched_original_splits": [],
+      "split": null,
+      "decision": "component contains exact duplicate of base"
+    },
+    {
+      "component": "v5-add-component-lfm3-final-syn-130",
+      "ids": [
+        "lfm3-final-syn-130",
+        "lfm3-final-syn-162"
+      ],
+      "original_scenario_groups": [
+        "pair-sym-02"
+      ],
+      "touched_original_splits": [],
+      "split": "train",
+      "decision": "seeded component assignment"
+    },
+    {
+      "component": "v5-add-component-lfm3-final-syn-131",
+      "ids": [
+        "lfm3-final-syn-131",
+        "lfm3-final-syn-163"
+      ],
+      "original_scenario_groups": [
+        "pair-sym-03"
+      ],
+      "touched_original_splits": [],
+      "split": "dev",
+      "decision": "seeded component assignment"
+    },
+    {
+      "component": "v5-add-component-lfm3-final-syn-132",
+      "ids": [
+        "lfm3-final-syn-132",
+        "lfm3-final-syn-164"
+      ],
+      "original_scenario_groups": [
+        "pair-sym-04"
+      ],
+      "touched_original_splits": [],
+      "split": "train",
+      "decision": "seeded component assignment"
+    },
+    {
+      "component": "v5-add-component-lfm3-final-syn-133",
+      "ids": [
+        "lfm3-final-syn-133"
+      ],
+      "original_scenario_groups": [
+        "pair-sym-05"
+      ],
+      "touched_original_splits": [],
+      "split": "train",
+      "decision": "seeded component assignment"
+    },
+    {
+      "component": "v5-add-component-lfm3-final-syn-134",
+      "ids": [
+        "lfm3-final-syn-134"
+      ],
+      "original_scenario_groups": [
+        "pair-sym-06"
+      ],
+      "touched_original_splits": [],
+      "split": "train",
+      "decision": "seeded component assignment"
+    },
+    {
+      "component": "v5-add-component-lfm3-final-syn-135",
+      "ids": [
+        "lfm3-final-syn-135",
+        "lfm3-final-syn-165"
+      ],
+      "original_scenario_groups": [
+        "pair-sym-07"
+      ],
+      "touched_original_splits": [],
+      "split": "train",
+      "decision": "seeded component assignment"
+    },
+    {
+      "component": "v5-add-component-lfm3-final-syn-136",
+      "ids": [
+        "lfm3-final-syn-136",
+        "lfm3-final-syn-168"
+      ],
+      "original_scenario_groups": [
+        "pair-sym-08"
+      ],
+      "touched_original_splits": [],
+      "split": "train",
+      "decision": "seeded component assignment"
+    },
+    {
+      "component": "v5-add-component-lfm3-final-syn-137",
+      "ids": [
+        "lfm3-final-syn-137"
+      ],
+      "original_scenario_groups": [
+        "pair-sym-09"
+      ],
+      "touched_original_splits": [],
+      "split": "train",
+      "decision": "seeded component assignment"
+    },
+    {
+      "component": "v5-add-component-lfm3-final-syn-138",
+      "ids": [
+        "lfm3-final-syn-138"
+      ],
+      "original_scenario_groups": [
+        "pair-sym-10"
+      ],
+      "touched_original_splits": [],
+      "split": "train",
+      "decision": "seeded component assignment"
+    },
+    {
+      "component": "v5-add-component-lfm3-final-syn-139",
+      "ids": [
+        "lfm3-final-syn-139"
+      ],
+      "original_scenario_groups": [
+        "pair-sym-11"
+      ],
+      "touched_original_splits": [],
+      "split": "train",
+      "decision": "seeded component assignment"
+    },
+    {
+      "component": "v5-add-component-lfm3-final-syn-140",
+      "ids": [
+        "lfm3-final-syn-140"
+      ],
+      "original_scenario_groups": [
+        "pair-sym-12"
+      ],
+      "touched_original_splits": [],
+      "split": "dev",
+      "decision": "seeded component assignment"
+    },
+    {
+      "component": "v5-add-component-lfm3-final-syn-141",
+      "ids": [
+        "lfm3-final-syn-141"
+      ],
+      "original_scenario_groups": [
+        "pair-sym-13"
+      ],
+      "touched_original_splits": [],
+      "split": "train",
+      "decision": "seeded component assignment"
+    },
+    {
+      "component": "v5-add-component-lfm3-final-syn-142",
+      "ids": [
+        "lfm3-final-syn-142"
+      ],
+      "original_scenario_groups": [
+        "pair-sym-14"
+      ],
+      "touched_original_splits": [],
+      "split": "train",
+      "decision": "seeded component assignment"
+    },
+    {
+      "component": "v5-add-component-lfm3-final-syn-143",
+      "ids": [
+        "lfm3-final-syn-143"
+      ],
+      "original_scenario_groups": [
+        "pair-sym-15"
+      ],
+      "touched_original_splits": [],
+      "split": "train",
+      "decision": "seeded component assignment"
+    },
+    {
+      "component": "v5-add-component-lfm3-final-syn-144",
+      "ids": [
+        "lfm3-final-syn-144"
+      ],
+      "original_scenario_groups": [
+        "pair-sym-16"
+      ],
+      "touched_original_splits": [],
+      "split": "dev",
+      "decision": "seeded component assignment"
+    },
+    {
+      "component": "v5-add-component-lfm3-final-syn-145",
+      "ids": [
+        "lfm3-final-syn-145",
+        "lfm3-final-syn-147"
+      ],
+      "original_scenario_groups": [
+        "dense-code-terminal"
+      ],
+      "touched_original_splits": [],
+      "split": "dev",
+      "decision": "seeded component assignment"
+    },
+    {
+      "component": "v5-add-component-lfm3-final-syn-146",
+      "ids": [
+        "lfm3-final-syn-146",
+        "lfm3-final-syn-149",
+        "lfm3-final-syn-150",
+        "lfm3-final-syn-151",
+        "lfm3-final-syn-152"
+      ],
+      "original_scenario_groups": [
+        "dense-symbols-note"
+      ],
+      "touched_original_splits": [],
+      "split": "train",
+      "decision": "seeded component assignment"
+    },
+    {
+      "component": "v5-add-component-lfm3-final-syn-153",
+      "ids": [
+        "lfm3-final-syn-153"
+      ],
+      "original_scenario_groups": [
+        "pair-sym-17"
+      ],
+      "touched_original_splits": [],
+      "split": "train",
+      "decision": "seeded component assignment"
+    },
+    {
+      "component": "v5-add-component-lfm3-final-syn-154",
+      "ids": [
+        "lfm3-final-syn-154"
+      ],
+      "original_scenario_groups": [
+        "pair-sym-18"
+      ],
+      "touched_original_splits": [],
+      "split": "train",
+      "decision": "seeded component assignment"
+    },
+    {
+      "component": "v5-add-component-lfm3-final-syn-155",
+      "ids": [
+        "lfm3-final-syn-155"
+      ],
+      "original_scenario_groups": [
+        "pair-sym-19"
+      ],
+      "touched_original_splits": [],
+      "split": "train",
+      "decision": "seeded component assignment"
+    },
+    {
+      "component": "v5-add-component-lfm3-final-syn-156",
+      "ids": [
+        "lfm3-final-syn-156"
+      ],
+      "original_scenario_groups": [
+        "pair-sym-20"
+      ],
+      "touched_original_splits": [],
+      "split": "dev",
+      "decision": "seeded component assignment"
+    },
+    {
+      "component": "v5-add-component-lfm3-final-syn-157",
+      "ids": [
+        "lfm3-final-syn-157"
+      ],
+      "original_scenario_groups": [
+        "pair-sym-21"
+      ],
+      "touched_original_splits": [],
+      "split": "train",
+      "decision": "seeded component assignment"
+    },
+    {
+      "component": "v5-add-component-lfm3-final-syn-158",
+      "ids": [
+        "lfm3-final-syn-158"
+      ],
+      "original_scenario_groups": [
+        "pair-sym-22"
+      ],
+      "touched_original_splits": [],
+      "split": "train",
+      "decision": "seeded component assignment"
+    },
+    {
+      "component": "v5-add-component-lfm3-final-syn-159",
+      "ids": [
+        "lfm3-final-syn-159"
+      ],
+      "original_scenario_groups": [
+        "pair-sym-23"
+      ],
+      "touched_original_splits": [],
+      "split": "train",
+      "decision": "seeded component assignment"
+    },
+    {
+      "component": "v5-add-component-lfm3-final-syn-160",
+      "ids": [
+        "lfm3-final-syn-160"
+      ],
+      "original_scenario_groups": [
+        "pair-sym-24"
+      ],
+      "touched_original_splits": [],
+      "split": "train",
+      "decision": "seeded component assignment"
+    },
+    {
+      "component": "v5-add-component-lfm3-final-syn-166",
+      "ids": [
+        "lfm3-final-syn-166"
+      ],
+      "original_scenario_groups": [
+        "pair-sym-03b"
+      ],
+      "touched_original_splits": [],
+      "split": "train",
+      "decision": "seeded component assignment"
+    },
+    {
+      "component": "v5-add-component-lfm3-final-syn-167",
+      "ids": [
+        "lfm3-final-syn-167"
+      ],
+      "original_scenario_groups": [
+        "pair-sym-01b"
+      ],
+      "touched_original_splits": [],
+      "split": "dev",
+      "decision": "seeded component assignment"
+    },
+    {
+      "component": "v5-add-component-lfm3-final-syn-169",
+      "ids": [
+        "lfm3-final-syn-169"
+      ],
+      "original_scenario_groups": [
+        "pair-sym-08b"
+      ],
+      "touched_original_splits": [],
+      "split": "train",
+      "decision": "seeded component assignment"
+    },
+    {
+      "component": "v5-add-component-lfm3-final-syn-170",
+      "ids": [
+        "lfm3-final-syn-170"
+      ],
+      "original_scenario_groups": [
+        "pair-sym-07b"
+      ],
+      "touched_original_splits": [],
+      "split": "train",
+      "decision": "seeded component assignment"
+    },
+    {
+      "component": "v5-add-component-lfm3-final-syn-171",
+      "ids": [
+        "lfm3-final-syn-171"
+      ],
+      "original_scenario_groups": [
+        "prose-extra-01"
+      ],
+      "touched_original_splits": [],
+      "split": "train",
+      "decision": "seeded component assignment"
+    },
+    {
+      "component": "v5-add-component-lfm3-final-syn-172",
+      "ids": [
+        "lfm3-final-syn-172"
+      ],
+      "original_scenario_groups": [
+        "prose-extra-02"
+      ],
+      "touched_original_splits": [],
+      "split": "train",
+      "decision": "seeded component assignment"
+    },
+    {
+      "component": "v5-add-component-lfm3-final-syn-173",
+      "ids": [
+        "lfm3-final-syn-173"
+      ],
+      "original_scenario_groups": [
+        "prose-extra-03"
+      ],
+      "touched_original_splits": [],
+      "split": "train",
+      "decision": "seeded component assignment"
+    },
+    {
+      "component": "v5-add-component-lfm3-final-syn-174",
+      "ids": [
+        "lfm3-final-syn-174"
+      ],
+      "original_scenario_groups": [
+        "prose-extra-04"
+      ],
+      "touched_original_splits": [],
+      "split": "train",
+      "decision": "seeded component assignment"
+    },
+    {
+      "component": "v5-add-component-lfm3-final-syn-175",
+      "ids": [
+        "lfm3-final-syn-175"
+      ],
+      "original_scenario_groups": [
+        "pair-sym-14b"
+      ],
+      "touched_original_splits": [],
+      "split": "train",
+      "decision": "seeded component assignment"
+    },
+    {
+      "component": "v5-add-component-lfm3-final-syn-176",
+      "ids": [
+        "lfm3-final-syn-176"
+      ],
+      "original_scenario_groups": [
+        "pair-sym-10b"
+      ],
+      "touched_original_splits": [],
+      "split": "train",
+      "decision": "seeded component assignment"
+    },
+    {
+      "component": "v5-add-component-lfm3-final-syn-177",
+      "ids": [
+        "lfm3-final-syn-177"
+      ],
+      "original_scenario_groups": [
+        "pair-sym-11b"
+      ],
+      "touched_original_splits": [],
+      "split": "train",
+      "decision": "seeded component assignment"
+    },
+    {
+      "component": "v5-add-component-lfm3-final-syn-178",
+      "ids": [
+        "lfm3-final-syn-178"
+      ],
+      "original_scenario_groups": [
+        "pair-sym-11c"
+      ],
+      "touched_original_splits": [],
+      "split": "train",
+      "decision": "seeded component assignment"
+    },
+    {
+      "component": "v5-add-component-lfm3-final-syn-179",
+      "ids": [
+        "lfm3-final-syn-179"
+      ],
+      "original_scenario_groups": [
+        "pair-sym-12b"
+      ],
+      "touched_original_splits": [],
+      "split": "train",
+      "decision": "seeded component assignment"
+    },
+    {
+      "component": "v5-add-component-lfm3-final-syn-180",
+      "ids": [
+        "lfm3-final-syn-180"
+      ],
+      "original_scenario_groups": [
+        "dense-prose-discussion"
+      ],
+      "touched_original_splits": [],
+      "split": "train",
+      "decision": "seeded component assignment"
+    },
+    {
+      "component": "v5-add-component-lfm3-final-syn-181",
+      "ids": [
+        "lfm3-final-syn-181"
+      ],
+      "original_scenario_groups": [
+        "pair-sym-13b"
+      ],
+      "touched_original_splits": [],
+      "split": "train",
+      "decision": "seeded component assignment"
+    },
+    {
+      "component": "v5-add-component-lfm3-final-syn-182",
+      "ids": [
+        "lfm3-final-syn-182"
+      ],
+      "original_scenario_groups": [
+        "prose-extra-hi-01"
+      ],
+      "touched_original_splits": [],
+      "split": "train",
+      "decision": "seeded component assignment"
+    },
+    {
+      "component": "v5-add-component-lfm3-final-syn-183",
+      "ids": [
+        "lfm3-final-syn-183"
+      ],
+      "original_scenario_groups": [
+        "pair-sym-16b"
+      ],
+      "touched_original_splits": [],
+      "split": "train",
+      "decision": "seeded component assignment"
+    },
+    {
+      "component": "v5-add-component-lfm3-final-syn-184",
+      "ids": [
+        "lfm3-final-syn-184"
+      ],
+      "original_scenario_groups": [
+        "prose-extra-hi-02"
+      ],
+      "touched_original_splits": [],
+      "split": "dev",
+      "decision": "seeded component assignment"
+    },
+    {
+      "component": "v5-add-component-lfm3-final-syn-185",
+      "ids": [
+        "lfm3-final-syn-185"
+      ],
+      "original_scenario_groups": [
+        "prose-extra-hg-01"
+      ],
+      "touched_original_splits": [],
+      "split": "train",
+      "decision": "seeded component assignment"
+    },
+    {
+      "component": "v5-add-component-lfm3-final-syn-186",
+      "ids": [
+        "lfm3-final-syn-186"
+      ],
+      "original_scenario_groups": [
+        "pair-sym-14c"
+      ],
+      "touched_original_splits": [],
+      "split": "train",
+      "decision": "seeded component assignment"
+    },
+    {
+      "component": "v5-add-component-lfm3-final-syn-187",
+      "ids": [
+        "lfm3-final-syn-187"
+      ],
+      "original_scenario_groups": [
+        "prose-extra-hg-02"
+      ],
+      "touched_original_splits": [],
+      "split": "train",
+      "decision": "seeded component assignment"
+    },
+    {
+      "component": "v5-add-component-lfm3-final-syn-188",
+      "ids": [
+        "lfm3-final-syn-188"
+      ],
+      "original_scenario_groups": [
+        "pair-sym-23b"
+      ],
+      "touched_original_splits": [],
+      "split": "train",
+      "decision": "seeded component assignment"
+    },
+    {
+      "component": "v5-add-component-lfm3-final-syn-189",
+      "ids": [
+        "lfm3-final-syn-189"
+      ],
+      "original_scenario_groups": [
+        "prose-extra-hg-03"
+      ],
+      "touched_original_splits": [],
+      "split": "train",
+      "decision": "seeded component assignment"
+    },
+    {
+      "component": "v5-add-component-lfm3-final-syn-190",
+      "ids": [
+        "lfm3-final-syn-190"
+      ],
+      "original_scenario_groups": [
+        "pair-sym-16c"
+      ],
+      "touched_original_splits": [],
+      "split": "train",
+      "decision": "seeded component assignment"
+    },
+    {
+      "component": "v5-add-component-lfm3-final-syn-191",
+      "ids": [
+        "lfm3-final-syn-191"
+      ],
+      "original_scenario_groups": [
+        "prose-extra-hg-04"
+      ],
+      "touched_original_splits": [],
+      "split": "train",
+      "decision": "seeded component assignment"
+    },
+    {
+      "component": "v5-add-component-lfm3-final-syn-192",
+      "ids": [
+        "lfm3-final-syn-192"
+      ],
+      "original_scenario_groups": [
+        "prose-extra-hg-05"
+      ],
+      "touched_original_splits": [],
+      "split": "dev",
+      "decision": "seeded component assignment"
+    },
+    {
+      "component": "v5-add-component-lfm3-final-syn-193",
+      "ids": [
+        "lfm3-final-syn-193",
+        "lfm3-final-syn-194"
+      ],
+      "original_scenario_groups": [
+        "pair-zero-01"
+      ],
+      "touched_original_splits": [],
+      "split": "train",
+      "decision": "seeded component assignment"
+    },
+    {
+      "component": "v5-add-component-lfm3-final-syn-195",
+      "ids": [
+        "lfm3-final-syn-195",
+        "lfm3-final-syn-196"
+      ],
+      "original_scenario_groups": [
+        "pair-zero-02"
+      ],
+      "touched_original_splits": [],
+      "split": "train",
+      "decision": "seeded component assignment"
+    },
+    {
+      "component": "v5-add-component-lfm3-final-syn-197",
+      "ids": [
+        "lfm3-final-syn-197",
+        "lfm3-final-syn-198"
+      ],
+      "original_scenario_groups": [
+        "pair-zero-03"
+      ],
+      "touched_original_splits": [],
+      "split": "dev",
+      "decision": "seeded component assignment"
+    },
+    {
+      "component": "v5-add-component-lfm3-final-syn-199",
+      "ids": [
+        "lfm3-final-syn-199",
+        "lfm3-final-syn-200"
+      ],
+      "original_scenario_groups": [
+        "pair-zero-04"
+      ],
+      "touched_original_splits": [],
+      "split": "train",
+      "decision": "seeded component assignment"
+    },
+    {
+      "component": "v5-add-component-lfm3-final-syn-201",
+      "ids": [
+        "lfm3-final-syn-201",
+        "lfm3-final-syn-202"
+      ],
+      "original_scenario_groups": [
+        "pair-zero-05"
+      ],
+      "touched_original_splits": [],
+      "split": "dev",
+      "decision": "seeded component assignment"
+    },
+    {
+      "component": "v5-add-component-lfm3-final-syn-203",
+      "ids": [
+        "lfm3-final-syn-203",
+        "lfm3-final-syn-204"
+      ],
+      "original_scenario_groups": [
+        "pair-zero-06"
+      ],
+      "touched_original_splits": [],
+      "split": "dev",
+      "decision": "seeded component assignment"
+    },
+    {
+      "component": "v5-add-component-lfm3-final-syn-205",
+      "ids": [
+        "lfm3-final-syn-205",
+        "lfm3-final-syn-206",
+        "lfm3-final-syn-207",
+        "lfm3-final-syn-208",
+        "lfm3-final-syn-209",
+        "lfm3-final-syn-210",
+        "lfm3-final-syn-211",
+        "lfm3-final-syn-212"
+      ],
+      "original_scenario_groups": [
+        "dense-zero-ledger"
+      ],
+      "touched_original_splits": [],
+      "split": "train",
+      "decision": "seeded component assignment"
+    },
+    {
+      "component": "v5-add-component-lfm3-final-syn-213",
+      "ids": [
+        "lfm3-final-syn-213",
+        "lfm3-final-syn-214"
+      ],
+      "original_scenario_groups": [
+        "pair-zero-07"
+      ],
+      "touched_original_splits": [],
+      "split": "train",
+      "decision": "seeded component assignment"
+    },
+    {
+      "component": "v5-add-component-lfm3-final-syn-215",
+      "ids": [
+        "lfm3-final-syn-215",
+        "lfm3-final-syn-216"
+      ],
+      "original_scenario_groups": [
+        "pair-zero-08"
+      ],
+      "touched_original_splits": [],
+      "split": "train",
+      "decision": "seeded component assignment"
+    },
+    {
+      "component": "v5-add-component-lfm3-final-syn-217",
+      "ids": [
+        "lfm3-final-syn-217",
+        "lfm3-final-syn-218"
+      ],
+      "original_scenario_groups": [
+        "pair-vocab-01"
+      ],
+      "touched_original_splits": [],
+      "split": "train",
+      "decision": "seeded component assignment"
+    },
+    {
+      "component": "v5-add-component-lfm3-final-syn-219",
+      "ids": [
+        "lfm3-final-syn-219",
+        "lfm3-final-syn-220"
+      ],
+      "original_scenario_groups": [
+        "pair-vocab-02"
+      ],
+      "touched_original_splits": [],
+      "split": "train",
+      "decision": "seeded component assignment"
+    },
+    {
+      "component": "v5-add-component-lfm3-final-syn-221",
+      "ids": [
+        "lfm3-final-syn-221",
+        "lfm3-final-syn-222",
+        "lfm3-final-syn-223",
+        "lfm3-final-syn-224"
+      ],
+      "original_scenario_groups": [
+        "dense-vocab-names"
+      ],
+      "touched_original_splits": [],
+      "split": "dev",
+      "decision": "seeded component assignment"
+    },
+    {
+      "component": "v5-add-component-lfm3-final-syn-225",
+      "ids": [
+        "lfm3-final-syn-225",
+        "lfm3-final-syn-226"
+      ],
+      "original_scenario_groups": [
+        "pair-vocab-03"
+      ],
+      "touched_original_splits": [],
+      "split": "train",
+      "decision": "seeded component assignment"
+    },
+    {
+      "component": "v5-add-component-lfm3-final-syn-227",
+      "ids": [
+        "lfm3-final-syn-227",
+        "lfm3-final-syn-228"
+      ],
+      "original_scenario_groups": [
+        "pair-vocab-03h"
+      ],
+      "touched_original_splits": [],
+      "split": "train",
+      "decision": "seeded component assignment"
+    },
+    {
+      "component": "v5-add-component-lfm3-final-syn-229",
+      "ids": [
+        "lfm3-final-syn-229",
+        "lfm3-final-syn-230"
+      ],
+      "original_scenario_groups": [
+        "pair-vocab-03g"
+      ],
+      "touched_original_splits": [],
+      "split": "train",
+      "decision": "seeded component assignment"
+    },
+    {
+      "component": "v5-add-component-lfm3-final-syn-231",
+      "ids": [
+        "lfm3-final-syn-231",
+        "lfm3-final-syn-232"
+      ],
+      "original_scenario_groups": [
+        "pair-vocab-04"
+      ],
+      "touched_original_splits": [],
+      "split": "train",
+      "decision": "seeded component assignment"
+    },
+    {
+      "component": "v5-add-component-lfm3-final-syn-233",
+      "ids": [
+        "lfm3-final-syn-233",
+        "lfm3-final-syn-235"
+      ],
+      "original_scenario_groups": [
+        "dense-email-layout"
+      ],
+      "touched_original_splits": [],
+      "split": "train",
+      "decision": "seeded component assignment"
+    },
+    {
+      "component": "v5-add-component-lfm3-final-syn-234",
+      "ids": [
+        "lfm3-final-syn-234"
+      ],
+      "original_scenario_groups": [
+        "dense-note-layout"
+      ],
+      "touched_original_splits": [],
+      "split": "dev",
+      "decision": "seeded component assignment"
+    },
+    {
+      "component": "v5-add-component-lfm3-final-syn-237",
+      "ids": [
+        "lfm3-final-syn-237"
+      ],
+      "original_scenario_groups": [
+        "mode-layout-01"
+      ],
+      "touched_original_splits": [],
+      "split": "train",
+      "decision": "seeded component assignment"
+    },
+    {
+      "component": "v5-add-component-lfm3-final-syn-238",
+      "ids": [
+        "lfm3-final-syn-238"
+      ],
+      "original_scenario_groups": [
+        "mode-layout-02"
+      ],
+      "touched_original_splits": [],
+      "split": "train",
+      "decision": "seeded component assignment"
+    },
+    {
+      "component": "v5-add-component-lfm3-final-syn-239",
+      "ids": [
+        "lfm3-final-syn-239"
+      ],
+      "original_scenario_groups": [
+        "mode-layout-03"
+      ],
+      "touched_original_splits": [],
+      "split": "dev",
+      "decision": "seeded component assignment"
+    },
+    {
+      "component": "v5-add-component-lfm3-final-syn-240",
+      "ids": [
+        "lfm3-final-syn-240"
+      ],
+      "original_scenario_groups": [
+        "mode-layout-04"
+      ],
+      "touched_original_splits": [],
+      "split": "train",
+      "decision": "seeded component assignment"
+    },
+    {
+      "component": "v5-add-component-lfm3-final-syn-241",
+      "ids": [
+        "lfm3-final-syn-241",
+        "lfm3-final-syn-242",
+        "lfm3-final-syn-243",
+        "lfm3-final-syn-244"
+      ],
+      "original_scenario_groups": [
+        "dense-instruction-data"
+      ],
+      "touched_original_splits": [],
+      "split": "train",
+      "decision": "seeded component assignment"
+    },
+    {
+      "component": "v5-add-component-lfm3-final-syn-245",
+      "ids": [
+        "lfm3-final-syn-245"
+      ],
+      "original_scenario_groups": [
+        "instr-data-05"
+      ],
+      "touched_original_splits": [],
+      "split": "train",
+      "decision": "seeded component assignment"
+    },
+    {
+      "component": "v5-add-component-lfm3-final-syn-246",
+      "ids": [
+        "lfm3-final-syn-246"
+      ],
+      "original_scenario_groups": [
+        "instr-data-05g"
+      ],
+      "touched_original_splits": [],
+      "split": "dev",
+      "decision": "seeded component assignment"
+    },
+    {
+      "component": "v5-add-component-lfm3-final-syn-247",
+      "ids": [
+        "lfm3-final-syn-247"
+      ],
+      "original_scenario_groups": [
+        "instr-data-06"
+      ],
+      "touched_original_splits": [],
+      "split": "train",
+      "decision": "seeded component assignment"
+    },
+    {
+      "component": "v5-add-component-lfm3-final-syn-248",
+      "ids": [
+        "lfm3-final-syn-248"
+      ],
+      "original_scenario_groups": [
+        "instr-data-07"
+      ],
+      "touched_original_splits": [],
+      "split": "train",
+      "decision": "seeded component assignment"
+    },
+    {
+      "component": "v5-add-component-lfm3-final-syn-249",
+      "ids": [
+        "lfm3-final-syn-249",
+        "lfm3-final-syn-250"
+      ],
+      "original_scenario_groups": [
+        "dense-romanize"
+      ],
+      "touched_original_splits": [],
+      "split": "train",
+      "decision": "seeded component assignment"
+    },
+    {
+      "component": "v5-add-component-lfm3-final-syn-251",
+      "ids": [
+        "lfm3-final-syn-251"
+      ],
+      "original_scenario_groups": [
+        "romanize-03"
+      ],
+      "touched_original_splits": [],
+      "split": "train",
+      "decision": "seeded component assignment"
+    },
+    {
+      "component": "v5-add-component-lfm3-final-syn-253",
+      "ids": [
+        "lfm3-final-syn-253"
+      ],
+      "original_scenario_groups": [
+        "dense-misc-prose"
+      ],
+      "touched_original_splits": [],
+      "split": "train",
+      "decision": "seeded component assignment"
+    },
+    {
+      "component": "v5-add-component-lfm3-final-syn-254",
+      "ids": [
+        "lfm3-final-syn-254"
+      ],
+      "original_scenario_groups": [
+        "misc-01"
+      ],
+      "touched_original_splits": [],
+      "split": "train",
+      "decision": "seeded component assignment"
+    },
+    {
+      "component": "v5-add-component-lfm3-final-syn-255",
+      "ids": [
+        "lfm3-final-syn-255"
+      ],
+      "original_scenario_groups": [
+        "misc-01g"
+      ],
+      "touched_original_splits": [],
+      "split": "train",
+      "decision": "seeded component assignment"
+    },
+    {
+      "component": "v5-add-component-lfm3-final-syn-256",
+      "ids": [
+        "lfm3-final-syn-256"
+      ],
+      "original_scenario_groups": [
+        "misc-02g"
+      ],
+      "touched_original_splits": [],
+      "split": "train",
+      "decision": "seeded component assignment"
+    }
+  ],
+  "splits": {
+    "original": {
+      "train": 1476,
+      "dev": 362
+    },
+    "new": {
+      "dev": 55,
+      "train": 323
+    },
+    "combined": {
+      "train": 1799,
+      "dev": 417
+    }
+  },
+  "original_dev_ids": [
+    "muse-public-0006",
+    "muse-public-0011",
+    "muse-public-0012",
+    "muse-public-0022",
+    "muse-public-0023",
+    "muse-public-0033",
+    "muse-public-0034",
+    "muse-public-0038",
+    "muse-public-0040",
+    "muse-public-0059",
+    "muse-public-0060",
+    "muse-public-0063",
+    "muse-public-0072",
+    "muse-public-0075",
+    "muse-public-0077",
+    "muse-public-0078",
+    "muse-public-0091",
+    "muse-public-0092",
+    "muse-public-0095",
+    "muse-public-0098",
+    "muse-public-0102",
+    "muse-public-0104",
+    "muse-public-0106",
+    "muse-public-0131",
+    "muse-public-0139",
+    "muse-public-0140",
+    "muse-public-0150",
+    "muse-public-0151",
+    "muse-public-0152",
+    "muse-public-0164",
+    "muse-public-0166",
+    "muse-public-0167",
+    "muse-public-0169",
+    "muse-public-0175",
+    "muse-public-0176",
+    "muse-public-0179",
+    "muse-public-0190",
+    "muse-public-0192",
+    "muse-public-0200",
+    "muse-public-0209",
+    "muse-public-0211",
+    "muse-public-0216",
+    "muse-public-0219",
+    "muse-public-0227",
+    "muse-public-0245",
+    "muse-public-0255",
+    "muse-public-0256",
+    "sotto-relabel-0005",
+    "sotto-relabel-0007",
+    "sotto-relabel-0009",
+    "sotto-relabel-0015",
+    "sotto-relabel-0024",
+    "sotto-relabel-0032",
+    "sotto-relabel-0060",
+    "sotto-relabel-0070",
+    "sotto-relabel-0072",
+    "sotto-relabel-0077",
+    "sotto-relabel-0084",
+    "sotto-relabel-0086",
+    "sotto-relabel-0091",
+    "sotto-relabel-0095",
+    "sotto-relabel-0096",
+    "sotto-relabel-0103",
+    "sotto-relabel-0113",
+    "sotto-relabel-0114",
+    "sotto-relabel-0119",
+    "sotto-relabel-0127",
+    "sotto-relabel-0133",
+    "sotto-relabel-0140",
+    "sotto-relabel-0148",
+    "sotto-relabel-0163",
+    "sotto-relabel-0171",
+    "sotto-relabel-0173",
+    "sotto-relabel-0174",
+    "sotto-relabel-0176",
+    "sotto-relabel-0177",
+    "sotto-relabel-0178",
+    "sotto-relabel-0179",
+    "sotto-relabel-0190",
+    "sotto-relabel-0201",
+    "sotto-relabel-0205",
+    "sotto-relabel-0211",
+    "sotto-relabel-0214",
+    "sotto-relabel-0217",
+    "sotto-relabel-0223",
+    "sotto-relabel-0227",
+    "sotto-relabel-0229",
+    "sotto-relabel-0233",
+    "sotto-relabel-0261",
+    "sotto-relabel-0270",
+    "sotto-relabel-0274",
+    "sotto-relabel-0276",
+    "sotto-relabel-0277",
+    "sotto-relabel-0278",
+    "sotto-relabel-0286",
+    "sotto-relabel-0294",
+    "sotto-relabel-0298",
+    "sotto-relabel-0301",
+    "sotto-relabel-0302",
+    "sotto-relabel-0305",
+    "sotto-relabel-0308",
+    "sotto-relabel-0311",
+    "sotto-relabel-0319",
+    "sotto-relabel-0321",
+    "sotto-relabel-0339",
+    "sotto-relabel-0353",
+    "sotto-relabel-0358",
+    "sotto-relabel-0361",
+    "sotto-relabel-0362",
+    "sotto-relabel-0366",
+    "sotto-relabel-0368",
+    "sotto-relabel-0376",
+    "sotto-relabel-0385",
+    "sotto-relabel-0388",
+    "sotto-relabel-0398",
+    "sotto-relabel-0400",
+    "sotto-relabel-0407",
+    "sotto-relabel-0413",
+    "sotto-relabel-0415",
+    "sotto-relabel-0418",
+    "sotto-relabel-0420",
+    "sotto-relabel-0426",
+    "sotto-relabel-0427",
+    "sotto-relabel-0432",
+    "sotto-relabel-0433",
+    "sotto-relabel-0436",
+    "sotto-relabel-0438",
+    "sotto-relabel-0439",
+    "sotto-relabel-0440",
+    "sotto-relabel-0459",
+    "sotto-relabel-0466",
+    "sotto-relabel-0468",
+    "sotto-relabel-0477",
+    "sotto-relabel-0478",
+    "sotto-relabel-0492",
+    "sotto-relabel-0495",
+    "sotto-relabel-0506",
+    "sotto-relabel-0507",
+    "sotto-relabel-0512",
+    "terra-v2-b01-0003",
+    "terra-v2-b01-0006",
+    "terra-v2-b01-0009",
+    "terra-v2-b01-0022",
+    "terra-v2-b01-0023",
+    "terra-v2-b01-0033",
+    "terra-v2-b01-0041",
+    "terra-v2-b01-0042",
+    "terra-v2-b01-0044",
+    "terra-v2-b01-0046",
+    "terra-v2-b01-0048",
+    "terra-v2-b01-0060",
+    "terra-v2-b01-0063",
+    "terra-v2-b02-0002",
+    "terra-v2-b02-0007",
+    "terra-v2-b02-0020",
+    "terra-v2-b02-0022",
+    "terra-v2-b02-0027",
+    "terra-v2-b02-0031",
+    "terra-v2-b02-0032",
+    "terra-v2-b02-0037",
+    "terra-v2-b02-0043",
+    "terra-v2-b02-0045",
+    "terra-v2-b02-0046",
+    "terra-v2-b02-0050",
+    "terra-v2-b02-0053",
+    "terra-v2-b02-0054",
+    "terra-v2-b02-0059",
+    "terra-v2-b02-0061",
+    "terra-v2-b02-0064",
+    "muse-v2-0005",
+    "muse-v2-0011",
+    "muse-v2-0017",
+    "muse-v2-0018",
+    "muse-v2-0021",
+    "muse-v2-0030",
+    "muse-v2-0031",
+    "muse-v2-0038",
+    "muse-v2-0039",
+    "muse-v2-0046",
+    "muse-v2-0047",
+    "muse-v2-0049",
+    "muse-v2-0050",
+    "muse-v2-0051",
+    "muse-v2-0054",
+    "muse-v2-0057",
+    "muse-v2-0058",
+    "muse-v2-0059",
+    "muse-v2-0062",
+    "muse-v2-0065",
+    "muse-v2-0066",
+    "muse-v2-0067",
+    "muse-v2-0070",
+    "muse-v2-0073",
+    "muse-v2-0074",
+    "muse-v2-0075",
+    "muse-v2-0076",
+    "muse-v2-0077",
+    "muse-v2-0078",
+    "muse-v2-0079",
+    "muse-v2-0080",
+    "muse-v2-0081",
+    "muse-v2-0082",
+    "muse-v2-0083",
+    "muse-v2-0084",
+    "muse-v2-0085",
+    "muse-v2-0086",
+    "muse-v2-0087",
+    "muse-v2-0088",
+    "muse-v2-0089",
+    "muse-v2-0090",
+    "muse-v2-0091",
+    "muse-v2-0092",
+    "muse-v2-0093",
+    "muse-v2-0094",
+    "muse-v2-0095",
+    "muse-v2-0096",
+    "muse-v2-0113",
+    "muse-v2-0121",
+    "muse-v2-0133",
+    "muse-v2-0139",
+    "muse-v2-0145",
+    "muse-v2-0146",
+    "muse-v2-0149",
+    "muse-v2-0158",
+    "muse-v2-0159",
+    "muse-v2-0166",
+    "muse-v2-0167",
+    "muse-v2-0174",
+    "muse-v2-0175",
+    "muse-v2-0177",
+    "muse-v2-0178",
+    "muse-v2-0179",
+    "muse-v2-0182",
+    "muse-v2-0185",
+    "muse-v2-0186",
+    "muse-v2-0187",
+    "muse-v2-0190",
+    "muse-v2-0193",
+    "muse-v2-0194",
+    "muse-v2-0195",
+    "muse-v2-0198",
+    "muse-v2-0201",
+    "muse-v2-0202",
+    "muse-v2-0203",
+    "muse-v2-0204",
+    "muse-v2-0205",
+    "muse-v2-0206",
+    "muse-v2-0207",
+    "muse-v2-0208",
+    "muse-v2-0209",
+    "muse-v2-0210",
+    "muse-v2-0211",
+    "muse-v2-0212",
+    "muse-v2-0213",
+    "muse-v2-0214",
+    "muse-v2-0215",
+    "muse-v2-0216",
+    "muse-v2-0217",
+    "muse-v2-0218",
+    "muse-v2-0219",
+    "muse-v2-0220",
+    "muse-v2-0221",
+    "muse-v2-0222",
+    "muse-v2-0223",
+    "muse-v2-0224",
+    "muse-v2-0241",
+    "muse-v2-0249",
+    "terra-push-v3-0002",
+    "terra-push-v3-0008",
+    "terra-push-v3-0014",
+    "terra-push-v3-0018",
+    "terra-push-v3-0022",
+    "terra-push-v3-0027",
+    "terra-push-v3-0029",
+    "terra-push-v3-0034",
+    "terra-push-v3-0040",
+    "terra-push-v3-0041",
+    "terra-push-v3-0045",
+    "terra-push-v3-0046",
+    "terra-push-v3-0048",
+    "terra-push-v3-0064",
+    "terra-push-v3-0066",
+    "terra-push-v3-0069",
+    "terra-push-v3-0072",
+    "terra-push-v3-0078",
+    "terra-push-v3-0079",
+    "terra-push-v3-0083",
+    "terra-push-v3-0084",
+    "terra-push-v3-0086",
+    "terra-push-v3-0103",
+    "muse-v3-0003",
+    "muse-v3-0010",
+    "muse-v3-0012",
+    "muse-v3-0020",
+    "muse-v3-0024",
+    "muse-v3-0026",
+    "muse-v3-0029",
+    "muse-v3-0030",
+    "muse-v3-0037",
+    "muse-v3-0047",
+    "muse-v3-0055",
+    "muse-v3-0057",
+    "muse-v3-0059",
+    "muse-v3-0066",
+    "muse-v3-0070",
+    "muse-v3-0079",
+    "muse-v3-0088",
+    "muse-v3-0096",
+    "muse-v3-0097",
+    "muse-v3-0098",
+    "muse-v3-0102",
+    "muse-v3-0117",
+    "muse-v3-0122",
+    "muse-v3-0126",
+    "muse-v3-0129",
+    "muse-v3-0154",
+    "muse-v3-0158",
+    "muse-v3-0160",
+    "muse-v3-0164",
+    "muse-v3-0166",
+    "muse-v3-0171",
+    "muse-v3-0176",
+    "muse-v3-0200",
+    "muse-v3-0204",
+    "muse-v3-0216",
+    "muse-v3-0230",
+    "muse-v3-0231",
+    "muse-v3-0232",
+    "muse-v3-0237",
+    "muse-v3-0246",
+    "muse-v3-0249",
+    "muse-v3-0253",
+    "muse-v3-0259",
+    "muse-v3-0269",
+    "muse-v3-0270",
+    "muse-v3-0272",
+    "muse-v3-0274",
+    "muse-v3-0279",
+    "muse-v3-0283",
+    "muse-v3-0287",
+    "muse-v3-0289",
+    "muse-v3-0292",
+    "muse-v3-0293",
+    "muse-v3-0296",
+    "muse-v3-0301",
+    "muse-v3-0303",
+    "muse-v3-0304",
+    "muse-v3-0308",
+    "muse-v3-0311",
+    "muse-v3-0320",
+    "muse-v3-0326",
+    "muse-v3-0327",
+    "muse-v3-0328",
+    "muse-v3-0333",
+    "muse-v3-0342",
+    "muse-v3-0345",
+    "muse-v3-0349",
+    "muse-v3-0355",
+    "muse-v3-0371",
+    "muse-v3-0375",
+    "muse-v3-0379",
+    "muse-v3-0383"
+  ],
+  "new_dev_ids": [
+    "lfm3-final-sotto-001",
+    "lfm3-final-sotto-006",
+    "lfm3-final-sotto-007",
+    "lfm3-final-sotto-009",
+    "lfm3-final-sotto-018",
+    "lfm3-final-sotto-019",
+    "lfm3-final-sotto-028",
+    "lfm3-final-sotto-040",
+    "lfm3-final-sotto-058",
+    "lfm3-final-sotto-059",
+    "lfm3-final-sotto-065",
+    "lfm3-final-sotto-069",
+    "lfm3-final-sotto-073",
+    "lfm3-final-sotto-085",
+    "lfm3-final-sotto-087",
+    "lfm3-final-sotto-092",
+    "lfm3-final-sotto-094",
+    "lfm3-final-sotto-108",
+    "lfm3-final-sotto-122",
+    "lfm3-final-sotto-128",
+    "lfm3-final-syn-021",
+    "lfm3-final-syn-022",
+    "lfm3-final-syn-067",
+    "lfm3-final-syn-068",
+    "lfm3-final-syn-069",
+    "lfm3-final-syn-070",
+    "lfm3-final-syn-105",
+    "lfm3-final-syn-106",
+    "lfm3-final-syn-115",
+    "lfm3-final-syn-116",
+    "lfm3-final-syn-127",
+    "lfm3-final-syn-128",
+    "lfm3-final-syn-131",
+    "lfm3-final-syn-163",
+    "lfm3-final-syn-140",
+    "lfm3-final-syn-144",
+    "lfm3-final-syn-145",
+    "lfm3-final-syn-147",
+    "lfm3-final-syn-156",
+    "lfm3-final-syn-167",
+    "lfm3-final-syn-184",
+    "lfm3-final-syn-192",
+    "lfm3-final-syn-197",
+    "lfm3-final-syn-198",
+    "lfm3-final-syn-201",
+    "lfm3-final-syn-202",
+    "lfm3-final-syn-203",
+    "lfm3-final-syn-204",
+    "lfm3-final-syn-221",
+    "lfm3-final-syn-222",
+    "lfm3-final-syn-223",
+    "lfm3-final-syn-224",
+    "lfm3-final-syn-234",
+    "lfm3-final-syn-239",
+    "lfm3-final-syn-246"
+  ],
+  "new_dev_scenarios": [
+    {
+      "id": "lfm3-final-sotto-001",
+      "scenario_group": "v5-add-component-lfm3-final-sotto-001",
+      "original_scenario_group": "nat-sotto-001"
+    },
+    {
+      "id": "lfm3-final-sotto-006",
+      "scenario_group": "v5-add-component-lfm3-final-sotto-006",
+      "original_scenario_group": "nat-sotto-006"
+    },
+    {
+      "id": "lfm3-final-sotto-007",
+      "scenario_group": "v5-add-component-lfm3-final-sotto-007",
+      "original_scenario_group": "nat-sotto-007"
+    },
+    {
+      "id": "lfm3-final-sotto-009",
+      "scenario_group": "v5-add-component-lfm3-final-sotto-009",
+      "original_scenario_group": "nat-sotto-009"
+    },
+    {
+      "id": "lfm3-final-sotto-018",
+      "scenario_group": "v5-add-component-lfm3-final-sotto-018",
+      "original_scenario_group": "nat-sotto-018"
+    },
+    {
+      "id": "lfm3-final-sotto-019",
+      "scenario_group": "v5-add-component-lfm3-final-sotto-019",
+      "original_scenario_group": "nat-sotto-019"
+    },
+    {
+      "id": "lfm3-final-sotto-028",
+      "scenario_group": "v5-add-component-lfm3-final-sotto-028",
+      "original_scenario_group": "nat-sotto-028"
+    },
+    {
+      "id": "lfm3-final-sotto-040",
+      "scenario_group": "v5-add-component-lfm3-final-sotto-040",
+      "original_scenario_group": "nat-sotto-040"
+    },
+    {
+      "id": "lfm3-final-sotto-058",
+      "scenario_group": "v5-add-component-lfm3-final-sotto-058",
+      "original_scenario_group": "nat-sotto-058"
+    },
+    {
+      "id": "lfm3-final-sotto-059",
+      "scenario_group": "v5-add-component-lfm3-final-sotto-059",
+      "original_scenario_group": "nat-sotto-059"
+    },
+    {
+      "id": "lfm3-final-sotto-065",
+      "scenario_group": "v5-add-component-lfm3-final-sotto-065",
+      "original_scenario_group": "nat-sotto-065"
+    },
+    {
+      "id": "lfm3-final-sotto-069",
+      "scenario_group": "v5-add-component-lfm3-final-sotto-069",
+      "original_scenario_group": "nat-sotto-069"
+    },
+    {
+      "id": "lfm3-final-sotto-073",
+      "scenario_group": "v5-add-component-lfm3-final-sotto-073",
+      "original_scenario_group": "nat-sotto-073"
+    },
+    {
+      "id": "lfm3-final-sotto-085",
+      "scenario_group": "v5-add-component-lfm3-final-sotto-085",
+      "original_scenario_group": "nat-sotto-085"
+    },
+    {
+      "id": "lfm3-final-sotto-087",
+      "scenario_group": "v5-add-component-lfm3-final-sotto-087",
+      "original_scenario_group": "nat-sotto-087"
+    },
+    {
+      "id": "lfm3-final-sotto-092",
+      "scenario_group": "v5-add-component-lfm3-final-sotto-092",
+      "original_scenario_group": "nat-sotto-092"
+    },
+    {
+      "id": "lfm3-final-sotto-094",
+      "scenario_group": "v5-add-component-lfm3-final-sotto-094",
+      "original_scenario_group": "nat-sotto-094"
+    },
+    {
+      "id": "lfm3-final-sotto-108",
+      "scenario_group": "v5-add-component-lfm3-final-sotto-108",
+      "original_scenario_group": "nat-sotto-108"
+    },
+    {
+      "id": "lfm3-final-sotto-122",
+      "scenario_group": "v5-add-component-lfm3-final-sotto-108",
+      "original_scenario_group": "nat-sotto-122"
+    },
+    {
+      "id": "lfm3-final-sotto-128",
+      "scenario_group": "v5-add-component-lfm3-final-sotto-128",
+      "original_scenario_group": "nat-sotto-128"
+    },
+    {
+      "id": "lfm3-final-syn-021",
+      "scenario_group": "v5-add-component-lfm3-final-syn-021",
+      "original_scenario_group": "contrast-fam-11"
+    },
+    {
+      "id": "lfm3-final-syn-022",
+      "scenario_group": "v5-add-component-lfm3-final-syn-021",
+      "original_scenario_group": "contrast-fam-11"
+    },
+    {
+      "id": "lfm3-final-syn-067",
+      "scenario_group": "v5-add-component-lfm3-final-syn-067",
+      "original_scenario_group": "contrast-fam-34"
+    },
+    {
+      "id": "lfm3-final-syn-068",
+      "scenario_group": "v5-add-component-lfm3-final-syn-067",
+      "original_scenario_group": "contrast-fam-34"
+    },
+    {
+      "id": "lfm3-final-syn-069",
+      "scenario_group": "v5-add-component-lfm3-final-syn-069",
+      "original_scenario_group": "contrast-fam-35"
+    },
+    {
+      "id": "lfm3-final-syn-070",
+      "scenario_group": "v5-add-component-lfm3-final-syn-069",
+      "original_scenario_group": "contrast-fam-35"
+    },
+    {
+      "id": "lfm3-final-syn-105",
+      "scenario_group": "v5-add-component-lfm3-final-syn-105",
+      "original_scenario_group": "contrast-fam-53"
+    },
+    {
+      "id": "lfm3-final-syn-106",
+      "scenario_group": "v5-add-component-lfm3-final-syn-105",
+      "original_scenario_group": "contrast-fam-53"
+    },
+    {
+      "id": "lfm3-final-syn-115",
+      "scenario_group": "v5-add-component-lfm3-final-syn-115",
+      "original_scenario_group": "contrast-fam-58"
+    },
+    {
+      "id": "lfm3-final-syn-116",
+      "scenario_group": "v5-add-component-lfm3-final-syn-115",
+      "original_scenario_group": "contrast-fam-58"
+    },
+    {
+      "id": "lfm3-final-syn-127",
+      "scenario_group": "v5-add-component-lfm3-final-syn-127",
+      "original_scenario_group": "contrast-fam-64"
+    },
+    {
+      "id": "lfm3-final-syn-128",
+      "scenario_group": "v5-add-component-lfm3-final-syn-127",
+      "original_scenario_group": "contrast-fam-64"
+    },
+    {
+      "id": "lfm3-final-syn-131",
+      "scenario_group": "v5-add-component-lfm3-final-syn-131",
+      "original_scenario_group": "pair-sym-03"
+    },
+    {
+      "id": "lfm3-final-syn-163",
+      "scenario_group": "v5-add-component-lfm3-final-syn-131",
+      "original_scenario_group": "pair-sym-03"
+    },
+    {
+      "id": "lfm3-final-syn-140",
+      "scenario_group": "v5-add-component-lfm3-final-syn-140",
+      "original_scenario_group": "pair-sym-12"
+    },
+    {
+      "id": "lfm3-final-syn-144",
+      "scenario_group": "v5-add-component-lfm3-final-syn-144",
+      "original_scenario_group": "pair-sym-16"
+    },
+    {
+      "id": "lfm3-final-syn-145",
+      "scenario_group": "v5-add-component-lfm3-final-syn-145",
+      "original_scenario_group": "dense-code-terminal"
+    },
+    {
+      "id": "lfm3-final-syn-147",
+      "scenario_group": "v5-add-component-lfm3-final-syn-145",
+      "original_scenario_group": "dense-code-terminal"
+    },
+    {
+      "id": "lfm3-final-syn-156",
+      "scenario_group": "v5-add-component-lfm3-final-syn-156",
+      "original_scenario_group": "pair-sym-20"
+    },
+    {
+      "id": "lfm3-final-syn-167",
+      "scenario_group": "v5-add-component-lfm3-final-syn-167",
+      "original_scenario_group": "pair-sym-01b"
+    },
+    {
+      "id": "lfm3-final-syn-184",
+      "scenario_group": "v5-add-component-lfm3-final-syn-184",
+      "original_scenario_group": "prose-extra-hi-02"
+    },
+    {
+      "id": "lfm3-final-syn-192",
+      "scenario_group": "v5-add-component-lfm3-final-syn-192",
+      "original_scenario_group": "prose-extra-hg-05"
+    },
+    {
+      "id": "lfm3-final-syn-197",
+      "scenario_group": "v5-add-component-lfm3-final-syn-197",
+      "original_scenario_group": "pair-zero-03"
+    },
+    {
+      "id": "lfm3-final-syn-198",
+      "scenario_group": "v5-add-component-lfm3-final-syn-197",
+      "original_scenario_group": "pair-zero-03"
+    },
+    {
+      "id": "lfm3-final-syn-201",
+      "scenario_group": "v5-add-component-lfm3-final-syn-201",
+      "original_scenario_group": "pair-zero-05"
+    },
+    {
+      "id": "lfm3-final-syn-202",
+      "scenario_group": "v5-add-component-lfm3-final-syn-201",
+      "original_scenario_group": "pair-zero-05"
+    },
+    {
+      "id": "lfm3-final-syn-203",
+      "scenario_group": "v5-add-component-lfm3-final-syn-203",
+      "original_scenario_group": "pair-zero-06"
+    },
+    {
+      "id": "lfm3-final-syn-204",
+      "scenario_group": "v5-add-component-lfm3-final-syn-203",
+      "original_scenario_group": "pair-zero-06"
+    },
+    {
+      "id": "lfm3-final-syn-221",
+      "scenario_group": "v5-add-component-lfm3-final-syn-221",
+      "original_scenario_group": "dense-vocab-names"
+    },
+    {
+      "id": "lfm3-final-syn-222",
+      "scenario_group": "v5-add-component-lfm3-final-syn-221",
+      "original_scenario_group": "dense-vocab-names"
+    },
+    {
+      "id": "lfm3-final-syn-223",
+      "scenario_group": "v5-add-component-lfm3-final-syn-221",
+      "original_scenario_group": "dense-vocab-names"
+    },
+    {
+      "id": "lfm3-final-syn-224",
+      "scenario_group": "v5-add-component-lfm3-final-syn-221",
+      "original_scenario_group": "dense-vocab-names"
+    },
+    {
+      "id": "lfm3-final-syn-234",
+      "scenario_group": "v5-add-component-lfm3-final-syn-234",
+      "original_scenario_group": "dense-note-layout"
+    },
+    {
+      "id": "lfm3-final-syn-239",
+      "scenario_group": "v5-add-component-lfm3-final-syn-239",
+      "original_scenario_group": "mode-layout-03"
+    },
+    {
+      "id": "lfm3-final-syn-246",
+      "scenario_group": "v5-add-component-lfm3-final-syn-246",
+      "original_scenario_group": "instr-data-05g"
+    }
+  ],
+  "selected_addition_ids": [
+    "lfm3-final-sotto-001",
+    "lfm3-final-sotto-002",
+    "lfm3-final-sotto-003",
+    "lfm3-final-sotto-004",
+    "lfm3-final-sotto-005",
+    "lfm3-final-sotto-006",
+    "lfm3-final-sotto-007",
+    "lfm3-final-sotto-008",
+    "lfm3-final-sotto-009",
+    "lfm3-final-sotto-010",
+    "lfm3-final-sotto-011",
+    "lfm3-final-sotto-012",
+    "lfm3-final-sotto-013",
+    "lfm3-final-sotto-014",
+    "lfm3-final-sotto-015",
+    "lfm3-final-sotto-016",
+    "lfm3-final-sotto-017",
+    "lfm3-final-sotto-018",
+    "lfm3-final-sotto-019",
+    "lfm3-final-sotto-020",
+    "lfm3-final-sotto-021",
+    "lfm3-final-sotto-022",
+    "lfm3-final-sotto-023",
+    "lfm3-final-sotto-024",
+    "lfm3-final-sotto-025",
+    "lfm3-final-sotto-026",
+    "lfm3-final-sotto-027",
+    "lfm3-final-sotto-028",
+    "lfm3-final-sotto-029",
+    "lfm3-final-sotto-030",
+    "lfm3-final-sotto-031",
+    "lfm3-final-sotto-032",
+    "lfm3-final-sotto-033",
+    "lfm3-final-sotto-034",
+    "lfm3-final-sotto-035",
+    "lfm3-final-sotto-036",
+    "lfm3-final-sotto-037",
+    "lfm3-final-sotto-038",
+    "lfm3-final-sotto-039",
+    "lfm3-final-sotto-040",
+    "lfm3-final-sotto-041",
+    "lfm3-final-sotto-042",
+    "lfm3-final-sotto-044",
+    "lfm3-final-sotto-045",
+    "lfm3-final-sotto-046",
+    "lfm3-final-sotto-047",
+    "lfm3-final-sotto-048",
+    "lfm3-final-sotto-049",
+    "lfm3-final-sotto-050",
+    "lfm3-final-sotto-051",
+    "lfm3-final-sotto-052",
+    "lfm3-final-sotto-053",
+    "lfm3-final-sotto-054",
+    "lfm3-final-sotto-055",
+    "lfm3-final-sotto-056",
+    "lfm3-final-sotto-057",
+    "lfm3-final-sotto-058",
+    "lfm3-final-sotto-059",
+    "lfm3-final-sotto-060",
+    "lfm3-final-sotto-061",
+    "lfm3-final-sotto-062",
+    "lfm3-final-sotto-063",
+    "lfm3-final-sotto-064",
+    "lfm3-final-sotto-065",
+    "lfm3-final-sotto-066",
+    "lfm3-final-sotto-067",
+    "lfm3-final-sotto-068",
+    "lfm3-final-sotto-069",
+    "lfm3-final-sotto-070",
+    "lfm3-final-sotto-071",
+    "lfm3-final-sotto-072",
+    "lfm3-final-sotto-073",
+    "lfm3-final-sotto-074",
+    "lfm3-final-sotto-075",
+    "lfm3-final-sotto-076",
+    "lfm3-final-sotto-077",
+    "lfm3-final-sotto-078",
+    "lfm3-final-sotto-079",
+    "lfm3-final-sotto-080",
+    "lfm3-final-sotto-081",
+    "lfm3-final-sotto-082",
+    "lfm3-final-sotto-083",
+    "lfm3-final-sotto-084",
+    "lfm3-final-sotto-085",
+    "lfm3-final-sotto-086",
+    "lfm3-final-sotto-087",
+    "lfm3-final-sotto-088",
+    "lfm3-final-sotto-089",
+    "lfm3-final-sotto-090",
+    "lfm3-final-sotto-091",
+    "lfm3-final-sotto-092",
+    "lfm3-final-sotto-093",
+    "lfm3-final-sotto-094",
+    "lfm3-final-sotto-095",
+    "lfm3-final-sotto-096",
+    "lfm3-final-sotto-097",
+    "lfm3-final-sotto-098",
+    "lfm3-final-sotto-099",
+    "lfm3-final-sotto-100",
+    "lfm3-final-sotto-101",
+    "lfm3-final-sotto-102",
+    "lfm3-final-sotto-103",
+    "lfm3-final-sotto-104",
+    "lfm3-final-sotto-105",
+    "lfm3-final-sotto-106",
+    "lfm3-final-sotto-107",
+    "lfm3-final-sotto-108",
+    "lfm3-final-sotto-122",
+    "lfm3-final-sotto-109",
+    "lfm3-final-sotto-110",
+    "lfm3-final-sotto-111",
+    "lfm3-final-sotto-112",
+    "lfm3-final-sotto-113",
+    "lfm3-final-sotto-114",
+    "lfm3-final-sotto-115",
+    "lfm3-final-sotto-116",
+    "lfm3-final-sotto-117",
+    "lfm3-final-sotto-118",
+    "lfm3-final-sotto-119",
+    "lfm3-final-sotto-120",
+    "lfm3-final-sotto-121",
+    "lfm3-final-sotto-123",
+    "lfm3-final-sotto-124",
+    "lfm3-final-sotto-125",
+    "lfm3-final-sotto-126",
+    "lfm3-final-sotto-127",
+    "lfm3-final-sotto-128",
+    "lfm3-final-syn-001",
+    "lfm3-final-syn-002",
+    "lfm3-final-syn-003",
+    "lfm3-final-syn-004",
+    "lfm3-final-syn-005",
+    "lfm3-final-syn-006",
+    "lfm3-final-syn-007",
+    "lfm3-final-syn-008",
+    "lfm3-final-syn-009",
+    "lfm3-final-syn-010",
+    "lfm3-final-syn-011",
+    "lfm3-final-syn-012",
+    "lfm3-final-syn-017",
+    "lfm3-final-syn-018",
+    "lfm3-final-syn-013",
+    "lfm3-final-syn-014",
+    "lfm3-final-syn-015",
+    "lfm3-final-syn-016",
+    "lfm3-final-syn-019",
+    "lfm3-final-syn-020",
+    "lfm3-final-syn-021",
+    "lfm3-final-syn-022",
+    "lfm3-final-syn-023",
+    "lfm3-final-syn-024",
+    "lfm3-final-syn-025",
+    "lfm3-final-syn-026",
+    "lfm3-final-syn-027",
+    "lfm3-final-syn-028",
+    "lfm3-final-syn-029",
+    "lfm3-final-syn-030",
+    "lfm3-final-syn-031",
+    "lfm3-final-syn-032",
+    "lfm3-final-syn-033",
+    "lfm3-final-syn-034",
+    "lfm3-final-syn-035",
+    "lfm3-final-syn-036",
+    "lfm3-final-syn-037",
+    "lfm3-final-syn-038",
+    "lfm3-final-syn-061",
+    "lfm3-final-syn-062",
+    "lfm3-final-syn-039",
+    "lfm3-final-syn-040",
+    "lfm3-final-syn-041",
+    "lfm3-final-syn-042",
+    "lfm3-final-syn-043",
+    "lfm3-final-syn-044",
+    "lfm3-final-syn-045",
+    "lfm3-final-syn-046",
+    "lfm3-final-syn-047",
+    "lfm3-final-syn-048",
+    "lfm3-final-syn-049",
+    "lfm3-final-syn-050",
+    "lfm3-final-syn-051",
+    "lfm3-final-syn-052",
+    "lfm3-final-syn-053",
+    "lfm3-final-syn-054",
+    "lfm3-final-syn-055",
+    "lfm3-final-syn-056",
+    "lfm3-final-syn-057",
+    "lfm3-final-syn-058",
+    "lfm3-final-syn-059",
+    "lfm3-final-syn-060",
+    "lfm3-final-syn-063",
+    "lfm3-final-syn-064",
+    "lfm3-final-syn-065",
+    "lfm3-final-syn-066",
+    "lfm3-final-syn-067",
+    "lfm3-final-syn-068",
+    "lfm3-final-syn-069",
+    "lfm3-final-syn-070",
+    "lfm3-final-syn-071",
+    "lfm3-final-syn-072",
+    "lfm3-final-syn-073",
+    "lfm3-final-syn-074",
+    "lfm3-final-syn-075",
+    "lfm3-final-syn-076",
+    "lfm3-final-syn-077",
+    "lfm3-final-syn-078",
+    "lfm3-final-syn-079",
+    "lfm3-final-syn-080",
+    "lfm3-final-syn-081",
+    "lfm3-final-syn-082",
+    "lfm3-final-syn-083",
+    "lfm3-final-syn-084",
+    "lfm3-final-syn-085",
+    "lfm3-final-syn-086",
+    "lfm3-final-syn-087",
+    "lfm3-final-syn-088",
+    "lfm3-final-syn-089",
+    "lfm3-final-syn-090",
+    "lfm3-final-syn-091",
+    "lfm3-final-syn-092",
+    "lfm3-final-syn-093",
+    "lfm3-final-syn-094",
+    "lfm3-final-syn-095",
+    "lfm3-final-syn-096",
+    "lfm3-final-syn-097",
+    "lfm3-final-syn-098",
+    "lfm3-final-syn-099",
+    "lfm3-final-syn-100",
+    "lfm3-final-syn-101",
+    "lfm3-final-syn-102",
+    "lfm3-final-syn-103",
+    "lfm3-final-syn-104",
+    "lfm3-final-syn-105",
+    "lfm3-final-syn-106",
+    "lfm3-final-syn-107",
+    "lfm3-final-syn-108",
+    "lfm3-final-syn-109",
+    "lfm3-final-syn-110",
+    "lfm3-final-syn-111",
+    "lfm3-final-syn-112",
+    "lfm3-final-syn-113",
+    "lfm3-final-syn-114",
+    "lfm3-final-syn-115",
+    "lfm3-final-syn-116",
+    "lfm3-final-syn-117",
+    "lfm3-final-syn-118",
+    "lfm3-final-syn-119",
+    "lfm3-final-syn-120",
+    "lfm3-final-syn-121",
+    "lfm3-final-syn-122",
+    "lfm3-final-syn-123",
+    "lfm3-final-syn-124",
+    "lfm3-final-syn-125",
+    "lfm3-final-syn-126",
+    "lfm3-final-syn-127",
+    "lfm3-final-syn-128",
+    "lfm3-final-syn-130",
+    "lfm3-final-syn-162",
+    "lfm3-final-syn-131",
+    "lfm3-final-syn-163",
+    "lfm3-final-syn-132",
+    "lfm3-final-syn-164",
+    "lfm3-final-syn-133",
+    "lfm3-final-syn-134",
+    "lfm3-final-syn-135",
+    "lfm3-final-syn-165",
+    "lfm3-final-syn-136",
+    "lfm3-final-syn-168",
+    "lfm3-final-syn-137",
+    "lfm3-final-syn-138",
+    "lfm3-final-syn-139",
+    "lfm3-final-syn-140",
+    "lfm3-final-syn-141",
+    "lfm3-final-syn-142",
+    "lfm3-final-syn-143",
+    "lfm3-final-syn-144",
+    "lfm3-final-syn-145",
+    "lfm3-final-syn-147",
+    "lfm3-final-syn-146",
+    "lfm3-final-syn-149",
+    "lfm3-final-syn-150",
+    "lfm3-final-syn-151",
+    "lfm3-final-syn-152",
+    "lfm3-final-syn-153",
+    "lfm3-final-syn-154",
+    "lfm3-final-syn-155",
+    "lfm3-final-syn-156",
+    "lfm3-final-syn-157",
+    "lfm3-final-syn-158",
+    "lfm3-final-syn-159",
+    "lfm3-final-syn-160",
+    "lfm3-final-syn-166",
+    "lfm3-final-syn-167",
+    "lfm3-final-syn-169",
+    "lfm3-final-syn-170",
+    "lfm3-final-syn-171",
+    "lfm3-final-syn-172",
+    "lfm3-final-syn-173",
+    "lfm3-final-syn-174",
+    "lfm3-final-syn-175",
+    "lfm3-final-syn-176",
+    "lfm3-final-syn-177",
+    "lfm3-final-syn-178",
+    "lfm3-final-syn-179",
+    "lfm3-final-syn-180",
+    "lfm3-final-syn-181",
+    "lfm3-final-syn-182",
+    "lfm3-final-syn-183",
+    "lfm3-final-syn-184",
+    "lfm3-final-syn-185",
+    "lfm3-final-syn-186",
+    "lfm3-final-syn-187",
+    "lfm3-final-syn-188",
+    "lfm3-final-syn-189",
+    "lfm3-final-syn-190",
+    "lfm3-final-syn-191",
+    "lfm3-final-syn-192",
+    "lfm3-final-syn-193",
+    "lfm3-final-syn-194",
+    "lfm3-final-syn-195",
+    "lfm3-final-syn-196",
+    "lfm3-final-syn-197",
+    "lfm3-final-syn-198",
+    "lfm3-final-syn-199",
+    "lfm3-final-syn-200",
+    "lfm3-final-syn-201",
+    "lfm3-final-syn-202",
+    "lfm3-final-syn-203",
+    "lfm3-final-syn-204",
+    "lfm3-final-syn-205",
+    "lfm3-final-syn-206",
+    "lfm3-final-syn-207",
+    "lfm3-final-syn-208",
+    "lfm3-final-syn-209",
+    "lfm3-final-syn-210",
+    "lfm3-final-syn-211",
+    "lfm3-final-syn-212",
+    "lfm3-final-syn-213",
+    "lfm3-final-syn-214",
+    "lfm3-final-syn-215",
+    "lfm3-final-syn-216",
+    "lfm3-final-syn-217",
+    "lfm3-final-syn-218",
+    "lfm3-final-syn-219",
+    "lfm3-final-syn-220",
+    "lfm3-final-syn-221",
+    "lfm3-final-syn-222",
+    "lfm3-final-syn-223",
+    "lfm3-final-syn-224",
+    "lfm3-final-syn-225",
+    "lfm3-final-syn-226",
+    "lfm3-final-syn-227",
+    "lfm3-final-syn-228",
+    "lfm3-final-syn-229",
+    "lfm3-final-syn-230",
+    "lfm3-final-syn-231",
+    "lfm3-final-syn-232",
+    "lfm3-final-syn-233",
+    "lfm3-final-syn-235",
+    "lfm3-final-syn-234",
+    "lfm3-final-syn-237",
+    "lfm3-final-syn-238",
+    "lfm3-final-syn-239",
+    "lfm3-final-syn-240",
+    "lfm3-final-syn-241",
+    "lfm3-final-syn-242",
+    "lfm3-final-syn-243",
+    "lfm3-final-syn-244",
+    "lfm3-final-syn-245",
+    "lfm3-final-syn-246",
+    "lfm3-final-syn-247",
+    "lfm3-final-syn-248",
+    "lfm3-final-syn-249",
+    "lfm3-final-syn-250",
+    "lfm3-final-syn-251",
+    "lfm3-final-syn-253",
+    "lfm3-final-syn-254",
+    "lfm3-final-syn-255",
+    "lfm3-final-syn-256"
+  ],
+  "review_status": "model-assisted independent review; not human review",
+  "inputs_sha256": {
+    "base": "85d6401b8d713ff729c30dd596ceef830d5698ccb9692c580745f5074013e340",
+    "old_guard": "6a593c3e6d50baaf85031b9cb771eff0a6e6863ca6d6cd664258b23f0470f360",
+    "fresh": "792e9a8549af9afa68655451c73ab8b1cff01dd9280bcada9956af9334e153a4",
+    "additions": "aa16a60372292fcf3d4a24127cf8279b32dd4d9fd8031569071607a971380264",
+    "ledger": "f14b7f51f1143ab96f1644e1f3a786fec45e3e03fc791f23d958fe73cb80bb8c",
+    "sotto_raw": "8ae733269c7471a027c690daa2bea7268d228ebbfcb81ac50323a93c2c234f79"
+  },
+  "outputs_sha256": {
+    "reviewed.jsonl": "fac685509b3d1b5b44e4af6707ce8e1f8e2a525e215b4083507a2ecd89f48a51",
+    "sources.json": "f14b7f51f1143ab96f1644e1f3a786fec45e3e03fc791f23d958fe73cb80bb8c"
+  },
+  "source_sha256": {
+    "prepare_lfm3_v5.py": "95cea5d2adc01311491258e7ffdc3f101c4f73aa53dabb929eb26bcb48d4dd76",
+    "cleanup/curate.py": "bd61abcf406a1fed5bcdb6e9cb38b30fd295b2fdf6f119d5ac2a341c3c6387a6",
+    "cleanup/data.py": "302895c4804f115ef7127ea551ae7d3019cbbb88a973d5ea0081771df29812bc"
+  },
+  "original_byte_prefix_length": 1844144,
+  "original_byte_prefix_sha256": "85d6401b8d713ff729c30dd596ceef830d5698ccb9692c580745f5074013e340",
+  "original_row_count": 1838,
+  "held_out_count": 443
+}

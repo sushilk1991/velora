@@ -14,6 +14,6 @@
     "license": "LFM Open License v1.0; separate from runtime MIT",
     "comparison": "GGUF Q8_0 differs from MLX 8-bit; not backend-only equivalence"
   },
-  "source_tree_sha256": "c2c7fd4aeec500073774b5578a974271a94e60f28b539b62fd5492dc67cd803e",
+  "source_tree_sha256": "9ed56cfe2f6554d6ff40e137b609e1f9e152bc58c9db0c9d51b87891bdf1bd0d",
   "source_archive_sha256": "f78d578b9a9246793e65917f7b3d0a567cb4f3aa349afe43f54576d623925d2a"
 }

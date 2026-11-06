@@ -15,11 +15,16 @@ def main():
     p.add_argument('--max-rss-mb',type=int,default=8192)
     p.add_argument('--copy-draft',action='store_true');p.add_argument('--prefix-cache',action='store_true');p.add_argument('--verbose',action='store_true')
     p.add_argument('--draft-max',type=int,choices=range(1,9),default=3)
-    for flag in ('recurrent-rollback','backend-sampling','backend-token-only','direct-argmax','trace-runtime'):p.add_argument('--'+flag,action='store_true')
+    p.add_argument('--prefill-batch',type=int,choices=(16,32,64,128,256,512),default=128)
+    p.add_argument('--research-long-context',action='store_true')
+    p.add_argument('--max-output-tokens',type=int,default=512)
+    for flag in ('recurrent-rollback','backend-sampling','backend-token-only','direct-argmax','trace-runtime','bounded-swa','student-prefix-cache'):p.add_argument('--'+flag,action='store_true')
     p.add_argument('--startup-deadline-ms',type=int,default=120000)
     p.add_argument('--hard-grace-ms',type=int,default=2000)
     a=p.parse_args()
     if not 1<=a.startup_deadline_ms<=120000 or not 0<=a.hard_grace_ms<=10000:p.error('invalid deadline bound')
+    if not (128<=a.context<=4096 or a.research_long_context and a.context in (8192,16384)):p.error('invalid context research bound')
+    if not 1<=a.max_output_tokens<=(2048 if a.research_long_context else 512):p.error('invalid output research bound')
     termination_signal=None
     def owner_signal(signum,frame):
         nonlocal termination_signal
@@ -27,7 +32,9 @@ def main():
     for signum in [signal.SIGTERM,signal.SIGHUP,signal.SIGINT]:signal.signal(signum,owner_signal)
     flags=(['--copy-draft'] if a.copy_draft else [])+(['--prefix-cache'] if a.prefix_cache else [])+(['--verbose'] if a.verbose else [])
     flags+=['--draft-max='+str(a.draft_max)]
-    flags+=['--'+flag for flag in ('recurrent-rollback','backend-sampling','backend-token-only','direct-argmax','trace-runtime') if getattr(a,flag.replace('-','_'))]
+    flags+=['--prefill-batch='+str(a.prefill_batch),'--max-output-tokens='+str(a.max_output_tokens)]
+    if a.research_long_context:flags+=['--research-long-context']
+    flags+=['--'+flag for flag in ('recurrent-rollback','backend-sampling','backend-token-only','direct-argmax','trace-runtime','bounded-swa','student-prefix-cache') if getattr(a,flag.replace('-','_'))]
     child=subprocess.Popen([a.binary,a.model,a.sha256,str(a.gpu_layers),str(a.context),str(a.max_rss_mb)]+flags,stdin=subprocess.PIPE,stdout=subprocess.PIPE,stderr=None,start_new_session=True,bufsize=0)
     selector=selectors.DefaultSelector();input_fd=sys.stdin.fileno();output_fd=sys.stdout.fileno()
     write_fd=child.stdin.fileno();read_fd=child.stdout.fileno()

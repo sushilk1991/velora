@@ -1,0 +1,24 @@
+{
+  "cases": 96,
+  "language": {
+    "en": 48,
+    "hi": 24,
+    "hinglish": 24
+  },
+  "mode": {
+    "default": 16,
+    "message": 16,
+    "email": 16,
+    "note": 16,
+    "code": 16,
+    "terminal": 16
+  },
+  "source": "independent fresh Terra author, independent Muse review; model-assisted only",
+  "frozen_before_final_training": true,
+  "frozen_at_utc": "2026-11-06T19:21:48.565520+00:00",
+  "sha256": "792e9a8549af9afa68655451c73ab8b1cff01dd9280bcada9956af9334e153a4",
+  "guard_cases": 443,
+  "guard_sha256": "d1811b39bf3a6ff57aa36e61571252396b1e6805489caa9d0fd4c67701c40b5a",
+  "base_b_contamination_validation": "passed; all1838unchanged",
+  "content_changes_by_reviewer": 0
+}

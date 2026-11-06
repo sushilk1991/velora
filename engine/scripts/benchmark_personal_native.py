@@ -25,9 +25,11 @@ import unicodedata
 ROOT=Path(__file__).resolve().parents[2]
 sys.path.insert(0,str(ROOT/'engine/src'))
 sys.path.insert(0,str(ROOT/'training/cleanup'))
+sys.path.insert(0,str(ROOT/'training/cleanup/scripts'))
 from benchmark_personal_cleanup import digest, private_dir, private_write, hash_tree, snapshot_config, read_inputs, make_server, validate_stt_provenance
 from benchmark_personal_student import controls, cleanup_status, source_hash
 from cleanup.engine_decoder import student_messages
+from qualify_lfm3_artifacts import validate_fused
 from velora_engine.cleanup import CleanupResult, adaptive_timeout_ms, check_divergence, restore_control_tokens, neutralize_control_tokens
 
 NATIVE=ROOT/'native/cleanup'
@@ -35,6 +37,7 @@ CONTEXT_TOKENS=4096
 DRAFT_TOKENS=8
 MAX_OUTPUT=512
 MAX_FRAME=1024*1024
+AUDITED_LFM3_REVISION='4d6d94c9c2c2f249f1f740f4f08e071b0dbfe099'
 PHONON_REPOSITORY='Infatoshi/phonon-refiner-1.7b'
 PHONON_REVISION='2b0ab74bee7ab7cf364695bbe44f64ce4c47439e'
 PHONON_MODEL_SHA256='059e6e503c6c2ec50cb61a39bd0d556fb6d946bb58e965fb9ddb8b0176dfc6cd'
@@ -47,12 +50,100 @@ PHONON_MODES={'default':'minimal','note':'minimal','email':'formal',
               'message':'casual','code':'prompt','terminal':'prompt'}
 
 
+def artifact_identity(args, model, upstream):
+    """Validate local trained lineage without claiming a Hub GGUF revision."""
+    local=getattr(args,'local_artifact_manifest',None)
+    repository=getattr(args,'model_repository',None)
+    revision=getattr(args,'model_revision',None)
+    if not re.fullmatch('[0-9a-f]{64}',args.sha256) or digest(model)!=args.sha256:
+        raise ValueError('local GGUF SHA256 mismatch')
+    if local is None:
+        if not repository or not isinstance(revision,str) or not re.fullmatch('[0-9a-f]{40}',revision):
+            raise ValueError('model repository and full immutable model revision required')
+        return {'model_repository':repository,'model_revision':revision}
+    if repository is not None or revision is not None:
+        raise ValueError('local artifact manifest is mutually exclusive with Hub identity')
+    if getattr(args,'prompt_contract','student')=='phonon':
+        raise ValueError('Phonon prompt contract forbids local artifact manifest')
+    path=Path(local).expanduser().resolve(strict=True)
+    info=json.loads(path.read_text())
+    if (info.get('schema') != 1 or info.get('kind') != 'local-trained-gguf'
+        or info.get('model_sha256') != args.sha256
+        or info.get('source_base_revision') != AUDITED_LFM3_REVISION
+        or info.get('quantization') not in ('BF16','Q8_0','Q4_K_M')
+        or info.get('converter_commit') != upstream['commit']):
+        raise ValueError('invalid local trained GGUF artifact identity')
+    export_path=info.get('export_provenance_path')
+    if not isinstance(export_path,str) or not Path(export_path).is_absolute():
+        raise ValueError('absolute export provenance path required')
+    export_path=Path(export_path).resolve(strict=True)
+    export_sha=info.get('source_export_provenance_sha256')
+    adapter_sha=info.get('source_adapter_sha256')
+    if (not isinstance(export_sha,str) or not re.fullmatch('[0-9a-f]{64}',export_sha)
+        or not isinstance(adapter_sha,str) or not re.fullmatch('[0-9a-f]{64}',adapter_sha)
+        or digest(export_path)!=export_sha):
+        raise ValueError('export provenance or adapter SHA256 mismatch')
+    export=json.loads(export_path.read_text())
+    if (export.get('status')!='exported' or export.get('base_revision')!=info['source_base_revision']
+        or export.get('llama_converter_commit')!=info['converter_commit']
+        or not isinstance(export.get('adapter_files_sha256'),dict)
+        or export['adapter_files_sha256'].get('adapters.safetensors')!=adapter_sha):
+        raise ValueError('export provenance lineage mismatch')
+    _, fused=validate_fused(export_path.parent,export_path)
+    conversion_path=info.get('conversion_manifest_path')
+    conversion_sha=info.get('conversion_manifest_sha256')
+    if (not isinstance(conversion_path,str) or not Path(conversion_path).is_absolute()
+        or not isinstance(conversion_sha,str) or not re.fullmatch('[0-9a-f]{64}',conversion_sha)):
+        raise ValueError('absolute conversion manifest path and SHA256 required')
+    conversion_path=Path(conversion_path).resolve(strict=True)
+    if digest(conversion_path)!=conversion_sha:
+        raise ValueError('conversion manifest SHA256 mismatch')
+    conversion=json.loads(conversion_path.read_text())
+    is_hash=lambda v:isinstance(v,str) and bool(re.fullmatch('[0-9a-f]{64}',v))
+    metadata=conversion.get('gguf_metadata')
+    quantizer=conversion.get('quantizer_binary_sha256')
+    if (conversion.get('schema')!=1 or conversion.get('kind')!='lfm3-gguf-conversion'
+        or conversion.get('source_export_provenance_sha256')!=export_sha
+        or conversion.get('source_export_files_sha256')!=fused['files_sha256']
+        or conversion.get('model_sha256')!=args.sha256
+        or conversion.get('quantization')!=info['quantization']
+        or conversion.get('converter_commit')!=info['converter_commit']
+        or not is_hash(conversion.get('converter_source_sha256'))
+        or 'quantizer_binary_sha256' not in conversion
+        or (not is_hash(quantizer) if info['quantization']!='BF16' else quantizer is not None and not is_hash(quantizer))
+        or not isinstance(metadata,dict) or metadata.get('architecture')!='lfm3'
+        or type(metadata.get('file_type')) is not int or metadata['file_type']<0):
+        raise ValueError('conversion manifest lineage mismatch')
+    # These are hashed operator records, not cryptographic proof of conversion.
+    return {'model_repository':None,'model_revision':None,
+        'local_artifact_manifest_sha256':digest(path),'local_artifact_identity':info,
+        'conversion_manifest':conversion,
+        'export_validation_source_sha256':digest(ROOT/'training/cleanup/scripts/qualify_lfm3_artifacts.py')}
+
+
+
+def validate_worker_ready(ready, upstream, local_artifact, *, prefill_batch=128, student_prefix_cache=False):
+    if ready.get('llama_commit')!=upstream['commit']:
+        raise RuntimeError('native upstream pin mismatch')
+    expected={'context_tokens':CONTEXT_TOKENS,'copy_draft':True,'copy_draft_max':DRAFT_TOKENS,'prefix_reuse':True}
+    expected['prefill_batch_tokens']=prefill_batch
+    if student_prefix_cache or 'student_prefix_cache' in ready:
+        expected['student_prefix_cache']=student_prefix_cache
+    if local_artifact:expected['architecture']='lfm3'
+    if any(ready.get(key)!=value for key,value in expected.items()):
+        raise RuntimeError('native worker did not activate the requested experiment flags or architecture')
+
+
 def load_prompt_contract(args):
     contract=getattr(args,'prompt_contract','student')
     metadata=getattr(args,'phonon_metadata',None)
     if contract=='student':
         if metadata is not None:raise ValueError('--phonon-metadata requires --prompt-contract phonon')
         return None
+    if getattr(args,'student_prefix_cache',False):
+        raise ValueError('Phonon prompt contract forbids student prefix cache')
+    if getattr(args,'local_artifact_manifest',None) is not None:
+        raise ValueError('Phonon prompt contract forbids local artifact manifest')
     if contract!='phonon' or metadata is None:
         raise ValueError('phonon prompt contract requires pinned --phonon-metadata')
     path=Path(metadata).expanduser().resolve(strict=True)
@@ -99,7 +190,7 @@ def output_budget(raw, check_ratio=True):
 
 class NativeClient:
     """Bounded serial client; supervise.py owns hard deadlines and worker reap."""
-    def __init__(self,binary,model,sha256,stderr_path,max_rss_mb=8192):
+    def __init__(self,binary,model,sha256,stderr_path,max_rss_mb=8192, *, student_prefix_cache=False,prefill_batch=128):
         self.unhealthy=False
         self.buffer=b''
         self.counter=0
@@ -109,7 +200,8 @@ class NativeClient:
         with os.fdopen(fd,'w') as stderr:
             self.child=subprocess.Popen([sys.executable,str(NATIVE/'supervise.py'),str(binary),str(model),sha256,
                 '--context',str(CONTEXT_TOKENS),'--max-rss-mb',str(max_rss_mb),
-                '--prefix-cache','--copy-draft','--draft-max',str(DRAFT_TOKENS)],
+                '--prefix-cache','--copy-draft','--draft-max',str(DRAFT_TOKENS),
+                '--prefill-batch',str(prefill_batch)]+(['--student-prefix-cache'] if student_prefix_cache else []),
                 stdin=subprocess.PIPE,stdout=subprocess.PIPE,stderr=stderr,bufsize=0,start_new_session=True)
         os.set_blocking(self.child.stdin.fileno(),False)
         os.set_blocking(self.child.stdout.fileno(),False)
@@ -349,22 +441,23 @@ async def replay(args):
     model=args.model.expanduser().resolve(strict=True)
     if not binary.is_file() or not os.access(binary,os.X_OK) or not model.is_file():
         raise ValueError('executable binary and local GGUF regular file required')
-    if not re.fullmatch('[0-9a-f]{64}',args.sha256) or digest(model)!=args.sha256:
-        raise ValueError('local GGUF SHA256 mismatch')
-    if not re.fullmatch('[0-9a-f]{40}',args.model_revision):raise ValueError('full immutable model revision required')
+    upstream=json.loads((NATIVE/'UPSTREAM.json').read_text())
+    model_identity=artifact_identity(args,model,upstream)
+    if getattr(args,'student_prefix_cache',False) and getattr(args,'prompt_contract','student')=='phonon':
+        raise ValueError('Phonon prompt contract forbids student prefix cache')
     phonon_marker=load_prompt_contract(args)
     output=private_dir(args.output)
-    upstream=json.loads((NATIVE/'UPSTREAM.json').read_text())
     expected={'schema':1,'manifest_sha256':digest(manifest),'stt_sha256':digest(stt_path),'stt_metadata_sha256':digest(stt_meta_path),
         'prompt_contract':'phonon' if phonon_marker else 'student',
         'phonon_metadata_sha256':PHONON_METADATA_SHA256 if phonon_marker else None,
         'phonon_vocabulary_policy':'none' if phonon_marker else None,
         'stt_glossary_sha256':stt_meta['glossary']['sha256'],
-        'binary_sha256':digest(binary),'model_sha256':args.sha256,'model_repository':args.model_repository,'model_revision':args.model_revision,
+        'binary_sha256':digest(binary),'model_sha256':args.sha256,**model_identity,
         'source_sha256':source_hash(),'runner_sha256':digest(Path(__file__)),
         'native_source_sha256':{p.name:digest(p) for p in sorted(NATIVE.iterdir()) if p.is_file()},
         'upstream_runtime':{key:upstream[key] for key in ('repository','commit','license','source_tree_sha256')},
         'context_tokens':CONTEXT_TOKENS,'copy_draft_tokens':DRAFT_TOKENS,'prefix_cache':True,'max_output_tokens':MAX_OUTPUT,
+        'student_prefix_cache':getattr(args,'student_prefix_cache',False),'prefill_batch':getattr(args,'prefill_batch',128),
         'max_rss_mb':args.max_rss_mb,'limit':args.limit,'case_count':len(cases),
         'case_ids_sha256':hashlib.sha256(json.dumps([c['id'] for c in cases],separators=(',',':')).encode()).hexdigest()}
     config_path=output/'config-snapshot';meta_path=output/'native-run.json'
@@ -401,12 +494,11 @@ async def replay(args):
     exit_code=0
     try:
         started=time.perf_counter()
-        client=NativeClient(binary,model,args.sha256,output/f'native-{run_tag}.stderr.log',args.max_rss_mb)
+        client=NativeClient(binary,model,args.sha256,output/f'native-{run_tag}.stderr.log',args.max_rss_mb,
+            student_prefix_cache=getattr(args,'student_prefix_cache',False),prefill_batch=getattr(args,'prefill_batch',128))
         run.update(model_loaded=True,load_seconds=time.perf_counter()-started,ready=client.ready)
-        if client.ready.get('llama_commit')!=upstream['commit']:raise RuntimeError('native upstream pin mismatch')
-        expected_ready={'context_tokens':CONTEXT_TOKENS,'copy_draft':True,'copy_draft_max':DRAFT_TOKENS,'prefix_reuse':True}
-        if any(client.ready.get(key)!=value for key,value in expected_ready.items()):
-            raise RuntimeError('native worker did not activate the requested experiment flags')
+        validate_worker_ready(client.ready,upstream,getattr(args,'local_artifact_manifest',None) is not None,
+            prefill_batch=getattr(args,'prefill_batch',128),student_prefix_cache=getattr(args,'student_prefix_cache',False))
         run['before_recovery']=recovery_probe(client,phonon_marker)
         if not run['before_recovery']['passed']:raise RuntimeError('native startup recovery probe failed')
         cleanup=NativeCleanup(client,phonon_marker);server=make_server(config,cleanup)
@@ -464,7 +556,10 @@ def main():
     parser=argparse.ArgumentParser(description=__doc__)
     for name in ('manifest','stt','stt-meta','output','binary','model'):parser.add_argument('--'+name,type=Path,required=True)
     parser.add_argument('--sha256',required=True)
-    parser.add_argument('--model-repository',required=True);parser.add_argument('--model-revision',required=True)
+    parser.add_argument('--model-repository');parser.add_argument('--model-revision')
+    parser.add_argument('--local-artifact-manifest',type=Path,help='Local trained GGUF identity and verified export lineage')
+    parser.add_argument('--student-prefix-cache',action='store_true')
+    parser.add_argument('--prefill-batch',type=int,choices=(16,32,64,128,256,512),default=128)
     parser.add_argument('--prompt-contract',choices=('student','phonon'),default='student')
     parser.add_argument('--phonon-metadata',type=Path,help='Pinned phonon_refiner.json; required with phonon contract')
     parser.add_argument('--config-home',type=Path,default=Path.home()/'.velora')

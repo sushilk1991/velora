@@ -1,0 +1,52 @@
+{
+  "total": 384,
+  "review_status": {
+    "approved": 382,
+    "rejected": 2
+  },
+  "target_changes": [
+    "lfm3-final-sotto-092",
+    "lfm3-final-sotto-101",
+    "lfm3-final-sotto-093",
+    "lfm3-final-sotto-096",
+    "lfm3-final-sotto-014",
+    "lfm3-final-syn-253",
+    "lfm3-final-sotto-094",
+    "lfm3-final-syn-247",
+    "lfm3-final-syn-244",
+    "lfm3-final-sotto-080",
+    "lfm3-final-sotto-090",
+    "lfm3-final-syn-154",
+    "lfm3-final-sotto-091",
+    "lfm3-final-sotto-070",
+    "lfm3-final-sotto-071",
+    "lfm3-final-syn-233",
+    "lfm3-final-sotto-081",
+    "lfm3-final-syn-146",
+    "lfm3-final-syn-149",
+    "lfm3-final-sotto-075",
+    "lfm3-final-sotto-076",
+    "lfm3-final-sotto-077",
+    "lfm3-final-sotto-084"
+  ],
+  "rejections": [
+    "lfm3-final-syn-236",
+    "lfm3-final-syn-148"
+  ],
+  "immutable_inputs_unchanged": true,
+  "language": {
+    "en": 258,
+    "hi": 63,
+    "hinglish": 63
+  },
+  "modes": {
+    "default": 315,
+    "message": 11,
+    "note": 27,
+    "code": 17,
+    "terminal": 12,
+    "email": 2
+  },
+  "sha256": "aa16a60372292fcf3d4a24127cf8279b32dd4d9fd8031569071607a971380264",
+  "review_scope": "fresh independent Terra contexts; no private/test/prediction reads; model-assisted nothuman"
+}
