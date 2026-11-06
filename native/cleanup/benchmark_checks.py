@@ -6,7 +6,7 @@ def record_result(identity,response,seconds):
     return {'id':identity,'answer':response.get('text','') if status=='eos' else '',
             'diagnostic_partial_text':response.get('partial_text',''),
             'seconds':seconds,'worker_ms':response.get('elapsed_ms'),
-            'status':status,'error':response.get('error'),'prefix_cache':response.get('prefix_cache'),'copy_draft':response.get('copy_draft'),
+            'runtime_trace':response.get('runtime_trace'),'backend_sampling':response.get('backend_sampling'),'status':status,'error':response.get('error'),'prefix_cache':response.get('prefix_cache'),'copy_draft':response.get('copy_draft'),
             'prompt_tokens':response.get('prompt_tokens',[]),
             'output_tokens':response.get('output_tokens',[]),'rss_bytes':response.get('rss_bytes')}
 

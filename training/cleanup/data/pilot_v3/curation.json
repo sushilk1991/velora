@@ -1,0 +1,28 @@
+{
+  "rows": 1605,
+  "split": {
+    "train": 1243,
+    "dev": 362
+  },
+  "language_split": {
+    "en:train": 836,
+    "en:dev": 196,
+    "hi:train": 206,
+    "hi:dev": 87,
+    "hinglish:train": 201,
+    "hinglish:dev": 79
+  },
+  "excluded": [],
+  "scenario_components": 1328,
+  "seed": "velora-public-20261106-v3",
+  "dev_percent": 20,
+  "inputs_sha256": [
+    "b45c3e6eb987de01b3ee53462880cbf3b0f047762db59af0db764c7cfc6ef806",
+    "246a0d10601bf65600090e24514b0f55c8b691047c52a8e5bbc015f2c318dabd",
+    "7caf990a53906d3fe8f50b9223d4996cc622bea55db67b29c20f25b4e2fa8a32"
+  ],
+  "holdout_sha256": "7da847967b7c9ea5131969bfe8e81632d8e182f39c855eb5f8f76f46478d5f72",
+  "ledger_sha256": "6f7dea677096badc500122b876e05a98066cf8af962ee8980474005a1c22dfba",
+  "dataset_sha256": "af8e8411bce5939f7f9dae6fa895393c2adcb75f0979b256f843c3afd5f4021f",
+  "sotto_raw_sha256": "8ae733269c7471a027c690daa2bea7268d228ebbfcb81ac50323a93c2c234f79"
+}

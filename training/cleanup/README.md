@@ -48,3 +48,51 @@ python -m cleanup score-checkpoints --data curated.jsonl --holdout exclusion-hol
 ```
 
 The holdout serves only as a contamination guard. The report records each checkpoint hash and dev loss and chooses the minimum; use the frozen test only after selection. Checkpoint keys must match the adapter in `--adapter`.
+
+## Experimental cached student decoding
+
+`scripts/benchmark_student_decoder.py` compares uncached streaming with the
+isolated `StudentEngine` wrapper around Velora's cache/decoding code. Inputs
+must explicitly declare public visibility. Qualification requires 64 unique
+case IDs, EOS on every case, exact prompt/output token IDs and guarded results,
+plus the bounded-context recovery probe. This checks decoder parity, not
+semantic model quality. Private cached-decoder replays require the resulting
+report to match the exact current source, model, adapter and package versions.
+
+Copy drafts follow production routing: romanization and other transformations
+with `check_ratio=False` use scalar generation. The public runner requests
+copying only for non-romanization cases, and `StudentEngine` independently
+enforces the same restriction. Earlier diagnostic trials that forced copying
+on romanization do not qualify this routing and retain their original hashes.
+
+The experimental MLX-LM 0.32.2 cache bridge restores the complete state tuple,
+including KV offsets and recurrent padding/lengths. It patches only an
+isolated process for one serial model lifetime; the installed engine and its
+dependencies remain unchanged. An unhealthy model thread causes the replay
+process to exit before its architecture/cache contexts are released.
+
+Stream and engine trials have different timeout policies: the simple stream
+wrapper's cooperative budget includes prefill, while the engine's soft budget
+starts at first output and has a separate worker watchdog. Both policies are
+recorded in replay metadata. Differences in timeout/fallback counts therefore
+need separate analysis; they do not establish a model-quality change. Private
+replay statuses distinguish partial piece cleanup from complete fallback and
+use the server's final result after any successful seam retry. Failed attempts
+remain visible in the per-call records.
+
+All student evaluation decoders explicitly set the MLX allocator cache cap to
+512 MiB before loading a model. The cap is part of public/private provenance
+and qualification checks; training is unaffected. Stream results sample actual
+MLX active, peak and cached allocation instead of reporting default zeros.
+Public and private case records also sample allocation after each case timer.
+CPU tests use injected metric providers or explicitly unavailable model-less
+snapshots and never import MLX for resource sampling.
+
+Private incumbent and student replays write a separate owner-only resource
+artifact at the end, while their model is still resident. It retains only
+`vmmap -summary` physical-footprint lines, peak process RSS and MLX allocation
+metrics; raw mapping inventories are discarded. Sampling runs outside case
+timers. Peak allocation/RSS are process-lifetime observations, and allocator
+usage, process RSS and physical footprint are distinct measurements, not
+interchangeable estimates of a model's RAM requirement. Unhealthy processes
+skip further MLX/resource probes and retire through the existing failure path.

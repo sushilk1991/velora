@@ -1,7 +1,10 @@
 #!/usr/bin/env python3
 """Public-data native worker benchmark; requires explicit reserved GPU window."""
 import argparse,hashlib,json,os,pathlib,selectors,statistics,subprocess,sys,time
-p=argparse.ArgumentParser();p.add_argument('--binary',required=True);p.add_argument('--model',required=True);p.add_argument('--sha256',required=True);p.add_argument('--data',required=True);p.add_argument('--out',required=True);p.add_argument('--reference-tokens');p.add_argument('--limit',type=int,default=64);p.add_argument('--context',type=int,default=4096);p.add_argument('--copy-draft',action='store_true');p.add_argument('--prefix-cache',action='store_true');p.add_argument('--verbose',action='store_true');a=p.parse_args()
+p=argparse.ArgumentParser();p.add_argument('--binary',required=True);p.add_argument('--model',required=True);p.add_argument('--sha256',required=True);p.add_argument('--data',required=True);p.add_argument('--out',required=True);p.add_argument('--reference-tokens');p.add_argument('--limit',type=int,default=64);p.add_argument('--context',type=int,default=4096);p.add_argument('--copy-draft',action='store_true');p.add_argument('--prefix-cache',action='store_true');p.add_argument('--verbose',action='store_true');
+for flag in ('recurrent-rollback','backend-sampling','backend-token-only','direct-argmax','trace-runtime'):p.add_argument('--'+flag,action='store_true')
+p.add_argument('--draft-max',type=int,choices=range(1,9),default=3)
+a=p.parse_args()
 if not 128<=a.context<=4096:p.error('context must be 128..4096')
 from cleanup import render_messages
 from benchmark_checks import record_result,summarize,repeat_matches,state_recovery_checks
@@ -9,7 +12,7 @@ rows=[json.loads(s) for s in pathlib.Path(a.data).read_text().splitlines() if s.
 if not rows or any(r.get('visibility')!='public' for r in rows):raise ValueError('public examples required')
 if pathlib.Path(a.out).exists():raise FileExistsError(a.out)
 reference={r['id']:r['tokens'] for r in json.loads(pathlib.Path(a.reference_tokens).read_text())['rows']} if a.reference_tokens else None
-child=subprocess.Popen([sys.executable,str(pathlib.Path(__file__).with_name('supervise.py')),a.binary,a.model,a.sha256,'--context',str(a.context)]+(['--copy-draft'] if a.copy_draft else [])+(['--prefix-cache'] if a.prefix_cache else [])+(['--verbose'] if a.verbose else []),stdin=subprocess.PIPE,stdout=subprocess.PIPE,stderr=None,bufsize=0)
+child=subprocess.Popen([sys.executable,str(pathlib.Path(__file__).with_name('supervise.py')),a.binary,a.model,a.sha256,'--context',str(a.context)]+(['--copy-draft'] if a.copy_draft else [])+(['--prefix-cache'] if a.prefix_cache else [])+(['--verbose'] if a.verbose else [])+['--draft-max',str(a.draft_max)]+['--'+flag for flag in ('recurrent-rollback','backend-sampling','backend-token-only','direct-argmax','trace-runtime') if getattr(a,flag.replace('-','_'))],stdin=subprocess.PIPE,stdout=subprocess.PIPE,stderr=None,bufsize=0)
 selector=selectors.DefaultSelector();selector.register(child.stdout,selectors.EVENT_READ);buffer=b'';events=[]
 def read(timeout=130):
  global buffer
@@ -34,7 +37,7 @@ def generate(row,identity,max_tokens=256):
  messages=render_messages(row)
  return generate_messages(messages[0]['content'],messages[1]['content'],identity,max_tokens,row['raw'])
 records=[]
-meta={'runtime_qualified':False,'model_sha256':a.sha256,'quantization':'official GGUF Q8_0; differs from MLX8bit','data_sha256':hashlib.sha256(pathlib.Path(a.data).read_bytes()).hexdigest(),'copy_draft':a.copy_draft,'draft_max_tokens':3,'prefix_reuse':a.prefix_cache,'context_tokens':a.context,'verbose':a.verbose,'temperature':0,'max_tokens':256}
+meta={'runtime_qualified':False,'model_sha256':a.sha256,'quantization':'official GGUF Q8_0; differs from MLX8bit','data_sha256':hashlib.sha256(pathlib.Path(a.data).read_bytes()).hexdigest(),'copy_draft':a.copy_draft,'draft_max_tokens':a.draft_max,'recurrent_rollback':a.recurrent_rollback,'backend_sampling':a.backend_sampling,'backend_token_only':a.backend_token_only,'direct_argmax':a.direct_argmax,'trace_runtime':a.trace_runtime,'prefix_reuse':a.prefix_cache,'context_tokens':a.context,'verbose':a.verbose,'temperature':0,'max_tokens':256}
 source_dir=pathlib.Path(__file__).resolve().parent
 meta['binary_sha256']=hashlib.sha256(pathlib.Path(a.binary).read_bytes()).hexdigest()
 meta['source_sha256']={f.name:hashlib.sha256(f.read_bytes()).hexdigest() for f in sorted(source_dir.iterdir()) if f.is_file()}

@@ -1,0 +1,13 @@
+# Phonon refiner prompt-contract arm
+
+`engine/scripts/benchmark_personal_native.py --prompt-contract phonon --phonon-metadata /local/snapshot/phonon_refiner.json` runs the actual fine-tuned refiner through our existing pinned llama.cpp worker and copy-eight decoder. The default `student` contract is unchanged. This is a model-and-prompt comparison, not a measurement of Phonon's application runtime or DFlash drafter.
+
+The option requires repository `Infatoshi/phonon-refiner-1.7b`, revision `2b0ab74bee7ab7cf364695bbe44f64ce4c47439e`, GGUF SHA256 `059e6e503c6c2ec50cb61a39bd0d556fb6d946bb58e965fb9ddb8b0176dfc6cd`, and metadata SHA256 `42c7febd360d3d3a2d13179f382aa2872777e6af7f7e21ae61122d7181a24db3`. Model bytes and metadata are checked before starting the worker. All ordinary manifest, production-glossary STT, binary/source, resume and private-file checks apply.
+
+The independently implemented system instruction matches our earlier MIT `benchmark_phonon_refiner.py`. It appends exactly the pinned metadata's writing-mode line and sends a bare transcript user turn, with our control-token neutralization and output restoration. No Phonon application code is imported or copied. Model licensing remains separate from our benchmark code and llama.cpp licensing.
+
+Resolved stock modes map Default/Note to minimal, Message to casual, Email to formal, and Code/Terminal to prompt. Custom mode names, edited stock prompts or formatting strength, romanization, and transcripts containing non-Latin letters are explicitly unsupported. Production formatting gates, splitting, fallback and postprocessing remain in use; unsupported cases are recorded as `unsupported_fallback` even if a gate avoids a model call. Coverage and reason counts accompany the full cohort. Latin-script coverage does not establish English language or semantic quality.
+
+This bounded variant omits the optional vocabulary line and previous-piece prompt context to retain the bare-transcript contract. It does not reproduce Phonon's vocabulary ranking or adaptive cap. Those limits are recorded in run and per-case metadata. The startup and final recovery probes use the same selected prompt contract. EOS remains required for accepted output, and `model_qualified` stays false pending independent quality evaluation.
+
+The pinned [model metadata](https://huggingface.co/Infatoshi/phonon-refiner-1.7b/blob/2b0ab74bee7ab7cf364695bbe44f64ce4c47439e/phonon_refiner.json) reports 76,960 public/synthetic training rows, including writing-mode targets authored with DeepSeek V4.1 Flash. This is a model-publisher recipe claim, not an independently audited dataset or causal explanation of speed or quality.

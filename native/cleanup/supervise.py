@@ -14,6 +14,8 @@ def main():
     p.add_argument('--gpu-layers',type=int,default=99);p.add_argument('--context',type=int,default=4096)
     p.add_argument('--max-rss-mb',type=int,default=8192)
     p.add_argument('--copy-draft',action='store_true');p.add_argument('--prefix-cache',action='store_true');p.add_argument('--verbose',action='store_true')
+    p.add_argument('--draft-max',type=int,choices=range(1,9),default=3)
+    for flag in ('recurrent-rollback','backend-sampling','backend-token-only','direct-argmax','trace-runtime'):p.add_argument('--'+flag,action='store_true')
     p.add_argument('--startup-deadline-ms',type=int,default=120000)
     p.add_argument('--hard-grace-ms',type=int,default=2000)
     a=p.parse_args()
@@ -24,6 +26,8 @@ def main():
         termination_signal=signum
     for signum in [signal.SIGTERM,signal.SIGHUP,signal.SIGINT]:signal.signal(signum,owner_signal)
     flags=(['--copy-draft'] if a.copy_draft else [])+(['--prefix-cache'] if a.prefix_cache else [])+(['--verbose'] if a.verbose else [])
+    flags+=['--draft-max='+str(a.draft_max)]
+    flags+=['--'+flag for flag in ('recurrent-rollback','backend-sampling','backend-token-only','direct-argmax','trace-runtime') if getattr(a,flag.replace('-','_'))]
     child=subprocess.Popen([a.binary,a.model,a.sha256,str(a.gpu_layers),str(a.context),str(a.max_rss_mb)]+flags,stdin=subprocess.PIPE,stdout=subprocess.PIPE,stderr=None,start_new_session=True,bufsize=0)
     selector=selectors.DefaultSelector();input_fd=sys.stdin.fileno();output_fd=sys.stdout.fileno()
     write_fd=child.stdin.fileno();read_fd=child.stdout.fileno()
