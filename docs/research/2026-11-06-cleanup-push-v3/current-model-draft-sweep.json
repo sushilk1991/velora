@@ -1,0 +1,54 @@
+[
+  {
+    "tokens": 4,
+    "run": "production-4b4-sweep96",
+    "limit": 96,
+    "exit_code": 0,
+    "seconds": 75.38540172576904
+  },
+  {
+    "tokens": 3,
+    "run": "production-4b3-sweep96",
+    "limit": 96,
+    "exit_code": 0,
+    "seconds": 80.97368288040161
+  },
+  {
+    "tokens": 2,
+    "run": "production-4b2-sweep96",
+    "limit": 96,
+    "exit_code": 0,
+    "seconds": 152.0117199420929
+  },
+  {
+    "tokens": 6,
+    "run": "production-4b6-sweep96",
+    "limit": 96,
+    "exit_code": 0,
+    "seconds": 119.21068525314331
+  },
+  {
+    "comparison_to_fresh3": 2,
+    "timed_pairs": 95,
+    "median_ratio": 2.207518471478971,
+    "recorded_pairs": 96,
+    "different_case_count": 5,
+    "text_status_and_guard_parity": false
+  },
+  {
+    "comparison_to_fresh3": 4,
+    "timed_pairs": 95,
+    "median_ratio": 0.9002402442681467,
+    "recorded_pairs": 96,
+    "different_case_count": 6,
+    "text_status_and_guard_parity": false
+  },
+  {
+    "comparison_to_fresh3": 6,
+    "timed_pairs": 95,
+    "median_ratio": 1.5723977771215716,
+    "recorded_pairs": 96,
+    "different_case_count": 2,
+    "text_status_and_guard_parity": false
+  }
+]

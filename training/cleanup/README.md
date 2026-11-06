@@ -2,6 +2,8 @@
 
 This directory is isolated from the engine environment. From the repository root, run `uv sync --project training/cleanup --extra train --extra acquire --extra test --locked`. Never install into `engine/.venv`. No personal dictation or private examples belong in a shared training set. Only public rows with source revision, license and approved review can train. The first reproducible, model-reviewed corpus is in [data/pilot_v1](data/pilot_v1/README.md).
 
+The latest [pilot v3](data/pilot_v3/README.md) contains 1,605 reviewed public/synthetic examples. Two 2B adapters were trained and checked on fresh public tests and saved owner recordings; neither passed the replacement gate. See the [complete results and limitations](../../docs/research/2026-11-06-cleanup-push-v3.md). Personal recordings remain evaluation-only and outside Git.
+
 JSONL records contain `id`, `raw`, `target`, `mode` (default/message/email/note/code/terminal), `language`, `scenario_group`, `split` (train/dev), `source` object (`name`, `revision`, `license`), `teacher` object (`name`, `revision`), `visibility` (`public`), and `quality_review` object (`status`, `reviewer`). Optional `romanize` is boolean, `instructions` is a string, and `vocabulary` is a list of strings. Generated labels may be inspected and split, but training requires status `approved`. See TEACHER.md for the task and review rubric. Record whether the reviewer is a model or a person.
 
 Run from this directory:

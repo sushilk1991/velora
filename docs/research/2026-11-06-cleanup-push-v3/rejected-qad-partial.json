@@ -1,0 +1,20 @@
+{
+  "expected_cases": 614,
+  "recorded_cases": 234,
+  "unattempted_or_unfinished": 380,
+  "status_counts": {
+    "cleanup_partial": 13,
+    "cleanup_fallback": 173,
+    "ok": 47,
+    "stt_failed": 1
+  },
+  "call_reason_family_counts": {
+    "length": 221,
+    "None": 60,
+    "ratio_high": 85,
+    "deadline": 9,
+    "novel_content": 1
+  },
+  "decision": "rejected early: repeated token-ceiling/divergence/deadline failures; not a complete614 candidate or speed comparison",
+  "source_commit": "6bafa29"
+}

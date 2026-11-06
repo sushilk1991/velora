@@ -4,6 +4,8 @@ This is an independently authored C++ token loop over the MIT llama.cpp/ggml mat
 
 Current status: **GPU comparisons passed output, token and status parity on all 64 public fixtures, including two fresh-process copy-draft comparisons.** Cancellation, system-cache invalidation and context-error recovery also passed. The base model reached EOS on 63 cases and its token ceiling on one, so model qualification still failed. The worker remains experimental and separate from the shipped app; measured results and limits are below.
 
+The [follow-up study](../../docs/research/2026-11-06-cleanup-push-v3.md) confirmed another 23.54% median reduction with `--draft-max 8` versus three on the same LFM3 Q8_0 artifact, with exact public output/token/status parity in two counterbalanced pairs. The known length failure remains. Larger drafts did not qualify for the production Qwen4B path; defaults remain unchanged. The study also reports the complete personal-recording comparison and why smaller models were not adopted.
+
 ## Why this backend
 
 Primary source inspection on 2026-11-06:

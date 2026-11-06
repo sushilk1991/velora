@@ -1,0 +1,22 @@
+[
+  {
+    "name": "01-copy3",
+    "p50_ms": 106.937104,
+    "exact_parity": true
+  },
+  {
+    "name": "01-draft8",
+    "p50_ms": 81.81087499999995,
+    "exact_parity": true
+  },
+  {
+    "name": "02-draft8",
+    "p50_ms": 82.48660449999967,
+    "exact_parity": true
+  },
+  {
+    "name": "02-copy3",
+    "p50_ms": 107.93862500000006,
+    "exact_parity": true
+  }
+]

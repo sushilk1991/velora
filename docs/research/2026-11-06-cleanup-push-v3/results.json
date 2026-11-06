@@ -1,0 +1,1044 @@
+{
+  "measured_source_commit": "6bafa29",
+  "hardware": "Apple M5 Max, 36 GiB unified memory",
+  "cohort": {
+    "recordings": 614,
+    "hours_approx": 4.59,
+    "manifest_sha256": "90fd823f593d667d6eb7830ce71b2c3600649c89fe35c595f2f1993934f6e000",
+    "reference_sha256": "15ab1893a15536bb3e78eda7694fd385a8a16283b4a5a526c84ebea78ee44a17",
+    "approved_reference_cases": 303,
+    "uncertain_reference_cases": 310,
+    "unscorable_reference_cases": 1,
+    "human_audio_adjudication": false
+  },
+  "timing_method": "Offline sequential file STT plus later cleanup, paired by frozen recording. Nearest-rank p95. Single pass per full arm; not live release-to-paste, energy or a counterbalanced production speed guarantee. First student4 pass partly overlapped CPU project tests.",
+  "memory_method": "Per-model-process allocator/RSS/vmmap observations, not combined live pipeline memory requirements. Native worker/supervisor observations remain separate.",
+  "candidates": {
+    "installed-4b3-uncapped": {
+      "provenance": {
+        "model": "mlx-community/Qwen3.5-4B-MLX-8bit",
+        "copy_draft_tokens": 3,
+        "model_sha256": "7cb55bd81226262e799b1ed6833bb10e9213d121929ec34e3476cda4d281410d",
+        "source_sha256": "6e0a2703cfcfd939f28c6024744b4cdac1a1380002d7fba02dbedddee543e983",
+        "mlx_allocator_cache_limit_bytes": null
+      },
+      "recorded_cases": 614,
+      "statuses": {
+        "ok": 607,
+        "stt_failed": 1,
+        "cleanup_fallback": 6
+      },
+      "timings": {
+        "stt_s": {
+          "n": 613,
+          "p50_ms": 231.71137482859194,
+          "p95_ms": 1077.5616669561714,
+          "sum_s": 221.38917456497438
+        },
+        "audio_read_s": {
+          "n": 614,
+          "p50_ms": 21.950312540866435,
+          "p95_ms": 35.51420895382762,
+          "sum_s": 14.601363010471687
+        },
+        "stt_total_s": {
+          "n": 614,
+          "p50_ms": 254.98652108944952,
+          "p95_ms": 1112.8994580358267,
+          "sum_s": 237.39605103316717
+        },
+        "cleanup_s": {
+          "n": 613,
+          "p50_ms": 734.5117498189211,
+          "p95_ms": 3770.221791928634,
+          "sum_s": 673.2673060309608
+        },
+        "paired_stt_cleanup_s": {
+          "n": 613,
+          "p50_ms": 952.9119590297341,
+          "p95_ms": 4645.69183299318,
+          "sum_s": 894.6564805959351
+        },
+        "paired_replay_total_s": {
+          "n": 613,
+          "p50_ms": 975.2289999742061,
+          "p95_ms": 4677.878082962707,
+          "sum_s": 910.6396363561507
+        }
+      },
+      "model_routed_cases": 574,
+      "model_calls": 760,
+      "call_reason_counts": {
+        "None": 754,
+        "novel_content": 5,
+        "ratio_low": 1
+      },
+      "length_limit_calls": 0,
+      "model_call_token_distributions": {
+        "input_tokens": {
+          "n": 760,
+          "p50": 3047.5
+        },
+        "output_tokens": {
+          "n": 760,
+          "p50": 55.0
+        },
+        "prefix_tokens": {
+          "n": 760,
+          "p50": 2940.0
+        }
+      },
+      "same_text_as_repository_capped_current": 613,
+      "end_resources": [
+        {
+          "scope": "end of replay, model still resident; outside case timers",
+          "peak_rss_native": 3479175168,
+          "peak_rss_units": "bytes on macOS",
+          "mlx_memory": {
+            "available": true,
+            "mlx_active_bytes": 4761296394,
+            "mlx_peak_bytes": 5500374960,
+            "mlx_cache_bytes": 498093072
+          },
+          "physical_footprint_lines": [
+            "Physical footprint:         5.4G",
+            "Physical footprint (peak):  8.7G"
+          ],
+          "vmmap_exit_code": 0
+        }
+      ]
+    },
+    "production-4b3": {
+      "provenance": {
+        "model": "mlx-community/Qwen3.5-4B-MLX-8bit",
+        "copy_draft_tokens": 3,
+        "model_sha256": "7cb55bd81226262e799b1ed6833bb10e9213d121929ec34e3476cda4d281410d",
+        "source_sha256": "d4ff023eced227dfba7fba9ee93fb9f4ce10b6b7be0b1cf41a68b1656ba64cc7",
+        "mlx_allocator_cache_limit_bytes": 536870912
+      },
+      "recorded_cases": 614,
+      "statuses": {
+        "ok": 607,
+        "stt_failed": 1,
+        "cleanup_fallback": 6
+      },
+      "timings": {
+        "stt_s": {
+          "n": 613,
+          "p50_ms": 231.71137482859194,
+          "p95_ms": 1077.5616669561714,
+          "sum_s": 221.38917456497438
+        },
+        "audio_read_s": {
+          "n": 614,
+          "p50_ms": 21.950312540866435,
+          "p95_ms": 35.51420895382762,
+          "sum_s": 14.601363010471687
+        },
+        "stt_total_s": {
+          "n": 614,
+          "p50_ms": 254.98652108944952,
+          "p95_ms": 1112.8994580358267,
+          "sum_s": 237.39605103316717
+        },
+        "cleanup_s": {
+          "n": 613,
+          "p50_ms": 760.7255829498172,
+          "p95_ms": 4298.826582962647,
+          "sum_s": 718.9346532076597
+        },
+        "paired_stt_cleanup_s": {
+          "n": 613,
+          "p50_ms": 991.1544579081237,
+          "p95_ms": 5216.860750224441,
+          "sum_s": 940.3238277726341
+        },
+        "paired_replay_total_s": {
+          "n": 613,
+          "p50_ms": 1013.280333019793,
+          "p95_ms": 5256.316834129393,
+          "sum_s": 956.3069835328497
+        }
+      },
+      "model_routed_cases": 574,
+      "model_calls": 760,
+      "call_reason_counts": {
+        "None": 754,
+        "novel_content": 5,
+        "ratio_low": 1
+      },
+      "length_limit_calls": 0,
+      "model_call_token_distributions": {
+        "input_tokens": {
+          "n": 760,
+          "p50": 3047.5
+        },
+        "output_tokens": {
+          "n": 760,
+          "p50": 55.0
+        },
+        "prefix_tokens": {
+          "n": 760,
+          "p50": 2940.0
+        }
+      },
+      "same_text_as_repository_capped_current": 613,
+      "end_resources": [
+        {
+          "scope": "end of replay, model still resident; outside case timers",
+          "peak_rss_native": 4330389504,
+          "peak_rss_units": "bytes on macOS",
+          "mlx_memory": {
+            "available": true,
+            "mlx_active_bytes": 4761296394,
+            "mlx_peak_bytes": 5500489648,
+            "mlx_cache_bytes": 498085904
+          },
+          "physical_footprint_lines": [
+            "Physical footprint:         5.5G",
+            "Physical footprint (peak):  6.2G"
+          ],
+          "vmmap_exit_code": 0
+        }
+      ]
+    },
+    "production-student4-v3": {
+      "provenance": {
+        "base_revision": "93760be4f1f69842a46bc13dbdc0f19e291392a3",
+        "adapter_sha256": {
+          "adapter_config.json": "e8f9fee7bb44c07d7e9d8ef9ccd9cf96c682da092ad9dd67c96155c69cf229ea",
+          "adapters.safetensors": "122b3a56e0961e52b5fc2920184b0e12b3cb1a0955f59146b56a14f6904375aa"
+        },
+        "copy_draft_tokens": 3,
+        "decoder": "stream",
+        "source_sha256": "b985d19d45d5b5ef9d65afcc4dd5e25c0202a86c3c4f964c325e876633746510",
+        "max_input_tokens": 4096,
+        "max_output_tokens": 1024,
+        "mlx_allocator_cache_limit_bytes": 536870912,
+        "prompt_contract": "short training JSON with production control-token neutralization; differs from unneutralized training evaluation for control-token text"
+      },
+      "recorded_cases": 614,
+      "statuses": {
+        "ok": 607,
+        "cleanup_partial": 4,
+        "stt_failed": 1,
+        "cleanup_fallback": 2
+      },
+      "timings": {
+        "stt_s": {
+          "n": 613,
+          "p50_ms": 231.71137482859194,
+          "p95_ms": 1077.5616669561714,
+          "sum_s": 221.38917456497438
+        },
+        "audio_read_s": {
+          "n": 614,
+          "p50_ms": 21.950312540866435,
+          "p95_ms": 35.51420895382762,
+          "sum_s": 14.601363010471687
+        },
+        "stt_total_s": {
+          "n": 614,
+          "p50_ms": 254.98652108944952,
+          "p95_ms": 1112.8994580358267,
+          "sum_s": 237.39605103316717
+        },
+        "cleanup_s": {
+          "n": 613,
+          "p50_ms": 632.8214588575065,
+          "p95_ms": 3395.9263749420643,
+          "sum_s": 591.1227749604732
+        },
+        "paired_stt_cleanup_s": {
+          "n": 613,
+          "p50_ms": 872.4890421144664,
+          "p95_ms": 4450.829749926925,
+          "sum_s": 812.5119495254476
+        },
+        "paired_replay_total_s": {
+          "n": 613,
+          "p50_ms": 896.32683317177,
+          "p95_ms": 4482.013375032693,
+          "sum_s": 828.4951052856632
+        }
+      },
+      "model_routed_cases": 574,
+      "model_calls": 761,
+      "call_reason_counts": {
+        "None": 754,
+        "novel_content": 5,
+        "length": 2
+      },
+      "length_limit_calls": 2,
+      "model_call_token_distributions": {
+        "input_tokens": {
+          "n": 761,
+          "p50": 825
+        },
+        "output_tokens": {
+          "n": 761,
+          "p50": 55
+        },
+        "prefix_tokens": {
+          "n": 761,
+          "p50": 0
+        }
+      },
+      "same_text_as_repository_capped_current": 166,
+      "end_resources": [
+        {
+          "scope": "end of replay, model still resident; outside case timers",
+          "peak_rss_native": 1714405376,
+          "peak_rss_units": "bytes on macOS",
+          "mlx_memory": {
+            "available": true,
+            "mlx_active_bytes": 1126609098,
+            "mlx_peak_bytes": 2735742002,
+            "mlx_cache_bytes": 54214682
+          },
+          "physical_footprint_lines": [
+            "Physical footprint:         1.5G",
+            "Physical footprint (peak):  3.2G"
+          ],
+          "vmmap_exit_code": 0
+        }
+      ]
+    },
+    "production-student8-v3": {
+      "provenance": {
+        "base_revision": "562fb8ea19bbe7565a3ddf5b7d49899ea2c88d2b",
+        "adapter_sha256": {
+          "adapter_config.json": "e8f9fee7bb44c07d7e9d8ef9ccd9cf96c682da092ad9dd67c96155c69cf229ea",
+          "adapters.safetensors": "8d215715c7f7e48cc50ed4bf47974b4ad50dd3e102a8358a07ab67bf22454313"
+        },
+        "copy_draft_tokens": 3,
+        "decoder": "stream",
+        "source_sha256": "b985d19d45d5b5ef9d65afcc4dd5e25c0202a86c3c4f964c325e876633746510",
+        "max_input_tokens": 4096,
+        "max_output_tokens": 1024,
+        "mlx_allocator_cache_limit_bytes": 536870912,
+        "prompt_contract": "short training JSON with production control-token neutralization; differs from unneutralized training evaluation for control-token text"
+      },
+      "recorded_cases": 614,
+      "statuses": {
+        "ok": 607,
+        "stt_failed": 1,
+        "cleanup_fallback": 3,
+        "cleanup_partial": 3
+      },
+      "timings": {
+        "stt_s": {
+          "n": 613,
+          "p50_ms": 231.71137482859194,
+          "p95_ms": 1077.5616669561714,
+          "sum_s": 221.38917456497438
+        },
+        "audio_read_s": {
+          "n": 614,
+          "p50_ms": 21.950312540866435,
+          "p95_ms": 35.51420895382762,
+          "sum_s": 14.601363010471687
+        },
+        "stt_total_s": {
+          "n": 614,
+          "p50_ms": 254.98652108944952,
+          "p95_ms": 1112.8994580358267,
+          "sum_s": 237.39605103316717
+        },
+        "cleanup_s": {
+          "n": 613,
+          "p50_ms": 743.8462090212852,
+          "p95_ms": 3958.0635000020266,
+          "sum_s": 697.0573586204555
+        },
+        "paired_stt_cleanup_s": {
+          "n": 613,
+          "p50_ms": 981.5115011297166,
+          "p95_ms": 4972.572791855782,
+          "sum_s": 918.4465331854299
+        },
+        "paired_replay_total_s": {
+          "n": 613,
+          "p50_ms": 1011.8422920349985,
+          "p95_ms": 5008.086999878287,
+          "sum_s": 934.4296889456455
+        }
+      },
+      "model_routed_cases": 574,
+      "model_calls": 760,
+      "call_reason_counts": {
+        "None": 754,
+        "novel_content": 4,
+        "script_loss": 1,
+        "ratio_high": 1
+      },
+      "length_limit_calls": 0,
+      "model_call_token_distributions": {
+        "input_tokens": {
+          "n": 760,
+          "p50": 824.5
+        },
+        "output_tokens": {
+          "n": 760,
+          "p50": 55.0
+        },
+        "prefix_tokens": {
+          "n": 760,
+          "p50": 0.0
+        }
+      },
+      "same_text_as_repository_capped_current": 150,
+      "end_resources": [
+        {
+          "scope": "end of replay, model still resident; outside case timers",
+          "peak_rss_native": 2655191040,
+          "peak_rss_units": "bytes on macOS",
+          "mlx_memory": {
+            "available": true,
+            "mlx_active_bytes": 2067296458,
+            "mlx_peak_bytes": 3572879872,
+            "mlx_cache_bytes": 54248466
+          },
+          "physical_footprint_lines": [
+            "Physical footprint:         2.4G",
+            "Physical footprint (peak):  4.0G"
+          ],
+          "vmmap_exit_code": 0
+        }
+      ]
+    },
+    "production-native-phonon": {
+      "provenance": {
+        "copy_draft_tokens": 8,
+        "model_repository": "Infatoshi/phonon-refiner-1.7b",
+        "model_revision": "2b0ab74bee7ab7cf364695bbe44f64ce4c47439e",
+        "model_sha256": "059e6e503c6c2ec50cb61a39bd0d556fb6d946bb58e965fb9ddb8b0176dfc6cd",
+        "binary_sha256": "e9815619d1eabf312ccc390a312f834bc7a52d3224b4cfffad3dd8db5a064a59",
+        "source_sha256": "b985d19d45d5b5ef9d65afcc4dd5e25c0202a86c3c4f964c325e876633746510",
+        "runner_sha256": "d01854bc76c6f2524452332f001d58f175f96c81b02aa9e9f14e29474a49161a",
+        "max_output_tokens": 512,
+        "context_tokens": 4096,
+        "prompt_contract": "phonon"
+      },
+      "recorded_cases": 614,
+      "statuses": {
+        "ok": 608,
+        "stt_failed": 1,
+        "unsupported_fallback": 5
+      },
+      "timings": {
+        "stt_s": {
+          "n": 613,
+          "p50_ms": 231.71137482859194,
+          "p95_ms": 1077.5616669561714,
+          "sum_s": 221.38917456497438
+        },
+        "audio_read_s": {
+          "n": 614,
+          "p50_ms": 21.950312540866435,
+          "p95_ms": 35.51420895382762,
+          "sum_s": 14.601363010471687
+        },
+        "stt_total_s": {
+          "n": 614,
+          "p50_ms": 254.98652108944952,
+          "p95_ms": 1112.8994580358267,
+          "sum_s": 237.39605103316717
+        },
+        "cleanup_s": {
+          "n": 613,
+          "p50_ms": 133.31795786507428,
+          "p95_ms": 880.5237500928342,
+          "sum_s": 147.5186840405222
+        },
+        "paired_stt_cleanup_s": {
+          "n": 613,
+          "p50_ms": 366.12854222767055,
+          "p95_ms": 1944.655500119552,
+          "sum_s": 368.9078586054966
+        },
+        "paired_replay_total_s": {
+          "n": 613,
+          "p50_ms": 390.218042768538,
+          "p95_ms": 1983.601792016998,
+          "sum_s": 384.8910143657122
+        }
+      },
+      "model_routed_cases": 574,
+      "model_calls": 760,
+      "call_reason_counts": {
+        "None": 759,
+        "unsupported_non_latin_transcript": 1
+      },
+      "length_limit_calls": 0,
+      "model_call_token_distributions": {
+        "input_tokens": {
+          "n": 760,
+          "p50": 119.0
+        },
+        "output_tokens": {
+          "n": 760,
+          "p50": 54.0
+        },
+        "prefix_tokens": {
+          "n": 760,
+          "p50": 0.0
+        }
+      },
+      "same_text_as_repository_capped_current": 142,
+      "native_session_validation": [
+        {
+          "exit_code": 0,
+          "model_loaded": true,
+          "load_seconds": 2.298533624969423,
+          "before_recovery_passed": true,
+          "after_recovery_passed": true,
+          "supervisor_exit_code": 0
+        }
+      ],
+      "end_resources": [
+        {
+          "scope": "end of replay, before shutdown, outside case timers",
+          "native_processes": {
+            "worker": {
+              "physical_footprint_lines": [
+                "Physical footprint:         1.4G",
+                "Physical footprint (peak):  1.5G"
+              ],
+              "vmmap_exit_code": 0
+            },
+            "supervisor": {
+              "physical_footprint_lines": [
+                "Physical footprint:         10.4M",
+                "Physical footprint (peak):  10.4M"
+              ],
+              "vmmap_exit_code": 0
+            }
+          }
+        }
+      ],
+      "phonon_coverage": {
+        "assessed": 613,
+        "supported": 608,
+        "unsupported": 5,
+        "reason_counts": {
+          "unsupported_non_latin_transcript": 5
+        }
+      },
+      "matched_supported_timings": {
+        "cleanup_s": {
+          "n": 608,
+          "p50_ms": 133.6468328954652,
+          "p95_ms": 880.5237500928342,
+          "sum_s": 147.5172629985027
+        },
+        "paired_stt_cleanup_s": {
+          "n": 608,
+          "p50_ms": 368.31874994095415,
+          "p95_ms": 1944.655500119552,
+          "sum_s": 367.61287914635614
+        }
+      },
+      "matched_current_supported_timings": {
+        "cleanup_s": {
+          "n": 608,
+          "p50_ms": 766.5278125787154,
+          "p95_ms": 4298.826582962647,
+          "sum_s": 718.6619916236959
+        },
+        "paired_stt_cleanup_s": {
+          "n": 608,
+          "p50_ms": 1002.1263959351927,
+          "p95_ms": 5216.860750224441,
+          "sum_s": 938.7576077715494
+        }
+      }
+    }
+  },
+  "blind_quality": {
+    "method": "Keep original Muse judgments unchanged. Terra blindly audited all156 content/control-flagged unique labels. Benign filler/grammar/layout flags are not material errors. Reviewed acceptance requires original acceptable, score>=4, no ambiguity, and no supported or uncertain audit issue. No human/audio adjudication.",
+    "summary": {
+      "raw-stt": {
+        "total": 303,
+        "score_counts": {
+          "5": 178,
+          "3": 17,
+          "4": 108
+        },
+        "mean_score": 4.531353135313531,
+        "muse_text_acceptable": 258,
+        "strict_any_flag_text_acceptable": 258,
+        "reviewed_text_acceptable": 258,
+        "normal_execution_and_reviewed_text_acceptable": 258,
+        "ambiguous": 35,
+        "contains_inherited_asr_error": 17,
+        "possible_content_or_control_flags": 9,
+        "reviewed_material_issues": 6,
+        "uncertain_reviewed_flags": 0,
+        "benign_or_unsupported_flags": 3,
+        "flag_counts": {
+          "newly_introduced_addition": 0,
+          "newly_introduced_omission": 0,
+          "correction_failure": 8,
+          "mode_failure": 1
+        },
+        "note": "Model-assisted references, no human/audio adjudication. All303 approved cases remain denominator. Ambiguous is reported separately and not accepted. Execution eligibility is separate from blind text quality; broader model adoption remains unqualified.",
+        "reviewed_material_cases_not_flagged_material_in_current": 2,
+        "shared_reviewed_material_cases_with_current": 4
+      },
+      "production-4b3": {
+        "total": 303,
+        "score_counts": {
+          "5": 221,
+          "4": 63,
+          "2": 2,
+          "3": 17
+        },
+        "mean_score": 4.66006600660066,
+        "muse_text_acceptable": 257,
+        "strict_any_flag_text_acceptable": 248,
+        "reviewed_text_acceptable": 256,
+        "normal_execution_and_reviewed_text_acceptable": 253,
+        "ambiguous": 36,
+        "contains_inherited_asr_error": 14,
+        "possible_content_or_control_flags": 19,
+        "reviewed_material_issues": 8,
+        "uncertain_reviewed_flags": 1,
+        "benign_or_unsupported_flags": 10,
+        "flag_counts": {
+          "newly_introduced_addition": 5,
+          "newly_introduced_omission": 9,
+          "correction_failure": 6,
+          "mode_failure": 1
+        },
+        "note": "Model-assisted references, no human/audio adjudication. All303 approved cases remain denominator. Ambiguous is reported separately and not accepted. Execution eligibility is separate from blind text quality; broader model adoption remains unqualified.",
+        "reviewed_material_cases_not_flagged_material_in_current": 0,
+        "shared_reviewed_material_cases_with_current": 8
+      },
+      "production-student4-v3": {
+        "total": 303,
+        "score_counts": {
+          "5": 201,
+          "4": 76,
+          "3": 25,
+          "2": 1
+        },
+        "mean_score": 4.574257425742574,
+        "muse_text_acceptable": 252,
+        "strict_any_flag_text_acceptable": 227,
+        "reviewed_text_acceptable": 246,
+        "normal_execution_and_reviewed_text_acceptable": 245,
+        "ambiguous": 35,
+        "contains_inherited_asr_error": 14,
+        "possible_content_or_control_flags": 44,
+        "reviewed_material_issues": 17,
+        "uncertain_reviewed_flags": 3,
+        "benign_or_unsupported_flags": 24,
+        "flag_counts": {
+          "newly_introduced_addition": 4,
+          "newly_introduced_omission": 37,
+          "correction_failure": 4,
+          "mode_failure": 1
+        },
+        "note": "Model-assisted references, no human/audio adjudication. All303 approved cases remain denominator. Ambiguous is reported separately and not accepted. Execution eligibility is separate from blind text quality; broader model adoption remains unqualified.",
+        "reviewed_material_cases_not_flagged_material_in_current": 11,
+        "shared_reviewed_material_cases_with_current": 6
+      },
+      "production-student8-v3": {
+        "total": 303,
+        "score_counts": {
+          "5": 206,
+          "4": 78,
+          "3": 17,
+          "2": 2
+        },
+        "mean_score": 4.6105610561056105,
+        "muse_text_acceptable": 261,
+        "strict_any_flag_text_acceptable": 236,
+        "reviewed_text_acceptable": 254,
+        "normal_execution_and_reviewed_text_acceptable": 253,
+        "ambiguous": 35,
+        "contains_inherited_asr_error": 14,
+        "possible_content_or_control_flags": 38,
+        "reviewed_material_issues": 12,
+        "uncertain_reviewed_flags": 6,
+        "benign_or_unsupported_flags": 20,
+        "flag_counts": {
+          "newly_introduced_addition": 2,
+          "newly_introduced_omission": 34,
+          "correction_failure": 3,
+          "mode_failure": 1
+        },
+        "note": "Model-assisted references, no human/audio adjudication. All303 approved cases remain denominator. Ambiguous is reported separately and not accepted. Execution eligibility is separate from blind text quality; broader model adoption remains unqualified.",
+        "reviewed_material_cases_not_flagged_material_in_current": 9,
+        "shared_reviewed_material_cases_with_current": 3
+      },
+      "production-native-phonon": {
+        "total": 303,
+        "score_counts": {
+          "5": 159,
+          "4": 125,
+          "3": 16,
+          "2": 3
+        },
+        "mean_score": 4.452145214521452,
+        "muse_text_acceptable": 256,
+        "strict_any_flag_text_acceptable": 209,
+        "reviewed_text_acceptable": 254,
+        "normal_execution_and_reviewed_text_acceptable": 251,
+        "ambiguous": 35,
+        "contains_inherited_asr_error": 17,
+        "possible_content_or_control_flags": 63,
+        "reviewed_material_issues": 8,
+        "uncertain_reviewed_flags": 4,
+        "benign_or_unsupported_flags": 51,
+        "flag_counts": {
+          "newly_introduced_addition": 6,
+          "newly_introduced_omission": 49,
+          "correction_failure": 8,
+          "mode_failure": 2
+        },
+        "note": "Model-assisted references, no human/audio adjudication. All303 approved cases remain denominator. Ambiguous is reported separately and not accepted. Execution eligibility is separate from blind text quality; broader model adoption remains unqualified.",
+        "reviewed_material_cases_not_flagged_material_in_current": 3,
+        "shared_reviewed_material_cases_with_current": 5
+      },
+      "installed-4b3-uncapped": {
+        "total": 303,
+        "score_counts": {
+          "5": 221,
+          "4": 63,
+          "2": 2,
+          "3": 17
+        },
+        "mean_score": 4.66006600660066,
+        "muse_text_acceptable": 257,
+        "strict_any_flag_text_acceptable": 248,
+        "reviewed_text_acceptable": 256,
+        "normal_execution_and_reviewed_text_acceptable": 253,
+        "ambiguous": 36,
+        "contains_inherited_asr_error": 14,
+        "possible_content_or_control_flags": 19,
+        "reviewed_material_issues": 8,
+        "uncertain_reviewed_flags": 1,
+        "benign_or_unsupported_flags": 10,
+        "flag_counts": {
+          "newly_introduced_addition": 5,
+          "newly_introduced_omission": 9,
+          "correction_failure": 6,
+          "mode_failure": 1
+        },
+        "note": "Model-assisted references, no human/audio adjudication. All303 approved cases remain denominator. Ambiguous is reported separately and not accepted. Execution eligibility is separate from blind text quality; broader model adoption remains unqualified.",
+        "reviewed_material_cases_not_flagged_material_in_current": 0,
+        "shared_reviewed_material_cases_with_current": 8,
+        "quality_transferred_by_complete_text_status_parity": true
+      }
+    },
+    "judgment_files_sha256": {
+      "shard-01": "ecb75a3d37e4b2befb4403f8dde88fb04b4dcb6f57cf9b9684fa0b2380c701f1",
+      "shard-03": "0e2bfeffcf59e44e27bd28b6627b0564c55f0848d37af3aac1a105a0a1077ef7",
+      "shard-02": "15170fafbe3080c4873f52b7fba70fa517fa624eec93287eeb0936413b43716f"
+    },
+    "expected_labels": 967,
+    "unique_judgments": 967,
+    "installed_reference_equivalence": {
+      "cases": 614,
+      "compared_fields": [
+        "text",
+        "status",
+        "cleanup_applied",
+        "cleanup_reason",
+        "mode"
+      ],
+      "different_cases": 0,
+      "explanation": "Installed uncapped code and repository capped code produced identical text, mode, status and final guards on all614; same text-quality judgments apply without a second teacher pass."
+    }
+  },
+  "native_public_draft_confirmation": [
+    {
+      "name": "01-copy3",
+      "p50_ms": 106.937104,
+      "exact_parity": true
+    },
+    {
+      "name": "01-draft8",
+      "p50_ms": 81.81087499999995,
+      "exact_parity": true
+    },
+    {
+      "name": "02-draft8",
+      "p50_ms": 82.48660449999967,
+      "exact_parity": true
+    },
+    {
+      "name": "02-copy3",
+      "p50_ms": 107.93862500000006,
+      "exact_parity": true
+    }
+  ],
+  "public_qualification96": {
+    "student4": {
+      "input_file": "blind-public-qualification-A.jsonl",
+      "judgments_file": "blind-public-A-judgments.jsonl",
+      "total": 96,
+      "unique_ids": 96,
+      "score_counts": {
+        "1": 0,
+        "2": 1,
+        "3": 0,
+        "4": 18,
+        "5": 77
+      },
+      "mean_score": 4.7812,
+      "acceptable_count": 95,
+      "unacceptable_count": 1,
+      "error_categories": {
+        "unsupported_addition": 1,
+        "meaning_loss": 0,
+        "mode_or_language_failure": 0,
+        "correction_error": 1,
+        "material_meaning_or_correction_error_score_le_2": 1,
+        "minor_punctuation_or_stylistic_score_4": 18
+      },
+      "strongest_concrete_failure_ids": [
+        "qualification-v3-078"
+      ],
+      "strongest_concrete_failures": [
+        {
+          "id": "qualification-v3-078",
+          "score": 2,
+          "reason": "Explicit correction failed: retains superseded 'Rohan ko call karo' alongside corrected 'Mohan ko call karo', creating contradictory recipients."
+        }
+      ],
+      "gate_note": "Not shipping approval; gate requires zero invented facts/material meaning errors \u2014 qualification-v3-078 is a material correction error, so gate fails on this candidate.",
+      "judgments_sha256": "21bd9e54b504f2cdfbc8e30c4cd93806ae3ecb26ba1f86348648bba4d4c70b6e",
+      "input_sha256": "9a478b4865481a021e1ef16167e1aec14cef0652521cd972717b2ae7fb32a91e"
+    },
+    "student8": {
+      "n": 96,
+      "unique_ids": 96,
+      "coverage_validated": true,
+      "score_counts": {
+        "2": 1,
+        "4": 31,
+        "5": 64
+      },
+      "mean_score": 4.6458,
+      "acceptable_count": 95,
+      "unacceptable_count": 1,
+      "material_error_count": 1,
+      "material_error_ids": [
+        "qualification-v3-078"
+      ],
+      "failure_ids": [
+        "qualification-v3-078"
+      ],
+      "score_below_4_ids": [
+        "qualification-v3-078"
+      ],
+      "zero_material_error_gate": "FAIL",
+      "zero_material_error_gate_passed": false,
+      "gate_note": "Assessed separately from mean: any material error (score<=2 or material boolean) fails gate regardless of mean.",
+      "error_flag_counts": {
+        "unsupported_addition": 1,
+        "meaning_loss": 0,
+        "mode_or_language_failure": 0,
+        "correction_error": 1
+      },
+      "category_errors": {
+        "ambiguity": {
+          "total": 4,
+          "unacceptable": 0,
+          "material_errors": 0
+        },
+        "code": {
+          "total": 4,
+          "unacceptable": 0,
+          "material_errors": 0
+        },
+        "contrast": {
+          "total": 5,
+          "unacceptable": 0,
+          "material_errors": 0
+        },
+        "correction": {
+          "total": 8,
+          "unacceptable": 1,
+          "material_errors": 1
+        },
+        "email": {
+          "total": 1,
+          "unacceptable": 0,
+          "material_errors": 0
+        },
+        "glossary_irrelevant": {
+          "total": 4,
+          "unacceptable": 0,
+          "material_errors": 0
+        },
+        "glossary_relevant": {
+          "total": 4,
+          "unacceptable": 0,
+          "material_errors": 0
+        },
+        "grammar": {
+          "total": 8,
+          "unacceptable": 0,
+          "material_errors": 0
+        },
+        "instruction_as_data": {
+          "total": 10,
+          "unacceptable": 0,
+          "material_errors": 0
+        },
+        "message": {
+          "total": 4,
+          "unacceptable": 0,
+          "material_errors": 0
+        },
+        "names": {
+          "total": 7,
+          "unacceptable": 0,
+          "material_errors": 0
+        },
+        "negation": {
+          "total": 7,
+          "unacceptable": 0,
+          "material_errors": 0
+        },
+        "noncorrection": {
+          "total": 8,
+          "unacceptable": 0,
+          "material_errors": 0
+        },
+        "noop": {
+          "total": 7,
+          "unacceptable": 0,
+          "material_errors": 0
+        },
+        "note": {
+          "total": 3,
+          "unacceptable": 0,
+          "material_errors": 0
+        },
+        "numbers": {
+          "total": 8,
+          "unacceptable": 0,
+          "material_errors": 0
+        },
+        "terminal": {
+          "total": 4,
+          "unacceptable": 0,
+          "material_errors": 0
+        }
+      },
+      "input_sha256": "7e4349ab61a79084fc33ccd8efd22494845cc5cff1085a1313b913e82cb79814",
+      "judgments_sha256": "45adbd74f7514b3e5acd46b16df9a3d7fa1e72c9cfd87a3232f9939e712a97b4"
+    }
+  },
+  "local_activation": {
+    "updated": true,
+    "local_version": "0.31.0",
+    "local_build": 434,
+    "engine_source_commit": "e366bc43a4bb339019359575d3bf526ddb2e75d5",
+    "installed_cleanup_matches_repository": true,
+    "allocator_cache_limit_bytes": 536870912,
+    "engine_ready": true,
+    "microphone_granted": true,
+    "accessibility_granted": true,
+    "input_monitoring_granted": true,
+    "designated_requirement_unchanged": true,
+    "entitlements_unchanged": true,
+    "provisioning_profile_unchanged": true,
+    "rollback_copy_kept": true,
+    "model_selection_changed": false,
+    "public_release_created": false
+  },
+  "current_model_draft_sweep": [
+    {
+      "tokens": 4,
+      "run": "production-4b4-sweep96",
+      "limit": 96,
+      "exit_code": 0,
+      "seconds": 75.38540172576904
+    },
+    {
+      "tokens": 3,
+      "run": "production-4b3-sweep96",
+      "limit": 96,
+      "exit_code": 0,
+      "seconds": 80.97368288040161
+    },
+    {
+      "tokens": 2,
+      "run": "production-4b2-sweep96",
+      "limit": 96,
+      "exit_code": 0,
+      "seconds": 152.0117199420929
+    },
+    {
+      "tokens": 6,
+      "run": "production-4b6-sweep96",
+      "limit": 96,
+      "exit_code": 0,
+      "seconds": 119.21068525314331
+    },
+    {
+      "comparison_to_fresh3": 2,
+      "timed_pairs": 95,
+      "median_ratio": 2.207518471478971,
+      "recorded_pairs": 96,
+      "different_case_count": 5,
+      "text_status_and_guard_parity": false
+    },
+    {
+      "comparison_to_fresh3": 4,
+      "timed_pairs": 95,
+      "median_ratio": 0.9002402442681467,
+      "recorded_pairs": 96,
+      "different_case_count": 6,
+      "text_status_and_guard_parity": false
+    },
+    {
+      "comparison_to_fresh3": 6,
+      "timed_pairs": 95,
+      "median_ratio": 1.5723977771215716,
+      "recorded_pairs": 96,
+      "different_case_count": 2,
+      "text_status_and_guard_parity": false
+    }
+  ],
+  "rejected_partial_arms": {
+    "qad": {
+      "expected_cases": 614,
+      "recorded_cases": 234,
+      "unattempted_or_unfinished": 380,
+      "status_counts": {
+        "cleanup_partial": 13,
+        "cleanup_fallback": 173,
+        "ok": 47,
+        "stt_failed": 1
+      },
+      "call_reason_family_counts": {
+        "length": 221,
+        "None": 60,
+        "ratio_high": 85,
+        "deadline": 9,
+        "novel_content": 1
+      },
+      "decision": "rejected early: repeated token-ceiling/divergence/deadline failures; not a complete614 candidate or speed comparison",
+      "source_commit": "6bafa29"
+    },
+    "q8": {
+      "expected_pilot_cases": 24,
+      "recorded_cases": 24,
+      "status_counts": {
+        "cleanup_fallback": 22,
+        "cleanup_partial": 2
+      },
+      "length_calls": 30,
+      "decision": "rejected short pilot; unadapted base under student JSON + production controls; no full614 claim",
+      "source_commit": "6bafa29"
+    }
+  },
+  "public_data_sha256": "af8e8411bce5939f7f9dae6fa895393c2adcb75f0979b256f843c3afd5f4021f"
+}

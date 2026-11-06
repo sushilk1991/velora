@@ -1,0 +1,18 @@
+{
+  "updated": true,
+  "local_version": "0.31.0",
+  "local_build": 434,
+  "engine_source_commit": "e366bc43a4bb339019359575d3bf526ddb2e75d5",
+  "installed_cleanup_matches_repository": true,
+  "allocator_cache_limit_bytes": 536870912,
+  "engine_ready": true,
+  "microphone_granted": true,
+  "accessibility_granted": true,
+  "input_monitoring_granted": true,
+  "designated_requirement_unchanged": true,
+  "entitlements_unchanged": true,
+  "provisioning_profile_unchanged": true,
+  "rollback_copy_kept": true,
+  "model_selection_changed": false,
+  "public_release_created": false
+}

@@ -1,0 +1,419 @@
+{
+  "baseline": ".context/compound-engineering/ce-optimize/cleanup-push-v3/native-v3-copy3-baseline.jsonl",
+  "baseline_sha256": "a168ff05c34e98a62d0c6671384bf03b0e320e6ace576556cd6167953d3e0f0a",
+  "baseline_meta_sha256": "d2b15f4cbd2b215ea5357eecf015ab98074b7f249d448e02b95c96f64c98e304",
+  "baseline_accounting": {
+    "expected_rows": 64,
+    "recorded_rows": 64,
+    "status_counts": {
+      "eos": 63,
+      "length": 1
+    },
+    "non_eos_ids": [
+      "public-holdout-052"
+    ],
+    "all_recorded_latency": {
+      "count": 64,
+      "p50_ms": 151.6625420190394,
+      "p95_ms": 516.397999948822,
+      "sum_ms": 14791.891664615832
+    },
+    "all_recorded_worker": {
+      "count": 64,
+      "p50_ms": 151.3759995,
+      "p95_ms": 515.897666,
+      "sum_ms": 14770.005708
+    },
+    "work_counters": {
+      "accepted": 1121,
+      "forward_calls": 1441,
+      "forward_tokens": 6404,
+      "proposed": 1169,
+      "rollbacks": 36,
+      "snapshot_saved_bytes": 1643307684,
+      "backend_sampled_tokens": 0,
+      "backend_filtered_rows_checked": 0
+    },
+    "trace_span_sum_ms": {},
+    "trace_span_counts": {},
+    "decode_batch_sizes": {},
+    "trace_warning": "Nested CPU spans; sample waits include queued GPU work. Do not sum spans as disjoint GPU time."
+  },
+  "model_qualified": false,
+  "semantic_quality_evaluated": false,
+  "comparisons": [
+    {
+      "candidate": "/Users/sushil/Code/Velora/.context/compound-engineering/ce-optimize/cleanup-push-v3/native-v3-confirm/01-copy3.jsonl",
+      "candidate_sha256": "caab6b1f1c927b36da6442cbc388990a0c1fe24ebeff1c414b37a2ffc70cdfac",
+      "candidate_meta_sha256": "12b66a45f4d892fee2ba902f8db84af0ab82307d21a9a62a6e165f0c66e683af",
+      "relative_runtime_parity": true,
+      "model_qualified": false,
+      "semantic_quality_evaluated": false,
+      "complete_expected_rows": true,
+      "same_row_order": true,
+      "missing_ids": [],
+      "unexpected_ids": [],
+      "duplicate_ids": [],
+      "exact_mismatches": [],
+      "read_errors": [],
+      "provenance_checks": {
+        "model_sha256": true,
+        "binary_sha256": true,
+        "data_sha256": true,
+        "context_tokens": true,
+        "max_tokens": true,
+        "temperature": true,
+        "prefix_reuse": true,
+        "ready.model_sha256": true,
+        "ready.template_sha256": true,
+        "ready.llama_commit": true,
+        "ready.architecture": true,
+        "ready.vocab_size": true,
+        "ready.context_tokens": true,
+        "source.benchmark.py": true,
+        "source.benchmark_checks.py": true,
+        "source.supervise.py": true
+      },
+      "recovery_checks": {
+        "repeat_equal": true,
+        "repeat_eos": true,
+        "cancelled": true,
+        "after_cancel_eos": true,
+        "state_recovery": true,
+        "supervisor_exit_zero": true
+      },
+      "token_only_checks": {},
+      "recovery_mismatches": [],
+      "accounting": {
+        "expected_rows": 64,
+        "recorded_rows": 64,
+        "status_counts": {
+          "eos": 63,
+          "length": 1
+        },
+        "non_eos_ids": [
+          "public-holdout-052"
+        ],
+        "all_recorded_latency": {
+          "count": 64,
+          "p50_ms": 106.937104,
+          "p95_ms": 318.73770800000045,
+          "sum_ms": 10195.119959000003
+        },
+        "all_recorded_worker": {
+          "count": 64,
+          "p50_ms": 106.649771,
+          "p95_ms": 318.326334,
+          "sum_ms": 10170.975914999999
+        },
+        "work_counters": {
+          "accepted": 1121,
+          "forward_calls": 1441,
+          "forward_tokens": 6404,
+          "proposed": 1169,
+          "rollbacks": 36,
+          "snapshot_saved_bytes": 1643307684,
+          "backend_sampled_tokens": 0,
+          "backend_filtered_rows_checked": 0
+        },
+        "trace_span_sum_ms": {},
+        "trace_span_counts": {},
+        "decode_batch_sizes": {},
+        "trace_warning": "Nested CPU spans; sample waits include queued GPU work. Do not sum spans as disjoint GPU time."
+      },
+      "matched_latency_ratio_median": 0.7132229630183264,
+      "trace_setting_matches_baseline": true,
+      "speed_comparison_eligible": true,
+      "timing_caution": "One fresh-process comparison is diagnostic; require repeated interleaved trace-off runs for speed claims.",
+      "qualification_limit": "Exact reproduction of a known length failure is relative parity only. Failed rows remain in the full timing denominator.",
+      "variant": "copy3",
+      "repetition": 1,
+      "process": {
+        "returncode": 1,
+        "timed_out": false,
+        "wall_seconds": 21.597819583000003
+      }
+    },
+    {
+      "candidate": "/Users/sushil/Code/Velora/.context/compound-engineering/ce-optimize/cleanup-push-v3/native-v3-confirm/01-draft8.jsonl",
+      "candidate_sha256": "7293f93d180af2ee15566bedf71ea53651f0e4561b8647818969ae07abbe4b52",
+      "candidate_meta_sha256": "058d7a03cf5d1881fb022a7aff7b05a46e211d20e2edd774531a15cdcd75a632",
+      "relative_runtime_parity": true,
+      "model_qualified": false,
+      "semantic_quality_evaluated": false,
+      "complete_expected_rows": true,
+      "same_row_order": true,
+      "missing_ids": [],
+      "unexpected_ids": [],
+      "duplicate_ids": [],
+      "exact_mismatches": [],
+      "read_errors": [],
+      "provenance_checks": {
+        "model_sha256": true,
+        "binary_sha256": true,
+        "data_sha256": true,
+        "context_tokens": true,
+        "max_tokens": true,
+        "temperature": true,
+        "prefix_reuse": true,
+        "ready.model_sha256": true,
+        "ready.template_sha256": true,
+        "ready.llama_commit": true,
+        "ready.architecture": true,
+        "ready.vocab_size": true,
+        "ready.context_tokens": true,
+        "source.benchmark.py": true,
+        "source.benchmark_checks.py": true,
+        "source.supervise.py": true
+      },
+      "recovery_checks": {
+        "repeat_equal": true,
+        "repeat_eos": true,
+        "cancelled": true,
+        "after_cancel_eos": true,
+        "state_recovery": true,
+        "supervisor_exit_zero": true
+      },
+      "token_only_checks": {},
+      "recovery_mismatches": [],
+      "accounting": {
+        "expected_rows": 64,
+        "recorded_rows": 64,
+        "status_counts": {
+          "eos": 63,
+          "length": 1
+        },
+        "non_eos_ids": [
+          "public-holdout-052"
+        ],
+        "all_recorded_latency": {
+          "count": 64,
+          "p50_ms": 81.81087499999995,
+          "p95_ms": 258.11850000000015,
+          "sum_ms": 8865.411957999992
+        },
+        "all_recorded_worker": {
+          "count": 64,
+          "p50_ms": 81.55291650000001,
+          "p95_ms": 257.763833,
+          "sum_ms": 8838.421749000001
+        },
+        "work_counters": {
+          "accepted": 1136,
+          "forward_calls": 1223,
+          "forward_tokens": 6688,
+          "proposed": 1345,
+          "rollbacks": 52,
+          "snapshot_saved_bytes": 787594336,
+          "backend_sampled_tokens": 0,
+          "backend_filtered_rows_checked": 0
+        },
+        "trace_span_sum_ms": {},
+        "trace_span_counts": {},
+        "decode_batch_sizes": {},
+        "trace_warning": "Nested CPU spans; sample waits include queued GPU work. Do not sum spans as disjoint GPU time."
+      },
+      "matched_latency_ratio_median": 0.5219991202674066,
+      "trace_setting_matches_baseline": true,
+      "speed_comparison_eligible": true,
+      "timing_caution": "One fresh-process comparison is diagnostic; require repeated interleaved trace-off runs for speed claims.",
+      "qualification_limit": "Exact reproduction of a known length failure is relative parity only. Failed rows remain in the full timing denominator.",
+      "variant": "draft8",
+      "repetition": 1,
+      "process": {
+        "returncode": 1,
+        "timed_out": false,
+        "wall_seconds": 20.962218125000003
+      }
+    },
+    {
+      "candidate": "/Users/sushil/Code/Velora/.context/compound-engineering/ce-optimize/cleanup-push-v3/native-v3-confirm/02-draft8.jsonl",
+      "candidate_sha256": "0fbceb7f4d9d474861cc1a10ca74a5ebac56ce07fea90ea994ca060be7c41df9",
+      "candidate_meta_sha256": "fdd814a9a5c5ff616fd9a5e1ebe558e4b63519be49b25a60e7ec5af0bc73ae70",
+      "relative_runtime_parity": true,
+      "model_qualified": false,
+      "semantic_quality_evaluated": false,
+      "complete_expected_rows": true,
+      "same_row_order": true,
+      "missing_ids": [],
+      "unexpected_ids": [],
+      "duplicate_ids": [],
+      "exact_mismatches": [],
+      "read_errors": [],
+      "provenance_checks": {
+        "model_sha256": true,
+        "binary_sha256": true,
+        "data_sha256": true,
+        "context_tokens": true,
+        "max_tokens": true,
+        "temperature": true,
+        "prefix_reuse": true,
+        "ready.model_sha256": true,
+        "ready.template_sha256": true,
+        "ready.llama_commit": true,
+        "ready.architecture": true,
+        "ready.vocab_size": true,
+        "ready.context_tokens": true,
+        "source.benchmark.py": true,
+        "source.benchmark_checks.py": true,
+        "source.supervise.py": true
+      },
+      "recovery_checks": {
+        "repeat_equal": true,
+        "repeat_eos": true,
+        "cancelled": true,
+        "after_cancel_eos": true,
+        "state_recovery": true,
+        "supervisor_exit_zero": true
+      },
+      "token_only_checks": {},
+      "recovery_mismatches": [],
+      "accounting": {
+        "expected_rows": 64,
+        "recorded_rows": 64,
+        "status_counts": {
+          "eos": 63,
+          "length": 1
+        },
+        "non_eos_ids": [
+          "public-holdout-052"
+        ],
+        "all_recorded_latency": {
+          "count": 64,
+          "p50_ms": 82.48660449999967,
+          "p95_ms": 256.54037500000015,
+          "sum_ms": 8880.274334999998
+        },
+        "all_recorded_worker": {
+          "count": 64,
+          "p50_ms": 82.19745850000001,
+          "p95_ms": 256.213375,
+          "sum_ms": 8852.446754
+        },
+        "work_counters": {
+          "accepted": 1136,
+          "forward_calls": 1223,
+          "forward_tokens": 6688,
+          "proposed": 1345,
+          "rollbacks": 52,
+          "snapshot_saved_bytes": 787594336,
+          "backend_sampled_tokens": 0,
+          "backend_filtered_rows_checked": 0
+        },
+        "trace_span_sum_ms": {},
+        "trace_span_counts": {},
+        "decode_batch_sizes": {},
+        "trace_warning": "Nested CPU spans; sample waits include queued GPU work. Do not sum spans as disjoint GPU time."
+      },
+      "matched_latency_ratio_median": 0.5301716379608228,
+      "trace_setting_matches_baseline": true,
+      "speed_comparison_eligible": true,
+      "timing_caution": "One fresh-process comparison is diagnostic; require repeated interleaved trace-off runs for speed claims.",
+      "qualification_limit": "Exact reproduction of a known length failure is relative parity only. Failed rows remain in the full timing denominator.",
+      "variant": "draft8",
+      "repetition": 2,
+      "process": {
+        "returncode": 1,
+        "timed_out": false,
+        "wall_seconds": 20.994694541
+      }
+    },
+    {
+      "candidate": "/Users/sushil/Code/Velora/.context/compound-engineering/ce-optimize/cleanup-push-v3/native-v3-confirm/02-copy3.jsonl",
+      "candidate_sha256": "fc8e14ea7123bfa367feb43ba350500191dccd4deb4a80a55c5c2a1d3c553f64",
+      "candidate_meta_sha256": "2bfe488ad9b143154b5dd80ec18adaf1e88d904ba2f82d2aab2104d5bae5cc9d",
+      "relative_runtime_parity": true,
+      "model_qualified": false,
+      "semantic_quality_evaluated": false,
+      "complete_expected_rows": true,
+      "same_row_order": true,
+      "missing_ids": [],
+      "unexpected_ids": [],
+      "duplicate_ids": [],
+      "exact_mismatches": [],
+      "read_errors": [],
+      "provenance_checks": {
+        "model_sha256": true,
+        "binary_sha256": true,
+        "data_sha256": true,
+        "context_tokens": true,
+        "max_tokens": true,
+        "temperature": true,
+        "prefix_reuse": true,
+        "ready.model_sha256": true,
+        "ready.template_sha256": true,
+        "ready.llama_commit": true,
+        "ready.architecture": true,
+        "ready.vocab_size": true,
+        "ready.context_tokens": true,
+        "source.benchmark.py": true,
+        "source.benchmark_checks.py": true,
+        "source.supervise.py": true
+      },
+      "recovery_checks": {
+        "repeat_equal": true,
+        "repeat_eos": true,
+        "cancelled": true,
+        "after_cancel_eos": true,
+        "state_recovery": true,
+        "supervisor_exit_zero": true
+      },
+      "token_only_checks": {},
+      "recovery_mismatches": [],
+      "accounting": {
+        "expected_rows": 64,
+        "recorded_rows": 64,
+        "status_counts": {
+          "eos": 63,
+          "length": 1
+        },
+        "non_eos_ids": [
+          "public-holdout-052"
+        ],
+        "all_recorded_latency": {
+          "count": 64,
+          "p50_ms": 107.93862500000006,
+          "p95_ms": 318.8789579999991,
+          "sum_ms": 10192.509874000001
+        },
+        "all_recorded_worker": {
+          "count": 64,
+          "p50_ms": 107.6639585,
+          "p95_ms": 318.481292,
+          "sum_ms": 10164.168582
+        },
+        "work_counters": {
+          "accepted": 1121,
+          "forward_calls": 1441,
+          "forward_tokens": 6404,
+          "proposed": 1169,
+          "rollbacks": 36,
+          "snapshot_saved_bytes": 1643307684,
+          "backend_sampled_tokens": 0,
+          "backend_filtered_rows_checked": 0
+        },
+        "trace_span_sum_ms": {},
+        "trace_span_counts": {},
+        "decode_batch_sizes": {},
+        "trace_warning": "Nested CPU spans; sample waits include queued GPU work. Do not sum spans as disjoint GPU time."
+      },
+      "matched_latency_ratio_median": 0.7110875887690062,
+      "trace_setting_matches_baseline": true,
+      "speed_comparison_eligible": true,
+      "timing_caution": "One fresh-process comparison is diagnostic; require repeated interleaved trace-off runs for speed claims.",
+      "qualification_limit": "Exact reproduction of a known length failure is relative parity only. Failed rows remain in the full timing denominator.",
+      "variant": "copy3",
+      "repetition": 2,
+      "process": {
+        "returncode": 1,
+        "timed_out": false,
+        "wall_seconds": 21.795881042000005
+      }
+    }
+  ],
+  "requested_order": [
+    "copy3",
+    "draft8"
+  ],
+  "repetitions": 2
+}

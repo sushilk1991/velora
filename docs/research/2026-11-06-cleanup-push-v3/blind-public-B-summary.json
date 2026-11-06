@@ -1,0 +1,121 @@
+{
+  "n": 96,
+  "unique_ids": 96,
+  "coverage_validated": true,
+  "score_counts": {
+    "2": 1,
+    "4": 31,
+    "5": 64
+  },
+  "mean_score": 4.6458,
+  "acceptable_count": 95,
+  "unacceptable_count": 1,
+  "material_error_count": 1,
+  "material_error_ids": [
+    "qualification-v3-078"
+  ],
+  "failure_ids": [
+    "qualification-v3-078"
+  ],
+  "score_below_4_ids": [
+    "qualification-v3-078"
+  ],
+  "zero_material_error_gate": "FAIL",
+  "zero_material_error_gate_passed": false,
+  "gate_note": "Assessed separately from mean: any material error (score<=2 or material boolean) fails gate regardless of mean.",
+  "error_flag_counts": {
+    "unsupported_addition": 1,
+    "meaning_loss": 0,
+    "mode_or_language_failure": 0,
+    "correction_error": 1
+  },
+  "category_errors": {
+    "ambiguity": {
+      "total": 4,
+      "unacceptable": 0,
+      "material_errors": 0
+    },
+    "code": {
+      "total": 4,
+      "unacceptable": 0,
+      "material_errors": 0
+    },
+    "contrast": {
+      "total": 5,
+      "unacceptable": 0,
+      "material_errors": 0
+    },
+    "correction": {
+      "total": 8,
+      "unacceptable": 1,
+      "material_errors": 1
+    },
+    "email": {
+      "total": 1,
+      "unacceptable": 0,
+      "material_errors": 0
+    },
+    "glossary_irrelevant": {
+      "total": 4,
+      "unacceptable": 0,
+      "material_errors": 0
+    },
+    "glossary_relevant": {
+      "total": 4,
+      "unacceptable": 0,
+      "material_errors": 0
+    },
+    "grammar": {
+      "total": 8,
+      "unacceptable": 0,
+      "material_errors": 0
+    },
+    "instruction_as_data": {
+      "total": 10,
+      "unacceptable": 0,
+      "material_errors": 0
+    },
+    "message": {
+      "total": 4,
+      "unacceptable": 0,
+      "material_errors": 0
+    },
+    "names": {
+      "total": 7,
+      "unacceptable": 0,
+      "material_errors": 0
+    },
+    "negation": {
+      "total": 7,
+      "unacceptable": 0,
+      "material_errors": 0
+    },
+    "noncorrection": {
+      "total": 8,
+      "unacceptable": 0,
+      "material_errors": 0
+    },
+    "noop": {
+      "total": 7,
+      "unacceptable": 0,
+      "material_errors": 0
+    },
+    "note": {
+      "total": 3,
+      "unacceptable": 0,
+      "material_errors": 0
+    },
+    "numbers": {
+      "total": 8,
+      "unacceptable": 0,
+      "material_errors": 0
+    },
+    "terminal": {
+      "total": 4,
+      "unacceptable": 0,
+      "material_errors": 0
+    }
+  },
+  "input_sha256": "7e4349ab61a79084fc33ccd8efd22494845cc5cff1085a1313b913e82cb79814",
+  "judgments_sha256": "45adbd74f7514b3e5acd46b16df9a3d7fa1e72c9cfd87a3232f9939e712a97b4"
+}

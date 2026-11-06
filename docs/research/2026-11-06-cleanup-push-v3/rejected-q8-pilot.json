@@ -1,0 +1,11 @@
+{
+  "expected_pilot_cases": 24,
+  "recorded_cases": 24,
+  "status_counts": {
+    "cleanup_fallback": 22,
+    "cleanup_partial": 2
+  },
+  "length_calls": 30,
+  "decision": "rejected short pilot; unadapted base under student JSON + production controls; no full614 claim",
+  "source_commit": "6bafa29"
+}

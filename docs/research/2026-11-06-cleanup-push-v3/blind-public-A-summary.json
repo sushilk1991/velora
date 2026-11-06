@@ -1,0 +1,37 @@
+{
+  "input_file": "blind-public-qualification-A.jsonl",
+  "judgments_file": "blind-public-A-judgments.jsonl",
+  "total": 96,
+  "unique_ids": 96,
+  "score_counts": {
+    "1": 0,
+    "2": 1,
+    "3": 0,
+    "4": 18,
+    "5": 77
+  },
+  "mean_score": 4.7812,
+  "acceptable_count": 95,
+  "unacceptable_count": 1,
+  "error_categories": {
+    "unsupported_addition": 1,
+    "meaning_loss": 0,
+    "mode_or_language_failure": 0,
+    "correction_error": 1,
+    "material_meaning_or_correction_error_score_le_2": 1,
+    "minor_punctuation_or_stylistic_score_4": 18
+  },
+  "strongest_concrete_failure_ids": [
+    "qualification-v3-078"
+  ],
+  "strongest_concrete_failures": [
+    {
+      "id": "qualification-v3-078",
+      "score": 2,
+      "reason": "Explicit correction failed: retains superseded 'Rohan ko call karo' alongside corrected 'Mohan ko call karo', creating contradictory recipients."
+    }
+  ],
+  "gate_note": "Not shipping approval; gate requires zero invented facts/material meaning errors — qualification-v3-078 is a material correction error, so gate fails on this candidate.",
+  "judgments_sha256": "21bd9e54b504f2cdfbc8e30c4cd93806ae3ecb26ba1f86348648bba4d4c70b6e",
+  "input_sha256": "9a478b4865481a021e1ef16167e1aec14cef0652521cd972717b2ae7fb32a91e"
+}
