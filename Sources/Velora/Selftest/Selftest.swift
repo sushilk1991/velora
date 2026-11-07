@@ -95,6 +95,7 @@ enum Selftest {
         // plists this run adds to the owner's Preferences.
         let preferencesBaseline = Set(scratchPreferenceFiles().map(\.lastPathComponent))
         testEditDistance()
+        testNativeCleanupSelection()
         testMishearingShapes()
         testLearningThresholds()
         testDictionaryValues()
@@ -2718,6 +2719,45 @@ enum Selftest {
     }
 
     // Local UI notifications and repeated serving snapshots cannot acknowledge a newer request.
+    private static func testNativeCleanupSelection() {
+        var state = NativeCleanupSelection()
+        expect(!state.enabled && !state.available && !state.isSwitching,
+               "native trial defaults off and unavailable")
+        expect(state.request(enabled: true, connected: true, requestID: "missing") == nil,
+               "native trial cannot enable without its package")
+        func status(_ enabled: Bool, id: String? = nil, switching: Bool = false,
+                    available: Bool = true, error: String? = nil) -> [String: Any] {
+            var result: [String: Any] = ["native_cleanup_enabled": enabled,
+                "native_cleanup_available": available, "native_cleanup_switching": switching]
+            if let id { result["native_cleanup_request_id"] = id }
+            if let error { result["native_cleanup_error"] = error }
+            return result
+        }
+        state.apply(status(false))
+        expect(!state.canChange(connected: false), "offline native switch stays disabled")
+        let request = state.request(enabled: true, connected: true, requestID: "first")
+        expect(request?["cmd"] as? String == "set_native_cleanup"
+               && request?["enabled"] as? Bool == true
+               && request?["request_id"] as? String == "first", "native request wire contract")
+        expect(!state.enabled && state.isSwitching, "native request is not optimistic adoption")
+        state.apply(status(true, id: "older"))
+        expect(!state.enabled && state.pendingRequestID == "first", "stale native ack ignored")
+        state.apply(status(true, id: "first", switching: true))
+        expect(state.isSwitching && state.pendingRequestID == "first", "native loading is not completion")
+        state.apply(status(false, id: "first", error: "busy"))
+        expect(!state.enabled && !state.isSwitching && state.error == "busy", "native rejection preserves standard")
+        _ = state.request(enabled: true, connected: true, requestID: "second")
+        state.apply(status(true, id: "second"))
+        expect(state.enabled && !state.isSwitching && state.error == nil, "matching native ack adopts choice")
+        state.apply(status(true, available: false))
+        expect(state.canChange(connected: true), "missing package still allows switching native off")
+        _ = state.request(enabled: false, connected: true, requestID: "off")
+        state.disconnect()
+        expect(!state.isSwitching && state.error != nil, "disconnect clears pending native spinner")
+        state.apply(status(false, available: false))
+        expect(!state.enabled && state.error == nil, "fresh engine status reconciles native choice")
+    }
+
     private static func testCachedSelection() {
         let config = AppConfig.shared
         let original = config.sttModel

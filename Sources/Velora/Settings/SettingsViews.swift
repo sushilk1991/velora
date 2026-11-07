@@ -529,7 +529,8 @@ struct ModelSettingsView: View {
                 Button("Use an Existing Whisper Model…") { chooseWhisperModel() }
                 if !cleanupChoices.isEmpty {
                     slotRow(
-                        title: "Cleanup", slot: .cleanup, choices: cleanupChoices,
+                        title: model.nativeCleanupEnabled ? "Standard cleanup" : "Cleanup",
+                        slot: .cleanup, choices: cleanupChoices,
                         selection: cleanupBinding)
                 }
             } header: {
@@ -537,6 +538,7 @@ struct ModelSettingsView: View {
             } footer: {
                 SettingsFooter("Changing the language choice re-selects the recommended speech model for it. Models download once, then run on this Mac. Your voice never leaves this Mac.")
             }
+            nativeCleanupSection
             Section("Download status") {
                 DownloadRecoveryView(state: model.downloads)
                 if let pending = model.downloads.pending[.stt] {
@@ -605,6 +607,40 @@ struct ModelSettingsView: View {
             } message: {
                 Text("Only inactive copies managed by Velora are removed. Shared Hub files and imported models stay on your Mac. You can download the model again later.")
             }
+    }
+
+    @ViewBuilder
+    private var nativeCleanupSection: some View {
+        if model.nativeCleanupSelection.isVisible {
+            Section {
+                Toggle("LFM3 Native — Experimental", isOn: nativeCleanupBinding)
+                    .disabled(!model.canChangeNativeCleanup)
+                if model.nativeCleanupSwitching {
+                    HStack(spacing: VeloraSpacing.s) {
+                        ProgressView().controlSize(.small).accessibilityHidden(true)
+                        Text(model.nativeCleanupSelection.pendingEnabled == false
+                             ? "Returning to standard cleanup…"
+                             : "Waiting for the engine to confirm the change…")
+                            .font(.caption)
+                            .foregroundStyle(.secondary)
+                    }
+                }
+                if !model.nativeCleanupConnected {
+                    Text("Reconnect to the engine to change this choice.")
+                        .font(.caption).foregroundStyle(.secondary)
+                } else if !model.nativeCleanupAvailable && model.nativeCleanupEnabled {
+                    Text("The local trial package is unavailable. Turn this off to use standard cleanup.")
+                        .font(.caption).foregroundStyle(.secondary)
+                }
+                if let error = model.nativeCleanupError {
+                    Text(error).font(.caption).foregroundStyle(VeloraStatus.warningText)
+                }
+            } header: {
+                Text("Experimental dictation")
+            } footer: {
+                SettingsFooter("Try native cleanup for short English dictation in built-in modes. It may miss corrections or omit words. Other dictation and workflows use your standard cleanup model. Turn this off to return to standard cleanup.")
+            }
+        }
     }
 
     // MARK: Slot rows
@@ -676,6 +712,10 @@ struct ModelSettingsView: View {
 
     private var cleanupBinding: Binding<String> {
         Binding(get: { model.cleanupModel }, set: { model.setCleanupModel($0) })
+    }
+
+    private var nativeCleanupBinding: Binding<Bool> {
+        Binding(get: { model.nativeCleanupEnabled }, set: { model.setNativeCleanupEnabled($0) })
     }
 
     // MARK: Storage

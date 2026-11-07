@@ -111,6 +111,62 @@ enum PillVisibility: CaseIterable, Identifiable {
     }
 }
 
+/// Engine acknowledgements own the trial choice; a click only starts a request.
+/// Kept independent of the window and config so request ordering is testable.
+struct NativeCleanupSelection: Equatable {
+    private(set) var available = false
+    private(set) var enabled = false
+    private(set) var switching = false
+    private(set) var error: String?
+    private(set) var pendingRequestID: String?
+    private(set) var pendingEnabled: Bool?
+
+    var isSwitching: Bool { switching || pendingRequestID != nil }
+    var isVisible: Bool { available || enabled || isSwitching || error != nil }
+
+    func canChange(connected: Bool) -> Bool {
+        connected && !isSwitching && (available || enabled)
+    }
+
+    mutating func request(
+        enabled: Bool, connected: Bool, requestID: String
+    ) -> [String: Any]? {
+        guard canChange(connected: connected), enabled != self.enabled,
+              !enabled || available, !requestID.isEmpty else { return nil }
+        pendingRequestID = requestID
+        pendingEnabled = enabled
+        error = nil
+        return ["cmd": "set_native_cleanup", "enabled": enabled, "request_id": requestID]
+    }
+
+    mutating func apply(_ payload: [String: Any]) {
+        guard let available = payload["native_cleanup_available"] as? Bool,
+              let enabled = payload["native_cleanup_enabled"] as? Bool,
+              let switching = payload["native_cleanup_switching"] as? Bool else { return }
+        self.available = available
+        // Unsolicited/older status can refresh package availability, but cannot
+        // acknowledge or roll back a newer selection still awaiting its reply.
+        if let pendingRequestID,
+           payload["native_cleanup_request_id"] as? String != pendingRequestID { return }
+        self.enabled = enabled
+        self.switching = switching
+        error = (payload["native_cleanup_error"] as? String).flatMap { $0.isEmpty ? nil : $0 }
+        if !switching {
+            pendingRequestID = nil
+            pendingEnabled = nil
+        }
+    }
+
+    mutating func disconnect() {
+        if isSwitching {
+            error = "The engine disconnected before confirming the change. Reconnect to check the active choice."
+        }
+        pendingRequestID = nil
+        pendingEnabled = nil
+        switching = false
+    }
+}
+
 /// Observable bridge between the SwiftUI settings/onboarding UI and
 /// `AppConfig` + the engine. Writing a property persists it and, where
 /// relevant, pushes `reload_config` / `set_model` to the engine.
@@ -122,6 +178,8 @@ final class SettingsModel: ObservableObject {
     @Published private(set) var cleanupLoaded = false
 
     private var statusObserver: NSObjectProtocol?
+    private var engineStateObserver: NSObjectProtocol?
+    private var nativeCleanupStatusTimer: Timer?
     private var hudPrefsObserver: NSObjectProtocol?
     private var updateStateObserver: NSObjectProtocol?
     private var updateCheckObserver: NSObjectProtocol?
@@ -327,6 +385,16 @@ final class SettingsModel: ObservableObject {
     /// RAM (from the `status` reply). Empty until the first status lands.
     @Published var cleanupModel: String = ""
     @Published var recommendedCleanupModel: String = ""
+    @Published private(set) var nativeCleanupSelection = NativeCleanupSelection()
+    var nativeCleanupAvailable: Bool { nativeCleanupSelection.available }
+    var nativeCleanupEnabled: Bool { nativeCleanupSelection.enabled }
+    var nativeCleanupSwitching: Bool { nativeCleanupSelection.isSwitching }
+    var nativeCleanupError: String? { nativeCleanupSelection.error }
+    var nativeCleanupPendingRequestID: String? { nativeCleanupSelection.pendingRequestID }
+    var nativeCleanupConnected: Bool { supervisor != nil && downloads.isCurrent }
+    var canChangeNativeCleanup: Bool {
+        nativeCleanupSelection.canChange(connected: nativeCleanupConnected)
+    }
     @Published private(set) var storageRevision = 0
     @Published private(set) var storageError: String?
 
@@ -355,6 +423,27 @@ final class SettingsModel: ObservableObject {
         guard !id.isEmpty else { return }
         guard id != cleanupModel || downloads.pending[.cleanup] != nil else { return }
         downloads.select(model: id, kind: .cleanup)
+    }
+
+    func setNativeCleanupEnabled(_ enabled: Bool) {
+        guard let command = nativeCleanupSelection.request(
+            enabled: enabled, connected: nativeCleanupConnected,
+            requestID: UUID().uuidString) else { return }
+        supervisor?.send(command)
+        refreshNativeCleanupPolling()
+    }
+
+    private func refreshNativeCleanupPolling() {
+        guard nativeCleanupSwitching else {
+            nativeCleanupStatusTimer?.invalidate()
+            nativeCleanupStatusTimer = nil
+            return
+        }
+        guard nativeCleanupStatusTimer == nil else { return }
+        nativeCleanupStatusTimer = Timer.scheduledTimer(withTimeInterval: 2, repeats: true) {
+            [weak self] _ in
+            self?.requestStatus()
+        }
     }
 
     init(
@@ -422,6 +511,22 @@ final class SettingsModel: ObservableObject {
             forName: .veloraEngineStatus, object: nil, queue: .main
         ) { [weak self] note in
             self?.applyStatus(note.userInfo?["payload"] as? [String: Any])
+        }
+        if let supervisor {
+            engineStateObserver = NotificationCenter.default.addObserver(
+                forName: .veloraEngineStateChanged, object: supervisor, queue: .main
+            ) { [weak self] _ in
+                guard let self, let supervisor = self.supervisor else { return }
+                switch supervisor.state {
+                case .stopped, .launching, .degraded:
+                    self.nativeCleanupSelection.disconnect()
+                    self.refreshNativeCleanupPolling()
+                case .ready:
+                    self.requestStatus()
+                case .connecting:
+                    break
+                }
+            }
         }
         // A position change made from the HUD's context menu (or a drag that
         // flips it to Custom) must reflect in an open Settings window.
@@ -517,6 +622,8 @@ final class SettingsModel: ObservableObject {
 
     deinit {
         if let statusObserver { NotificationCenter.default.removeObserver(statusObserver) }
+        if let engineStateObserver { NotificationCenter.default.removeObserver(engineStateObserver) }
+        nativeCleanupStatusTimer?.invalidate()
         if let hudPrefsObserver { NotificationCenter.default.removeObserver(hudPrefsObserver) }
         if let updateStateObserver { NotificationCenter.default.removeObserver(updateStateObserver) }
         if let updateCheckObserver { NotificationCenter.default.removeObserver(updateCheckObserver) }
@@ -590,6 +697,8 @@ final class SettingsModel: ObservableObject {
 
     private func applyStatus(_ payload: [String: Any]?) {
         guard let payload else { return }
+        nativeCleanupSelection.apply(payload)
+        refreshNativeCleanupPolling()
         if payload.keys.contains("storage_error") {
             storageError = payload["storage_error"] as? String
             storageRevision += 1
