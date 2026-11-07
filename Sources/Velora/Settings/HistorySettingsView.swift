@@ -251,21 +251,28 @@ final class HistoryViewModel: ObservableObject {
 
     /// Saves a user-edited transcript. The quality verdict about the original
     /// insertion described the old text, so the store clears it.
-    func saveEdit(_ record: DictationRecord, newText: String) {
+    func saveEdit(_ record: DictationRecord, newText: String, completion: @escaping (Bool) -> Void) {
         let trimmed = newText.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard !trimmed.isEmpty, trimmed != record.final else { return }
-        history.updateFinal(id: record.id, final: trimmed)
-        if let index = records.firstIndex(where: { $0.id == record.id }) {
-            let old = records[index]
-            records[index] = DictationRecord(
-                id: old.id, timestamp: old.timestamp, bundleID: old.bundleID,
-                appName: old.appName, raw: old.raw, final: trimmed,
-                mode: old.mode, durationMs: old.durationMs,
-                cleanupMs: old.cleanupMs, cleanupWallMs: old.cleanupWallMs,
-                finalizationMs: old.finalizationMs,
-                audioPath: old.audioPath,
-                sessionID: old.sessionID, sttMs: old.sttMs,
-                cleanupApplied: old.cleanupApplied)
+        guard !trimmed.isEmpty else { completion(false); return }
+        guard trimmed != record.final else { completion(true); return }
+        let store = history
+        DispatchQueue.global(qos: .userInitiated).async { [weak self] in
+            let saved = store.updateFinal(id: record.id, final: trimmed)
+            DispatchQueue.main.async {
+                if saved, let self, let index = self.records.firstIndex(where: { $0.id == record.id }) {
+                    let old = self.records[index]
+                    self.records[index] = DictationRecord(
+                        id: old.id, timestamp: old.timestamp, bundleID: old.bundleID,
+                        appName: old.appName, raw: old.raw, final: trimmed,
+                        mode: old.mode, durationMs: old.durationMs,
+                        cleanupMs: old.cleanupMs, cleanupWallMs: old.cleanupWallMs,
+                        finalizationMs: old.finalizationMs,
+                        audioPath: old.audioPath,
+                        sessionID: old.sessionID, sttMs: old.sttMs,
+                        cleanupApplied: old.cleanupApplied)
+                }
+                completion(saved)
+            }
         }
     }
 
@@ -742,7 +749,7 @@ struct HistorySettingsView: View {
                     onToggle: { toggle(record) },
                     onCopy: { vm.copy(record) },
                     onPaste: { vm.pasteAgain(record) },
-                    onEdit: { text in vm.saveEdit(record, newText: text) },
+                    onEdit: { text, completion in vm.saveEdit(record, newText: text, completion: completion) },
                     onReprocess: { stt, mode in vm.reprocess(record, sttModel: stt, mode: mode) },
                     onPlay: { vm.togglePlayback(record) },
                     onDelete: { vm.delete(record) },
@@ -842,7 +849,7 @@ private struct JournalEntry: View {
     let onToggle: () -> Void
     let onCopy: () -> Void
     let onPaste: () -> Void
-    let onEdit: (String) -> Void
+    let onEdit: (String, @escaping (Bool) -> Void) -> Void
     let onReprocess: (_ sttModel: String?, _ mode: String?) -> Void
     let onPlay: () -> Void
     let onDelete: () -> Void
@@ -852,9 +859,14 @@ private struct JournalEntry: View {
     @State private var copied = false
     @State private var editing = false
     @State private var editDraft = ""
+    @State private var editError: String?
+    @State private var editSaving = false
     @State private var hovering = false
     @State private var showsRaw = false
     @State private var confirmingDelete = false
+    @State private var trialRun: HistoryTrialRun?
+    @State private var trialLoadError: String?
+    @State private var trialLoadGeneration = 0
 
     /// Wide enough for a 12-hour "12:30 PM".
     private static let timeColumn: CGFloat = 64
@@ -881,6 +893,24 @@ private struct JournalEntry: View {
     private var isCode: Bool { HistoryJournal.isCodeMode(record.mode) }
     private var hasTranscript: Bool { HistoryJournal.hasTranscript(record) }
 
+    private struct TrialLookupKey: Equatable {
+        let expanded: Bool
+        let reprocessing: Bool
+        let raw: String
+        let final: String
+        let sessionID: String?
+        let cleanupMs: Int?
+        let cleanupWallMs: Int?
+        let cleanupApplied: Bool?
+    }
+
+    private var trialLookupKey: TrialLookupKey {
+        TrialLookupKey(expanded: expanded, reprocessing: isReprocessing,
+            raw: record.raw, final: record.final, sessionID: record.sessionID,
+            cleanupMs: record.cleanupMs, cleanupWallMs: record.cleanupWallMs,
+            cleanupApplied: record.cleanupApplied)
+    }
+
     var body: some View {
         Group {
             if expanded {
@@ -890,6 +920,28 @@ private struct JournalEntry: View {
             }
         }
         .sheet(isPresented: $editing) { editSheet }
+        .onAppear(perform: loadTrial)
+        .onDisappear { trialLoadGeneration += 1 }
+        .onChange(of: trialLookupKey) { _ in loadTrial() }
+    }
+
+    private func loadTrial() {
+        trialLoadGeneration += 1
+        let generation = trialLoadGeneration
+        trialRun = nil
+        trialLoadError = nil
+        guard expanded, hasTranscript, !isReprocessing else { return }
+        let snapshot = record
+        DispatchQueue.global(qos: .userInitiated).async {
+            let result = Result { try HistoryTrialFeedbackStore.shared.loadMatch(for: snapshot) }
+            DispatchQueue.main.async {
+                guard trialLoadGeneration == generation else { return }
+                switch result {
+                case .success(let match): trialRun = match
+                case .failure(let error): trialLoadError = error.localizedDescription
+                }
+            }
+        }
     }
 
     // MARK: Collapsed
@@ -946,6 +998,17 @@ private struct JournalEntry: View {
 
             if HistoryJournal.hasDistinctRaw(record) {
                 rawDisclosure
+                    .padding(.leading, Self.timeColumn)
+            }
+
+            if let trialRun, hasTranscript && !isReprocessing {
+                HistoryTrialFeedbackDetail(record: record, run: trialRun)
+                    .padding(.leading, Self.timeColumn)
+            } else if let trialLoadError {
+                Text(trialLoadError)
+                    .font(.caption)
+                    .foregroundStyle(VeloraStatus.warningText)
+                    .fixedSize(horizontal: false, vertical: true)
                     .padding(.leading, Self.timeColumn)
             }
 
@@ -1139,7 +1202,11 @@ private struct JournalEntry: View {
         VStack(alignment: .leading, spacing: VeloraSpacing.m) {
             Text("Edit Transcript")
                 .font(.headline)
+            if let editError {
+                Text(editError).font(.caption).foregroundStyle(.red)
+            }
             TextEditor(text: $editDraft)
+                .disabled(editSaving)
                 .font(.body)
                 .scrollContentBackground(.hidden)
                 .padding(VeloraSpacing.s)
@@ -1154,10 +1221,21 @@ private struct JournalEntry: View {
                 Spacer()
                 Button("Cancel") { editing = false }
                     .keyboardShortcut(.cancelAction)
-                Button("Save") {
-                    onEdit(editDraft)
-                    editing = false
+                    .disabled(editSaving)
+                Button(editSaving ? "Saving…" : "Save") {
+                    guard !editSaving else { return }
+                    editSaving = true
+                    onEdit(editDraft) { saved in
+                        editSaving = false
+                        if saved {
+                            editError = nil
+                            editing = false
+                        } else {
+                            editError = "Couldn’t save this edit. Your draft is still here; try again."
+                        }
+                    }
                 }
+                .disabled(editSaving)
                 .buttonStyle(.borderedProminent)
                 .keyboardShortcut(.defaultAction)
                 .disabled(editDraft.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
@@ -1165,6 +1243,169 @@ private struct JournalEntry: View {
         }
         .padding(VeloraSpacing.xl)
         .frame(width: 460, height: 280)
+        .interactiveDismissDisabled(editSaving)
+    }
+}
+
+// MARK: - Personal trial feedback
+
+/// Only an expanded entry instantiates this view. Metadata lookup and feedback
+/// writes run off the main thread, while the normal History actions keep their
+/// existing meaning. Feedback never updates the transcript or dictionary.
+private struct HistoryTrialFeedbackDetail: View {
+    let record: DictationRecord
+    let run: HistoryTrialRun
+    private let store = HistoryTrialFeedbackStore.shared
+
+    @State private var feedbackError: String?
+    @State private var feedbackMessage: String?
+    @State private var saving = false
+    @State private var correcting = false
+    @State private var correctionDraft = ""
+    @State private var correctionError: String?
+    @State private var showsRaw = false
+
+    private static let sheetWidth: CGFloat = 520
+    private static let editorHeight: CGFloat = 160
+    private static let rawHeight: CGFloat = 100
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: VeloraSpacing.s) {
+            VStack(alignment: .leading, spacing: VeloraSpacing.xs) {
+                Text("Personal trial: \(run.backendLabel)")
+                    .font(.system(size: 13, weight: .semibold))
+                if let model = run.modelLabel {
+                    Text(model)
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                        .textSelection(.enabled)
+                        .fixedSize(horizontal: false, vertical: true)
+                }
+                Text(run.resultNote)
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+                    .fixedSize(horizontal: false, vertical: true)
+            }
+            HStack(spacing: VeloraSpacing.s) {
+                Button("Looks Right") {
+                    save(corrected: record.final, accepted: true, run: run)
+                }
+                .buttonStyle(.capsule)
+                .help("Confirm this result for the local personal trial")
+                Button("Correct Result…") {
+                    correctionDraft = record.final
+                    correctionError = nil
+                    showsRaw = false
+                    correcting = true
+                }
+                .buttonStyle(.capsule)
+                if saving { ProgressView().controlSize(.mini) }
+            }
+            .disabled(saving)
+            Text("Feedback is saved on this Mac. It is not sent or used for training automatically.")
+                .font(.caption)
+                .foregroundStyle(.secondary)
+                .fixedSize(horizontal: false, vertical: true)
+            if let feedbackError {
+                Text(feedbackError)
+                    .font(.caption)
+                    .foregroundStyle(VeloraStatus.warningText)
+                    .fixedSize(horizontal: false, vertical: true)
+            } else if let feedbackMessage {
+                Text(feedbackMessage)
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+            }
+        }
+        .sheet(isPresented: $correcting) { correctionSheet }
+    }
+
+    private func save(corrected: String, accepted: Bool, run: HistoryTrialRun) {
+        guard !saving else { return }
+        saving = true
+        feedbackError = nil
+        feedbackMessage = nil
+        correctionError = nil
+        let snapshot = record
+        DispatchQueue.global(qos: .userInitiated).async {
+            let result = Result {
+                try store.save(record: snapshot, run: run, corrected: corrected, accepted: accepted)
+            }
+            DispatchQueue.main.async {
+                saving = false
+                switch result {
+                case .success:
+                    correcting = false
+                    feedbackMessage = accepted ? "Result confirmed on this Mac." : "Correction saved on this Mac."
+                case .failure(let error):
+                    if correcting {
+                        correctionError = error.localizedDescription
+                    } else {
+                        feedbackError = error.localizedDescription
+                    }
+                }
+            }
+        }
+    }
+
+    private var correctionSheet: some View {
+        VStack(alignment: .leading, spacing: VeloraSpacing.m) {
+            Text("Correct Result")
+                .font(.headline)
+            Text("Write the result you intended for this personal trial.")
+                .font(.caption)
+                .foregroundStyle(.secondary)
+            if HistoryJournal.hasDistinctRaw(record) {
+                DisclosureGroup("As heard", isExpanded: $showsRaw) {
+                    ScrollView {
+                        Text(record.raw)
+                            .font(.body)
+                            .foregroundStyle(.secondary)
+                            .textSelection(.enabled)
+                            .frame(maxWidth: .infinity, alignment: .leading)
+                    }
+                    .frame(maxHeight: Self.rawHeight)
+                    .padding(.top, VeloraSpacing.xs)
+                }
+                .font(.caption)
+            }
+            TextEditor(text: $correctionDraft)
+                .font(.body)
+                .scrollContentBackground(.hidden)
+                .padding(VeloraSpacing.s)
+                .background(
+                    RoundedRectangle(cornerRadius: VeloraRadius.tile, style: .continuous)
+                        .fill(VeloraPanel.card))
+                .overlay(
+                    RoundedRectangle(cornerRadius: VeloraRadius.tile, style: .continuous)
+                        .strokeBorder(Color(.separatorColor)))
+                .frame(minHeight: Self.editorHeight)
+                .accessibilityLabel("Correct result")
+                .disabled(saving)
+                .onChange(of: correctionDraft) { _ in correctionError = nil }
+            if let correctionError {
+                Text(correctionError)
+                    .font(.caption)
+                    .foregroundStyle(VeloraStatus.warningText)
+                    .fixedSize(horizontal: false, vertical: true)
+            }
+            HStack(spacing: VeloraSpacing.s) {
+                if saving { ProgressView().controlSize(.small) }
+                Spacer()
+                Button("Cancel") { correcting = false }
+                    .buttonStyle(.capsule)
+                    .keyboardShortcut(.cancelAction)
+                Button("Save Correction") {
+                    save(corrected: correctionDraft, accepted: false, run: run)
+                }
+                .buttonStyle(.primaryCapsule)
+                .keyboardShortcut(.defaultAction)
+            }
+            .disabled(saving)
+        }
+        .padding(VeloraSpacing.xl)
+        .frame(width: Self.sheetWidth)
+        .interactiveDismissDisabled(saving)
     }
 }
 

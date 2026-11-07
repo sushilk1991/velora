@@ -88,6 +88,7 @@ final class HistoryStore {
     private var db: OpaquePointer?
     private let queue = DispatchQueue(label: "com.velora.history")
     private let removeArchivedClip: (String) -> Void
+    private let invalidateTrialRun: (String) throws -> Void
     private let pendingLock = NSLock()
     private var pendingWrites = 0
 
@@ -112,9 +113,13 @@ final class HistoryStore {
 
     init(
         url: URL = AppConfig.historyDatabaseURL,
-        removeArchivedClip: @escaping (String) -> Void = HistoryStore.removeClip
+        removeArchivedClip: @escaping (String) -> Void = HistoryStore.removeClip,
+        invalidateTrialRun: ((String) throws -> Void)? = nil
     ) {
         self.removeArchivedClip = removeArchivedClip
+        // Alternate databases (including selftest fixtures) never touch the
+        // owner's trial files unless their caller explicitly injects a store.
+        self.invalidateTrialRun = invalidateTrialRun ?? Self.trialInvalidator(databaseURL: url)
         AppConfig.shared.ensureVeloraDirectory()
         var handle: OpaquePointer?
         if sqlite3_open(url.path, &handle) == SQLITE_OK {
@@ -134,6 +139,16 @@ final class HistoryStore {
             if handle != nil { sqlite3_close(handle) }
             db = nil
         }
+    }
+
+    static func trialInvalidator(
+        databaseURL: URL, defaultDatabaseURL: URL = AppConfig.historyDatabaseURL,
+        store: HistoryTrialFeedbackStore = .shared
+    ) -> (String) throws -> Void {
+        // A first engine write can still be pending when History is edited.
+        // Persist its tombstone even before the metadata file exists.
+        guard databaseURL.standardizedFileURL == defaultDatabaseURL.standardizedFileURL else { return { _ in } }
+        return { try store.invalidate(sessionID: $0) }
     }
 
     deinit {
@@ -449,57 +464,90 @@ final class HistoryStore {
     ) -> Bool {
         queue.sync { [self] in
             guard db != nil else { return false }
-            // A reprocess replaces the measured output, so its latency and
-            // cleanup fields replace the old run too. Any prior edit-quality
-            // verdict described the old text and must not survive the rewrite.
-            let sql = """
-                UPDATE dictations
-                SET raw = ?, final = ?, mode = ?, stt_ms = ?, cleanup_ms = ?,
-                    cleanup_applied = ?, cleanup_wall_ms = ?,
-                    finalization_ms = NULL, quality_state = NULL,
-                    failed_window_count = 0, failed_window_s = 0
-                WHERE id = ?;
-                """
-            var stmt: OpaquePointer?
-            guard sqlite3_prepare_v2(db, sql, -1, &stmt, nil) == SQLITE_OK else {
-                return false
+            return updateTranscriptOnQueue(id: id) {
+                // A reprocess replaces the measured output, so its latency and
+                // cleanup fields replace the old run too. Any prior edit-quality
+                // verdict described the old text and must not survive the rewrite.
+                let sql = """
+                    UPDATE dictations
+                    SET raw = ?, final = ?, mode = ?, stt_ms = ?, cleanup_ms = ?,
+                        cleanup_applied = ?, cleanup_wall_ms = ?,
+                        finalization_ms = NULL, quality_state = NULL,
+                        failed_window_count = 0, failed_window_s = 0
+                    WHERE id = ?;
+                    """
+                var stmt: OpaquePointer?
+                guard sqlite3_prepare_v2(db, sql, -1, &stmt, nil) == SQLITE_OK else {
+                    return false
+                }
+                defer { sqlite3_finalize(stmt) }
+                bindText(stmt, 1, raw)
+                bindText(stmt, 2, final)
+                bindText(stmt, 3, mode)
+                sqlite3_bind_int64(stmt, 4, Int64(sttMs))
+                sqlite3_bind_int64(stmt, 5, Int64(cleanupMs))
+                sqlite3_bind_int(stmt, 6, cleanupApplied ? 1 : 0)
+                if let cleanupWallMs {
+                    sqlite3_bind_int64(stmt, 7, Int64(cleanupWallMs))
+                } else {
+                    sqlite3_bind_null(stmt, 7)
+                }
+                sqlite3_bind_int64(stmt, 8, id)
+                if sqlite3_step(stmt) != SQLITE_DONE {
+                    NSLog("Velora: history update failed: %@", lastError)
+                    return false
+                }
+                return sqlite3_changes(db) == 1
             }
-            defer { sqlite3_finalize(stmt) }
-            bindText(stmt, 1, raw)
-            bindText(stmt, 2, final)
-            bindText(stmt, 3, mode)
-            sqlite3_bind_int64(stmt, 4, Int64(sttMs))
-            sqlite3_bind_int64(stmt, 5, Int64(cleanupMs))
-            sqlite3_bind_int(stmt, 6, cleanupApplied ? 1 : 0)
-            if let cleanupWallMs {
-                sqlite3_bind_int64(stmt, 7, Int64(cleanupWallMs))
-            } else {
-                sqlite3_bind_null(stmt, 7)
-            }
-            sqlite3_bind_int64(stmt, 8, id)
-            if sqlite3_step(stmt) != SQLITE_DONE {
-                NSLog("Velora: history update failed: %@", lastError)
-                return false
-            }
-            return sqlite3_changes(db) == 1
         }
     }
 
     /// Replaces a row's final text after a manual edit in the History tab.
     /// The stored quality verdict described the old text and must not survive.
-    func updateFinal(id: Int64, final: String) {
+    @discardableResult
+    func updateFinal(id: Int64, final: String) -> Bool {
         queue.sync { [self] in
-            guard db != nil else { return }
-            let sql = "UPDATE dictations SET final = ?, quality_state = NULL WHERE id = ?;"
-            var stmt: OpaquePointer?
-            guard sqlite3_prepare_v2(db, sql, -1, &stmt, nil) == SQLITE_OK else { return }
-            defer { sqlite3_finalize(stmt) }
-            bindText(stmt, 1, final)
-            sqlite3_bind_int64(stmt, 2, id)
-            if sqlite3_step(stmt) != SQLITE_DONE {
-                NSLog("Velora: history edit failed: %@", lastError)
+            guard db != nil else { return false }
+            return updateTranscriptOnQueue(id: id) {
+                let sql = "UPDATE dictations SET final = ?, quality_state = NULL WHERE id = ?;"
+                var stmt: OpaquePointer?
+                guard sqlite3_prepare_v2(db, sql, -1, &stmt, nil) == SQLITE_OK else { return false }
+                defer { sqlite3_finalize(stmt) }
+                bindText(stmt, 1, final)
+                sqlite3_bind_int64(stmt, 2, id)
+                if sqlite3_step(stmt) != SQLITE_DONE {
+                    NSLog("Velora: history edit failed: %@", lastError)
+                    return false
+                }
+                return sqlite3_changes(db) == 1
             }
         }
+    }
+
+    /// Keep a rewritten row and its provenance invalidation ordered before a
+    /// History refresh. Failure to invalidate rolls back the row, rather than
+    /// attributing identical reprocessed text to an earlier native generation.
+    private func updateTranscriptOnQueue(id: Int64, update: () -> Bool) -> Bool {
+        guard sqlite3_exec(db, "BEGIN IMMEDIATE;", nil, nil, nil) == SQLITE_OK else { return false }
+        var committed = false
+        defer { if !committed { sqlite3_exec(db, "ROLLBACK;", nil, nil, nil) } }
+        var stmt: OpaquePointer?
+        guard sqlite3_prepare_v2(db, "SELECT session_id FROM dictations WHERE id = ?;", -1, &stmt, nil)
+                == SQLITE_OK else { return false }
+        sqlite3_bind_int64(stmt, 1, id)
+        let found = sqlite3_step(stmt) == SQLITE_ROW
+        let session = found ? columnText(stmt, 0) : nil
+        sqlite3_finalize(stmt)
+        guard found, update() else { return false }
+        do {
+            if let session, !session.isEmpty { try invalidateTrialRun(session) }
+        } catch {
+            NSLog("Velora: history trial invalidation failed: %@", error.localizedDescription)
+            return false
+        }
+        guard sqlite3_exec(db, "COMMIT;", nil, nil, nil) == SQLITE_OK else { return false }
+        committed = true
+        return true
     }
 
     /// Deletes a single row and its archived audio clip (if any).

@@ -159,6 +159,7 @@ enum Selftest {
         testHistoryInsertAck()
         testHistoryDrain()
         testHistoryEdit()
+        testHistoryTrialFeedback()
         testHistoryClearAll()
         testIntelligenceAggregates()
         if ProcessInfo.processInfo.environment["VELORA_PERF_SELFTEST"] == "1" {
@@ -5170,6 +5171,205 @@ enum Selftest {
                    "quit accounting includes every queued History mutation")
             sqlite3_exec(lockDB, "COMMIT;", nil, nil, nil)
             sqlite3_close(lockDB)
+        }
+    }
+
+    private static func testHistoryTrialFeedback() {
+        let directory = FileManager.default.temporaryDirectory
+            .appendingPathComponent("velora-trial-feedback-\(UUID().uuidString)")
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let metadata = directory.appendingPathComponent("runs.jsonl")
+        let feedbackURL = directory.appendingPathComponent("feedback.jsonl")
+        let feedback = HistoryTrialFeedbackStore(metadataURL: metadata, feedbackURL: feedbackURL)
+        let record = dictation(
+            daysAgo: 0, words: 4, raw: "um café \"tomorrow\"\nplease",
+            final: "Café tomorrow, please.", session: "trial-session", cleanupMs: 31,
+            cleanupApplied: true, cleanupWallMs: 40)
+        func run(final: String? = nil, stamp: TimeInterval = 1_700_000_000) -> HistoryTrialRun {
+            HistoryTrialRun(
+                schema: 1, sessionID: "trial-session", rawSHA256: HistoryTrialRun.sha256(record.raw),
+                finalSHA256: HistoryTrialRun.sha256(final ?? record.final), backend: .nativeLFM3G,
+                attemptedBackend: "native_lfm3_g", modelIdentity: HistoryTrialRun.nativeModelIdentity,
+                applied: true, reason: nil, cleanupMs: 31, cleanupWallMs: 40, recordedAt: stamp)
+        }
+        var entries = Data()
+        func append(_ value: HistoryTrialRun) throws {
+            entries.append(try JSONEncoder().encode(value))
+            entries.append(0x0a)
+            try entries.write(to: metadata)
+        }
+        do {
+            expect(HistoryTrialRun.sha256("abc") ==
+                   "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad",
+                   "trial hashes use standard UTF-8 SHA256")
+            expect(run().matches(record) && !run(final: "other result").matches(record),
+                   "trial provenance requires the exact raw and final text")
+            _ = try HistoryTrialFeedbackStore.makeFeedback(
+                record: record, run: run(), corrected: record.final, accepted: true)
+            expect(!FileManager.default.fileExists(atPath: directory.path),
+                   "opening or cancelling feedback and pure validation create no files")
+            for correction in [" \n", record.final] {
+                do {
+                    _ = try feedback.save(record: record, run: run(), corrected: correction, accepted: false)
+                    expect(false, "invalid trial correction is rejected")
+                } catch let error as HistoryTrialFeedbackError {
+                    expect(error == (correction == record.final ? .unchangedCorrection : .emptyCorrection),
+                           "invalid trial correction reports its validation error")
+                }
+            }
+            expect(!FileManager.default.fileExists(atPath: feedbackURL.path),
+                   "rejected corrections do not create a feedback file")
+            try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+            try append(run())
+            expect(try feedback.loadMatch(for: record) == run(),
+                   "a matching selected History row finds its trial backend")
+            try append(run(final: "newer output"))
+            expect(try feedback.loadMatch(for: record) == nil,
+                   "a newer mismatching run blocks an older matching backend")
+            try append(run())
+            try feedback.invalidate(sessionID: "trial-session", recordedAt: Date(timeIntervalSince1970: 1_700_000_001))
+            expect(try feedback.loadMatch(for: record) == nil,
+                   "same-text reprocessing can invalidate previous native provenance")
+            entries = try Data(contentsOf: metadata)
+            try append(run())
+            expect(try feedback.loadMatch(for: record) == nil,
+                   "a delayed original append cannot undo a newer History invalidation")
+            do {
+                _ = try feedback.save(record: record, run: run(), corrected: record.final, accepted: true)
+                expect(false, "invalidated trial feedback is rejected")
+            } catch let error as HistoryTrialFeedbackError {
+                expect(error == .recordChanged, "feedback rechecks provenance before saving")
+            }
+            try append(run(stamp: 1_700_000_002))
+            expect(try feedback.loadMatch(for: record) == run(stamp: 1_700_000_002),
+                   "a later matching run restores provenance after invalidation")
+            let corrected = "Café \"next week\", please.\nThanks! 👋"
+            let saved = try feedback.save(record: record, run: run(stamp: 1_700_000_002), corrected: corrected, accepted: false)
+            let data = try Data(contentsOf: feedbackURL)
+            let lines = data.split(separator: 0x0a)
+            let decoded = try JSONDecoder().decode(HistoryTrialFeedback.self, from: Data(lines[0]))
+            expect(lines.count == 1 && decoded == saved && decoded.raw == record.raw
+                   && decoded.corrected == corrected && !decoded.accepted,
+                   "local feedback preserves Unicode and embedded quotes/newlines in one JSONL entry")
+            let permissions = try FileManager.default.attributesOfItem(atPath: feedbackURL.path)[.posixPermissions]
+                as? NSNumber
+            expect(permissions?.intValue == 0o600, "trial feedback is owner-only")
+            expect(record.final == "Café tomorrow, please.", "feedback does not rewrite History text")
+
+            let tailURL = directory.appendingPathComponent("tail.jsonl")
+            var completeLine = try JSONEncoder().encode(run())
+            completeLine.append(0x0a)
+            var bounded = Data(repeating: 0x78, count: 100)
+            bounded.append(0x0a)
+            bounded.append(completeLine)
+            bounded.append(contentsOf: "{\"partial\":".utf8)
+            try bounded.write(to: tailURL)
+            let tailStore = HistoryTrialFeedbackStore(
+                metadataURL: tailURL, feedbackURL: feedbackURL,
+                maxMetadataBytes: completeLine.count + 40)
+            expect(try tailStore.loadMatch(for: record) == run(),
+                   "bounded metadata lookup ignores the cut first line and incomplete tail")
+            let cutStore = HistoryTrialFeedbackStore(
+                metadataURL: tailURL, feedbackURL: feedbackURL, maxMetadataBytes: 30)
+            expect(try cutStore.loadMatch(for: record) == nil,
+                   "a tail without a complete record cannot manufacture provenance")
+            let incompleteURL = directory.appendingPathComponent("incomplete-feedback.jsonl")
+            let incomplete = Data("{\"unfinished\":".utf8)
+            try incomplete.write(to: incompleteURL)
+            let incompleteStore = HistoryTrialFeedbackStore(metadataURL: metadata, feedbackURL: incompleteURL)
+            do {
+                _ = try incompleteStore.save(record: record, run: run(stamp: 1_700_000_002),
+                    corrected: record.final, accepted: true)
+                expect(false, "feedback with an incomplete earlier entry is rejected")
+            } catch let error as HistoryTrialFeedbackError {
+                expect(error == .incompleteFeedback, "incomplete feedback reports a recoverable error")
+            }
+            expect(try Data(contentsOf: incompleteURL) == incomplete,
+                   "rejected feedback leaves existing bytes unchanged")
+
+            let history = HistoryStore(
+                url: directory.appendingPathComponent("history.sqlite3"),
+                invalidateTrialRun: { try feedback.invalidate(sessionID: $0) })
+            history.insert(record)
+            guard let row = history.recent(limit: 1).first else {
+                expect(false, "trial History fixture inserts")
+                return
+            }
+            expect(history.updateAfterReprocess(
+                id: row.id, raw: row.raw, final: row.final, mode: row.mode,
+                sttMs: 20, cleanupMs: 31, cleanupApplied: true, cleanupWallMs: 40),
+                   "identical-text reprocess persists through the History integration")
+            expect(try feedback.loadMatch(for: history.recent(limit: 1)[0]) == nil,
+                   "History reprocess invalidates the old backend before refresh")
+            entries = try Data(contentsOf: metadata)
+            try append(run())
+            expect(history.updateFinal(id: row.id, final: row.final), "same-text History edit succeeds")
+            expect(try feedback.loadMatch(for: history.recent(limit: 1)[0]) == nil,
+                   "History edit invalidates the old backend even when text is identical")
+            let failed = HistoryStore(
+                url: directory.appendingPathComponent("failed.sqlite3"),
+                invalidateTrialRun: { _ in throw HistoryTrialFeedbackError.feedbackUnavailable })
+            failed.insert(record)
+            let before = failed.recent(limit: 1)[0]
+            expect(!failed.updateFinal(id: before.id, final: "replacement")
+                   && failed.recent(limit: 1)[0].final == before.final,
+                   "a failed provenance invalidation rolls back the transcript rewrite")
+            let failedModel = HistoryViewModel(history: failed, supervisor: nil, modesDirectory: directory)
+            failedModel.records = [before]
+            var failedSave: Bool?
+            failedModel.saveEdit(before, newText: "replacement") { failedSave = $0 }
+            expect(waitUntil(timeout: 2) { failedSave != nil } && failedSave == false
+                   && failedModel.records[0].final == before.final,
+                   "failed asynchronous edit reports failure without changing the displayed result")
+
+            let entered = DispatchSemaphore(value: 0)
+            let release = DispatchSemaphore(value: 0)
+            let slow = HistoryStore(url: directory.appendingPathComponent("slow.sqlite3"),
+                invalidateTrialRun: { _ in
+                    entered.signal()
+                    _ = release.wait(timeout: .now() + 2)
+                })
+            slow.insert(record)
+            let slowRow = slow.recent(limit: 1)[0]
+            let slowModel = HistoryViewModel(history: slow, supervisor: nil, modesDirectory: directory)
+            slowModel.records = [slowRow]
+            var savedAsync: Bool?
+            let saveStarted = Date()
+            slowModel.saveEdit(slowRow, newText: "Saved asynchronously.") { savedAsync = $0 }
+            expect(Date().timeIntervalSince(saveStarted) < 0.2,
+                   "History edit returns without waiting for trial file I/O")
+            expect(entered.wait(timeout: .now() + 1) == .success && savedAsync == nil,
+                   "edit remains pending while background provenance invalidation is blocked")
+            release.signal()
+            expect(waitUntil(timeout: 2) { savedAsync != nil } && savedAsync == true
+                   && slowModel.records[0].final == "Saved asynchronously.",
+                   "successful background edit updates History after the transaction settles")
+
+            let firstMetadata = directory.appendingPathComponent("first-runs.jsonl")
+            let firstFeedback = HistoryTrialFeedbackStore(metadataURL: firstMetadata, feedbackURL: feedbackURL)
+            let firstDB = directory.appendingPathComponent("first.sqlite3")
+            let first = HistoryStore(url: firstDB, invalidateTrialRun: HistoryStore.trialInvalidator(
+                databaseURL: firstDB, defaultDatabaseURL: firstDB, store: firstFeedback))
+            first.insert(record)
+            let firstRow = first.recent(limit: 1)[0]
+            expect(!FileManager.default.fileExists(atPath: firstMetadata.path)
+                   && first.updateAfterReprocess(id: firstRow.id, raw: firstRow.raw, final: firstRow.final,
+                    mode: firstRow.mode, sttMs: 20, cleanupMs: 31, cleanupApplied: true, cleanupWallMs: 40),
+                   "default invalidation persists even before the first engine metadata file exists")
+            var lateFirstWrite = try Data(contentsOf: firstMetadata)
+            lateFirstWrite.append(completeLine)
+            try lateFirstWrite.write(to: firstMetadata)
+            expect(try firstFeedback.loadMatch(for: first.recent(limit: 1)[0]) == nil,
+                   "a delayed first engine write cannot restore provenance after reprocessing")
+            var fullMetadata = Data(repeating: 0x78, count: HistoryTrialFeedbackStore.metadataByteLimit)
+            fullMetadata[fullMetadata.count - 1] = 0x0a
+            try fullMetadata.write(to: firstMetadata)
+            try firstFeedback.invalidate(sessionID: "trial-session")
+            expect(try Data(contentsOf: firstMetadata).count < 1_024
+                   && FileManager.default.fileExists(atPath: directory.appendingPathComponent("first-runs.previous.jsonl").path),
+                   "History invalidation rotates bounded metadata with the shared engine lock")
+        } catch {
+            expect(false, "isolated trial feedback fixture failed: \(error)")
         }
     }
 

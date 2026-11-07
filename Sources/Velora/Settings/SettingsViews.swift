@@ -638,7 +638,7 @@ struct ModelSettingsView: View {
             } header: {
                 Text("Experimental dictation")
             } footer: {
-                SettingsFooter("Try native cleanup for short English dictation in built-in modes. It may miss corrections or omit words. Other dictation and workflows use your standard cleanup model. Turn this off to return to standard cleanup.")
+                SettingsFooter("Try native cleanup for short English paragraphs in built-in modes. It may miss corrections or omit words. For other languages, turn this off or choose a language in Dictation. Dictation with line breaks, longer notes and other workflows use standard cleanup; switching models can take several seconds.")
             }
         }
     }
