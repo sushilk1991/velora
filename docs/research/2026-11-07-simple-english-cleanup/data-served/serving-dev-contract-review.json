@@ -1,0 +1,67 @@
+{
+  "input_sha256": "8a06d853a0f9abf68f77f489b3bf452e39c0b6b4069473d8c4660616242a0e02",
+  "output_sha256": "43c2caa0bb9f19a93d36056408fe8c6e1abcfd88b049173cb4b3ca011df461b8",
+  "total": 192,
+  "reference_confidence_counts": {
+    "supported": 183,
+    "uncertain": 8,
+    "invalid_under_current_contract": 1
+  },
+  "no_edit_expected_valid_counts": {
+    "true": 85,
+    "false": 1,
+    "none": 106
+  },
+  "changed_targets": 8,
+  "target_changes": [
+    {
+      "id": "en6-s04-0105",
+      "before": "# check the behaviour of the colour picker",
+      "after": "# check the behavior of the color picker",
+      "reason": "Restore verbatim code comment spelling under the current code instructions."
+    },
+    {
+      "id": "muse-public-0106",
+      "before": "Happy birthday! Hope you have a lovely day and the cake turned out well this year.",
+      "after": "happy birthday! hope you have a lovely day and the cake turned out well this year.",
+      "reason": "Preserve the source lowercase style in the casual message."
+    },
+    {
+      "id": "muse-public-0140",
+      "before": "Update the parse_date helper, not parse_data; that is a different helper used for imports.",
+      "after": "update the parse date helper not parse data that is a different helper used for imports",
+      "reason": "Restore source wording and casing; invented identifier separators and a terminal period are not licensed by the current code contract."
+    },
+    {
+      "id": "en6-s04-0103",
+      "before": "Centre the behaviour chart above the desk.",
+      "after": "Center the behavior chart above the desk.",
+      "reason": "Preserve the dictated spelling; the current note instructions do not request a regional spelling change."
+    },
+    {
+      "id": "lfm3-final-syn-239",
+      "before": "Running late by ten minutes, start without me",
+      "after": "running late by ten minutes, start without me",
+      "reason": "Preserve lowercase conversational style required by the current message instructions."
+    },
+    {
+      "id": "muse-v3-0012",
+      "before": "Dinner is at Leela's place; she is making dumplings.",
+      "after": "Dinner is at Leela's place; she is making dumplings",
+      "reason": "Remove the terminal period from this single short message sentence."
+    },
+    {
+      "id": "muse-public-0139",
+      "before": "The login button does not respond when clicked on the settings page in the test build.",
+      "after": "the login button does not respond when clicked on the settings page in the test build",
+      "reason": "Restore original casing and omit the added terminal period under code instructions."
+    },
+    {
+      "id": "lfm3-final-syn-131",
+      "before": "config_prod.yaml",
+      "after": "open config_prod.yaml",
+      "reason": "Keep the spoken action and render the clearly dictated filename separators."
+    }
+  ],
+  "usage": "Public evaluation only; no training and no model-output-based review."
+}

@@ -1,0 +1,21 @@
+{
+  "scope": "Final public research exports and experimental helper, including completed J and the source-only contract audit.",
+  "findings": [],
+  "checks": [
+    "Published SHA256SUMS verified; documented local parent hashes checked.",
+    "Corpus row counts, review totals, aggregate arithmetic, and local Markdown links checked.",
+    "Public exports scanned for owner text and case identifiers; public-source visibility checked.",
+    "No application import of experimental helper found; scope and latency caveats reviewed."
+  ],
+  "limitations": [
+    "No private packets or owner data were read; absence of every possible owner-derived phrase cannot be independently established from public material alone.",
+    "Unchanged DEV labels were not rereviewed."
+  ],
+  "final_coherence_checks": [
+    "J training completed and both checkpoints are rejected at the original development gate; later J gates are recorded as not run.",
+    "Source-only review and amended export each cover 192 unique cases; 183 supported, eight uncertain, one invalid; eight targets amended.",
+    "Only target and evaluation annotations differ between original and amended cases; model input fields match.",
+    "Contract-audited scores match across README, results and proxy records; strict proxy scores do not claim broad semantic regression.",
+    "Published data-served checksums and source-review hash verified."
+  ]
+}

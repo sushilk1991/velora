@@ -1,0 +1,45 @@
+{
+  "original_input_sha256": "3461a9eaa52595de4fb83cadae2ad1f6f70a2fbff8eb4b65d9a705cbc3af1f7b",
+  "reviewed_output_sha256": "8aacf7777d65a53474aba87f128be7c4c32d534c3081c6afbe4bb9640bc11441",
+  "total": 48,
+  "approved": 48,
+  "rejected": 0,
+  "target_changes": [
+    {
+      "id": "targeted-v7-024",
+      "before": "Add sugar to the tea but do not add any milk.",
+      "after": "Do add sugar to the tea but do not add any milk.",
+      "reason": "Restore the spoken affirmative emphasis in the corrected instruction."
+    },
+    {
+      "id": "targeted-v7-034",
+      "before": "The soup needs more salt, I mean just a pinch more salt to bring out the flavour.",
+      "after": "The soup needs more salt, I mean just a pinch more salt to bring out the flavour",
+      "reason": "Preserve the message wording and omit the final period for a single conversational sentence."
+    },
+    {
+      "id": "targeted-v7-035",
+      "before": "We waited and waited outside the station until the rain finally eased late that evening.",
+      "after": "We waited and waited outside the station until the rain finally eased late that evening",
+      "reason": "Preserve the message wording and omit the final period for a single conversational sentence."
+    },
+    {
+      "id": "targeted-v7-036",
+      "before": "Thank you, thank you for covering my shift at such short notice last Friday.",
+      "after": "Thank you, thank you for covering my shift at such short notice last Friday",
+      "reason": "Preserve the message wording and omit the final period for a single conversational sentence."
+    },
+    {
+      "id": "targeted-v7-038",
+      "before": "Bring the notebook, I mean the blue notebook with the torn cover, to class tomorrow.",
+      "after": "Bring the notebook, I mean the blue notebook with the torn cover, to class tomorrow",
+      "reason": "Preserve the message wording and omit the final period for a single conversational sentence."
+    },
+    {
+      "id": "targeted-v7-039",
+      "before": "She laughed and laughed when she heard the story about the lost umbrella again.",
+      "after": "She laughed and laughed when she heard the story about the lost umbrella again",
+      "reason": "Preserve the message wording and omit the final period for a single conversational sentence."
+    }
+  ]
+}

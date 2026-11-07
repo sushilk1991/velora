@@ -1,0 +1,59 @@
+{
+  "schema": 1,
+  "scope": "Full300 candidate flags combine264 exact text/status prior judgment matches and36 new blind output reviews. The51-case selected blind comparison includes those36, six prior regressions and12 controls, with overlap. Fallible text references, not human/audio accuracy.",
+  "candidate_full300": {
+    "material_error": 41,
+    "cleanup_introduced_error": 28,
+    "inherited_asr_error": 42,
+    "ambiguous": 60,
+    "acceptable": 245
+  },
+  "selected51_counts": {
+    "compact": {
+      "material_error": 6,
+      "cleanup_introduced_error": 1,
+      "inherited_asr_error": 11,
+      "ambiguous": 14,
+      "acceptable": 45
+    },
+    "old_native": {
+      "material_error": 9,
+      "cleanup_introduced_error": 3,
+      "inherited_asr_error": 11,
+      "ambiguous": 14,
+      "acceptable": 42
+    },
+    "production_4b": {
+      "material_error": 5,
+      "cleanup_introduced_error": 1,
+      "inherited_asr_error": 10,
+      "ambiguous": 14,
+      "acceptable": 45
+    }
+  },
+  "selected51_paired_compact_vs": {
+    "old_native": {
+      "material_fixes": 3,
+      "material_regressions": 0,
+      "clear_material_fixes": 3,
+      "clear_material_regressions": 0
+    },
+    "production_4b": {
+      "material_fixes": 2,
+      "material_regressions": 3,
+      "clear_material_fixes": 2,
+      "clear_material_regressions": 3
+    }
+  },
+  "candidate_vs_prior_production_primary": {
+    "material_regressions_all": 5,
+    "clear_material_regressions": 2
+  },
+  "muse_run": "20261107T132735-997b56b2",
+  "review_hashes": {
+    "muse-packet.jsonl": "7df9c1c8a398434810aaff98b5e3c3787baf4bd2d397e1decc51a5ba535e2b20",
+    "muse-judgments.jsonl": "6f4af60668ce02f947192dbeda95ae2f242e668511629718bcdb1ccb1839c5a4",
+    "terra-packet.jsonl": "c4767997f7b2ae5a607c79cd0c964b5ed713a167c471d6f8970a26a32acbe207",
+    "terra-judgments.jsonl": "4876dcaec666cf3f60a07cd852a88cbf4c0daa5b981375cb6203037b3aa152a1"
+  }
+}

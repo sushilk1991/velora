@@ -1,0 +1,41 @@
+{
+  "created_utc": "2026-11-07T14:22:00Z",
+  "parent": "h-512",
+  "parent_sha256": "7b5f362d16d821fde4f03953b5560cfbbb0708bdcaaf2df07eb36fa5f67d5bc1",
+  "corpus_sha256": "10ad30618b3633b09ffa60eb9904b3c030c48283436ceba9342174d2d43765e4",
+  "serving_dev_sha256": "8a06d853a0f9abf68f77f489b3bf452e39c0b6b4069473d8c4660616242a0e02",
+  "owner_training_examples": 0,
+  "max_steps": 512,
+  "checkpoints": [
+    256,
+    512
+  ],
+  "lr": 2e-06,
+  "rank": 16,
+  "lora_scale": 8,
+  "grad_accum": 4,
+  "warmup_updates": 8,
+  "max_seq": 2048,
+  "seed": 42,
+  "source_context_compatibility_review_required": true,
+  "selection": "Served dev192: all EOS, no regression in repair/identity/literal proxies versus H512 served-dev; at least one improves. Independently review all changed outputs and controls; no new clear material error. Prefer better repair proxy then identity then literal then earlier step for ties. Original dev192 is backward-compatibility check. Validation loss is diagnostic, not primary selector.",
+  "post_selection_gates": [
+    "cheap known owner correction locating (exposed regression, not unseen accuracy)",
+    "if locating passes, native scalar/copy parity and actual frozen614 owner plus public fresh256; all statuses retained",
+    "zero new clear owner material regression and no increased source-only omissions/additions before changing app defaults"
+  ],
+  "stopping": "One final serving-alignment calibration, no further prompt or training searches this round. If any gate fails preserve evidence and keep installed defaults.",
+  "pre_training_context_review_amendment": {
+    "old_corpus_sha256": "5e358f5a4db9d439d065746b71b15f59afc3162ad0be66739f00d34e41b6c86c",
+    "new_corpus_sha256": "8436f2abfa8fc5fd32a0aced34238b2525ff05143d7037cc42b1a39162bf43df",
+    "reason": "Pre-registered independent context review excluded 9 incompatible and 1 uncertain public target before training; no targets rewritten, no model outcomes used.",
+    "context_review_sha256": "56f0f1977465848305380da346b64fe7f8f1a11c355ceff5ca0de77ec0cf8fcb"
+  },
+  "train_rows": 290,
+  "vocabulary_source_correction": {
+    "old_corpus_sha256": "8436f2abfa8fc5fd32a0aced34238b2525ff05143d7037cc42b1a39162bf43df",
+    "new_corpus_sha256": "10ad30618b3633b09ffa60eb9904b3c030c48283436ceba9342174d2d43765e4",
+    "old_attempt": "Invalidated, interrupted at213.25s; no checkpoint selected. Never resumed.",
+    "reason": "Pool now original TRAIN only; source/target/template review packet byte-identical, same ten exclusions, no output-based target changes."
+  }
+}

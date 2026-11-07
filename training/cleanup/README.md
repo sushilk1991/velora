@@ -256,3 +256,10 @@ records what is and is not reproducible from Git. Actual training was guarded
 against 779 cases, including 24 acoustic recognition inputs kept outside Git;
 the published text guards alone are not that complete union. Never substitute
 test results or owner dictations for development selection data.
+
+The [targeted follow-up](../../docs/research/2026-11-07-simple-english-cleanup/README.md)
+exports small public rehearsal sets with actual app request fields, full
+instruction-compatibility reviews, and a separate evaluation-label audit.
+Both final calibration checkpoints fail preservation gates. These recipes and
+artifacts remain research candidates; no trained weights are installed or
+published by the follow-up.

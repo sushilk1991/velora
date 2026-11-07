@@ -6,6 +6,8 @@ Current status: **GPU comparisons passed output, token and status parity on all 
 
 The [follow-up study](../../docs/research/2026-11-06-cleanup-push-v3.md) confirmed another 23.54% median reduction with `--draft-max 8` versus three on the same LFM3 Q8_0 artifact, with exact public output/token/status parity in two counterbalanced pairs. The known length failure remains. Larger drafts did not qualify for the production Qwen4B path; defaults remain unchanged. The study also reports the complete personal-recording comparison and why smaller models were not adopted.
 
+The [English cleanup qualification](../../docs/research/2026-11-07-simple-english-cleanup/README.md) retains exact scalar/copy8 parity on192 cases, rejects compact instructions after owner omissions, and records two small calibration passes. Neither qualifies an app/model switch. Its source-only evaluation audit also corrects mode-incompatible labels before reaffirming the preservation failure.
+
 ## Why this backend
 
 Primary source inspection on 2026-11-06:

@@ -1,0 +1,97 @@
+{
+  "parent_manifest_sha256": "679633cc863b97562c6c7f4cd8bd667b59336e1a52ac1db59b33c5b9ad10a898",
+  "parent_data_sha256": "189287b9e14a589204d2735f81ca9ce6c9f40ea814b5b30ce837e67e36c45172",
+  "data_sha256": "10ad30618b3633b09ffa60eb9904b3c030c48283436ceba9342174d2d43765e4",
+  "ledger_sha256": "ee8e41b8a94047b55878478bf9b2f43466d18f024100d7946574f11ef84606e5",
+  "context_review_sha256": "12627ec34f1e203ac856cc5cc4de654cbb02a7584d23d5484779157bddba5d80",
+  "counts": {
+    "train": 290,
+    "dev": 1427
+  },
+  "excluded_after_context_review": [
+    {
+      "id": "sotto-train-124928",
+      "category": "correction_residue_grammar",
+      "status": "incompatible",
+      "severity": "low",
+      "reason": "The target joins the corrected amount to the unrepaired suffix as \u201cwas one hundred and fifty is the real number.\u201d This malformed correction seam is not clean, well-punctuated prose under the actual Default template. The final amount is correct, but the target teaches an unclean correction boundary.",
+      "instruction": "Produce clean, well-punctuated prose."
+    },
+    {
+      "id": "lfm3-final-syn-056",
+      "category": "message_case_contract",
+      "status": "incompatible",
+      "severity": "medium",
+      "reason": "The entirely lowercase source is converted to sentence-initial uppercase \u201cThe\u201d. The attached Message template explicitly requires preservation of lowercase-style informality; removing the trailing period alone is insufficient.",
+      "instruction": "Lowercase-style informality in the original should be preserved; do not make it formal."
+    },
+    {
+      "id": "lfm3-final-syn-058",
+      "category": "unretracted_object_deleted",
+      "status": "incompatible",
+      "severity": "high",
+      "reason": "The correction changes the action from ironing to hanging dry, but it does not retract which garment is involved. The target deletes the only \u201csilk shirt\u201d noun phrase and begins with an antecedentless \u201cit\u201d, losing the object and its material qualifier.",
+      "instruction": "Keep the user's wording and sentence order; only fix punctuation, capitalization, fillers, and self-corrections."
+    },
+    {
+      "id": "sotto-train-116544",
+      "category": "corrected_action_object_lost",
+      "status": "uncertain_exclude",
+      "severity": "medium",
+      "reason": "The source changes the intended first action from refactoring this module to adding a comment first. The target preserves the new action but loses the only module referent. It is arguable that the entire first proposal was retracted; because this also removes where the comment belongs, exclude this ambiguous label rather than assume the object was retracted.",
+      "instruction": "Keep the user's wording and sentence order; only fix punctuation, capitalization, fillers, and self-corrections."
+    },
+    {
+      "id": "sotto-relabel-0117",
+      "category": "unretracted_qualifier_deleted",
+      "status": "incompatible",
+      "severity": "high",
+      "reason": "The target corrects the budget amount to 150k but drops that the budget is for marketing. The amount is superseded; the marketing qualifier is not. The actual controls provide no prior context that restores this lost qualification.",
+      "instruction": "Keep the user's wording and sentence order; only fix punctuation, capitalization, fillers, and self-corrections."
+    },
+    {
+      "id": "muse-public-0097-served-default",
+      "category": "note_target_paraphrase_under_default",
+      "status": "incompatible",
+      "severity": "medium",
+      "reason": "List structure is allowed, but the unchanged note target also rewrites \u201cthat I can carry\u201d to \u201cto carry\u201d, \u201cso I can see\u201d to \u201cto see\u201d, and the final first-person clause into an imperative. Those compressions are more than line breaks/list markers, and conflict with the newly attached Default instruction to keep wording.",
+      "instruction": "Still never rewrite wording."
+    },
+    {
+      "id": "muse-public-0097-served-terminal",
+      "category": "note_target_paraphrase_under_terminal",
+      "status": "incompatible",
+      "severity": "medium",
+      "reason": "Numbered structure fits SmartTerminal, but the target also compresses source-relative clauses and first-person wording into infinitives/imperatives. The FULL-strength no-rewrite instruction still applies to this terminal template; mandatory numbering does not authorize the wording changes.",
+      "instruction": "Still never rewrite wording."
+    },
+    {
+      "id": "muse-public-0093-served-default",
+      "category": "note_target_paraphrase_under_default",
+      "status": "incompatible",
+      "severity": "medium",
+      "reason": "The target changes \u201ca short feedback form that we can hand out\u201d to \u201ca short feedback form to hand out\u201d. Its list shape and quantities are compatible, but dropping/replacing the subject and modal is a wording rewrite under the new Default contract.",
+      "instruction": "Still never rewrite wording."
+    },
+    {
+      "id": "muse-public-0093-served-terminal",
+      "category": "note_target_paraphrase_under_terminal",
+      "status": "incompatible",
+      "severity": "medium",
+      "reason": "The numbered task list fits the terminal policy, but \u201cthat we can hand out\u201d becomes \u201cto hand out\u201d. Mandatory list formatting does not waive the FULL instruction against rewriting wording.",
+      "instruction": "Still never rewrite wording."
+    },
+    {
+      "id": "serving-layout-006-served-terminal",
+      "category": "smart_terminal_numbered_tasks_required",
+      "status": "incompatible",
+      "severity": "medium",
+      "reason": "The source enumerates four separate actionable errands. The target puts them on bare lines, while this actual SmartTerminal template explicitly requires a numbered list for multiple distinct requests/tasks. The spoken one-errand-per-line request is compatible with numbering and does not request no numbering. This concern does not apply to bare value/product collections.",
+      "instruction": "When that message contains two or more distinct problems, requests, constraints, or pieces of feedback, a numbered list is REQUIRED even if the speaker did not explicitly ask for one."
+    }
+  ],
+  "owner_training_examples": 0,
+  "all_isolation_checks_passed": true,
+  "targets_unchanged": true,
+  "vocabulary_source": "Original TRAIN only. Four exact-string partitions, not a normalized unseen-vocabulary test."
+}

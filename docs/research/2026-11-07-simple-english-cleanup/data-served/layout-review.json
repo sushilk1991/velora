@@ -1,0 +1,8 @@
+{
+  "original_input_sha256": "207442fb55085194b5947521af3aa154764270635342598e1213ac359e1ef58f",
+  "reviewed_output_sha256": "6f49167fecba0f6b33b6aba7781ecfca9d4611531406c0c24beec44f2279010f",
+  "total": 8,
+  "approved": 8,
+  "rejected": 0,
+  "target_changes": []
+}

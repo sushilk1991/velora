@@ -1,5 +1,10 @@
 # Runtime locating experiments
 
+`english_context.py` is a **rejected request-format experiment**, retained for
+replay with `test_english_context.py`. Removing stock Default instructions fixed
+some corrections but introduced omissions elsewhere. Do not enable it in the
+app. See the [English cleanup follow-up](../../../docs/research/2026-11-07-simple-english-cleanup/README.md).
+
 These options are opt-in worker experiments. They do not change Velora's app
 settings, model or engine dependencies. The implementation was built against
 the existing verified llama.cpp pin, and CPU protocol/argument/helper checks

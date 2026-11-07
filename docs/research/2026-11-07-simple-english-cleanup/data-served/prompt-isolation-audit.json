@@ -1,0 +1,12 @@
+{
+  "schema": 1,
+  "data_sha256": "10ad30618b3633b09ffa60eb9904b3c030c48283436ceba9342174d2d43765e4",
+  "audit_ledger_sha256": "f85d4ca43706d283b53fc83ce2bf4b2e80c09f161478c80ce2b4d319bb2da2ae",
+  "original_training_ledger_unchanged": true,
+  "isolate_prompt_fields": true,
+  "shared_templates": 146,
+  "shared_template_basis": "Original137 inspected generic templates plus9 actual app templates independently reviewed for the serving corpus.",
+  "full_data_against_frozen_guard": "passed",
+  "train_against_guard_dev192_fresh256": "passed",
+  "scope": "Post-hoc stronger input/content audit, not a retraining or outcome-based selection change."
+}

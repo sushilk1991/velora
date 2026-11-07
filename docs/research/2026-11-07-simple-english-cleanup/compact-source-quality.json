@@ -1,0 +1,55 @@
+{
+  "schema": 1,
+  "scope": "Source-only audit of305 uncertain-reference cases:215 exact prior output/status matches reused,90 novel outputs independently reviewed with8 unchanged controls (98 cases/196 arm judgments). No gold or audio truth. Numeric/identifier changes are diagnostics and may be legitimate normalization.",
+  "candidate_full305": {
+    "additions": 6,
+    "deletions": 11,
+    "numbers_or_identifiers_changed": 20,
+    "unresolved_clear_repair": 7,
+    "uncertain": 67
+  },
+  "selected98_counts": {
+    "old_native": {
+      "additions": 1,
+      "deletions": 3,
+      "numbers_or_identifiers_changed": 14,
+      "unresolved_clear_repair": 3,
+      "uncertain": 18
+    },
+    "compact": {
+      "additions": 6,
+      "deletions": 9,
+      "numbers_or_identifiers_changed": 16,
+      "unresolved_clear_repair": 3,
+      "uncertain": 22
+    }
+  },
+  "selected98_paired": {
+    "additions": {
+      "new_only": 5,
+      "old_only": 0
+    },
+    "deletions": {
+      "new_only": 7,
+      "old_only": 1
+    },
+    "numbers_or_identifiers_changed": {
+      "new_only": 4,
+      "old_only": 2
+    },
+    "unresolved_clear_repair": {
+      "new_only": 0,
+      "old_only": 0
+    },
+    "uncertain": {
+      "new_only": 4,
+      "old_only": 0
+    }
+  },
+  "review_hashes": {
+    "a-packet.jsonl": "c23183cf49c857809614bab0ab114d9f16175390d832e6ca7a9f4c64d09f3498",
+    "a-judgments.jsonl": "3eaa9880a0583e4135385d0f7278a416cb46ec51ebf9bed50ecfdf30215ec2ca",
+    "b-packet.jsonl": "b4b58218dde564becc6a754bd74a84714a7e6a816460680f0c52d1b23bd08d24",
+    "b-judgments.jsonl": "3ca6bfbb1ef91ff7f154def08d67e3f9b75a63dba3b2d7eda6f52ad9ee20e63f"
+  }
+}

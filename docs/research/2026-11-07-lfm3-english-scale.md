@@ -1,5 +1,7 @@
 # English-first LFM3 scale experiment — 7 November 2026
 
+The [subsequent qualification](2026-11-07-simple-english-cleanup/README.md) tests shorter prompts and two targeted calibrations, locates training/serving instruction mismatches, and audits mode-incompatible evaluation labels. It does not qualify a production model switch; the original results below remain preserved.
+
 Keep the production models unchanged. The selected 1.7B native candidate cuts English-only paired cleanup p50 from **558 ms to 264 ms** and samples a much smaller cleanup-process footprint, but it introduces new material-error cases on the owner's recordings. It remains experimental. The source change to ship from this round is the generic email prompt and its migration; the datasets and evaluation tooling are also retained.
 
 The larger corpus has **7,631 reviewed English rows**. The original fixed-prompt challenge favored the new adapter strongly, but a post-hoc prompt control explains much of the old adapter's named-identity errors. Removing the examples reduced old C's email material flags from **40/51 to 2/51**, matching new G's 2/51; C still added 40 generic closings, while G added none. More data improved instruction compliance, but the headline fact-error comparison must not be presented as a broad semantic-reasoning gain.

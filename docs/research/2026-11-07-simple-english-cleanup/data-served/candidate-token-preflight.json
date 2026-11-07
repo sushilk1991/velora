@@ -1,0 +1,13 @@
+{
+  "data_sha256": "189287b9e14a589204d2735f81ca9ce6c9f40ea814b5b30ce837e67e36c45172",
+  "overflow": [],
+  "counts": {
+    "train": 300,
+    "dev": 1427
+  },
+  "max_tokens": {
+    "train": 923,
+    "dev": 620
+  },
+  "tokenizer_policy": "Explicit return_dict=False and integer-list assertion match MLX TokenizerWrapper; no model loaded."
+}

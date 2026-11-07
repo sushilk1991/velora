@@ -1,0 +1,54 @@
+{
+  "cases": 192,
+  "fields": [
+    "id",
+    "answer",
+    "diagnostic_partial_text",
+    "status",
+    "error",
+    "prompt_tokens",
+    "output_tokens"
+  ],
+  "all_eos": true,
+  "equal": true,
+  "mismatch_ids": [],
+  "copy8_median_ms": 58.800979,
+  "scalar_median_ms": 81.3315835,
+  "comparison": "Same model/binary/tokenizer/prompt and greedy outputs, ordinary system prefix ON; scalar versus existing copy8.",
+  "artifacts": {
+    "minimal-dev.jsonl": {
+      "data_sha256": "967f5821ed004e15c13e12b22fb9f6e164a651347e71cbf539736de2bf1b100f",
+      "metadata_sha256": "f01229007b213c8b6d1f3e136610d238a2cf25b7a3bd4b140b67f6c8f75e5460",
+      "runtime_qualified": true,
+      "model_sha256": "ec3710cf3bc12c0fbdfcf24587e5f87a2bf197f4c3129d390052af67e3d1a666",
+      "binary_sha256": "6b5ab148f586b881d27577f5a61a5dafa551d1a24edb140213c29321ec044a3c",
+      "prompt_data_sha256": "e412844303fb6520f9b309e399262e539ddfed345f70518ddeed637abe98f69a",
+      "prefix_reuse": true,
+      "copy_draft": true,
+      "draft_max_tokens": 8,
+      "prefill_batch_tokens": 128,
+      "context_tokens": 4096,
+      "student_prefix_cache": false,
+      "repeat_equal": true,
+      "protocol_recovery_passed": true,
+      "all_main_rows_eos": true
+    },
+    "minimal-scalar-dev.jsonl": {
+      "data_sha256": "5ac7a202a5d720f42630770d7d6758e3d857bf6db3aee23520eec7e34a4ad9e7",
+      "metadata_sha256": "d128f0ee2f75f7ae14b0658ff8ca815fec033c1dced966ca63286d2885eaf930",
+      "runtime_qualified": true,
+      "model_sha256": "ec3710cf3bc12c0fbdfcf24587e5f87a2bf197f4c3129d390052af67e3d1a666",
+      "binary_sha256": "6b5ab148f586b881d27577f5a61a5dafa551d1a24edb140213c29321ec044a3c",
+      "prompt_data_sha256": "e412844303fb6520f9b309e399262e539ddfed345f70518ddeed637abe98f69a",
+      "prefix_reuse": true,
+      "copy_draft": false,
+      "draft_max_tokens": 3,
+      "prefill_batch_tokens": 128,
+      "context_tokens": 4096,
+      "student_prefix_cache": false,
+      "repeat_equal": true,
+      "protocol_recovery_passed": true,
+      "all_main_rows_eos": true
+    }
+  }
+}

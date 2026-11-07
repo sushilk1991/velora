@@ -1,0 +1,21 @@
+{
+  "original_input_sha256": "9245972588e975d0c36a8c73eef6aa82829d601605a6158a90632f65998bb49f",
+  "reviewed_output_sha256": "804f854ffac96b9110c0478015be8c7fb18d2998986e5973a08afa6181e0c60f",
+  "total": 48,
+  "approved": 48,
+  "rejected": 0,
+  "target_changes": [
+    {
+      "id": "targeted-v7-017",
+      "before": "Send the invoice but do not charge the late fee.",
+      "after": "Do send the invoice to the client but do not charge the late fee.",
+      "reason": "Restore the unchanged recipient and retain the corrected affirmative wording."
+    },
+    {
+      "id": "targeted-v7-018",
+      "before": "I will be at the office but I will not join the call.",
+      "after": "I will be at the office tomorrow but I will not join the call.",
+      "reason": "Restore tomorrow, which the attendance correction did not retract."
+    }
+  ]
+}

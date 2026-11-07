@@ -1,0 +1,8 @@
+{
+  "purpose": "Source-only independent contract audit of inherited stress-probe annotations. Preserve original failed J gate; no further training, prompts or owner selection.",
+  "source_data_sha256": "8a06d853a0f9abf68f77f489b3bf452e39c0b6b4069473d8c4660616242a0e02",
+  "source_review_sha256": "43c2caa0bb9f19a93d36056408fe8c6e1abcfd88b049173cb4b3ca011df461b8",
+  "review_was_model_output_blind": true,
+  "rule": "Recompute same immutable lexical scorer on audited targets/support/literal/no-edit flags; retain all192 cases, invalid/uncertain separately, no input field changes. This diagnostic cannot by itself qualify an app/default switch.",
+  "decision_policy": "If preservation failures persist, original rejection stands. Do not reinterpret the new mode-required Message change as harm. No new GPU jobs."
+}
