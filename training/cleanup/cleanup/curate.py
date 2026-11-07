@@ -2,8 +2,9 @@
 import collections
 import copy
 import json
+import os
 from pathlib import Path
-from .data import assign, digest, grams, norm, read, validate
+from .data import assign, content_fields, digest, duplicate_policy, grams, norm, read, task_contract, validate
 
 SOTTO_REPO = 'juanquivilla/sotto-transcript-cleanup'
 SOTTO_REVISION = '183cc8fd58532f13fa192980185214de1bcd5acc'
@@ -11,6 +12,10 @@ SOTTO_REVISION = '183cc8fd58532f13fa192980185214de1bcd5acc'
 
 def acquire_sotto(out):
     """Fetch pinned public source; expose only inputs, never upstream targets."""
+    out=Path(out)
+    sidecar=Path(str(out)+'.manifest.json')
+    if os.path.lexists(out) or os.path.lexists(sidecar):
+        raise FileExistsError('Sotto output or acquisition sidecar already exists')
     from huggingface_hub import snapshot_download
     import pyarrow.parquet as parquet
     snapshot = Path(snapshot_download(repo_id=SOTTO_REPO, repo_type='dataset', revision=SOTTO_REVISION))
@@ -28,7 +33,8 @@ def acquire_sotto(out):
                 row = {'id': f'sotto-{split}-{index:06d}', 'raw': raw, 'source': {'name': 'sotto-transcript-cleanup', 'revision': SOTTO_REVISION, 'license': 'MIT'}}
                 output.write(json.dumps(row, ensure_ascii=False) + '\n')
     manifest['output_sha256'] = digest(out)
-    Path(str(out) + '.manifest.json').write_text(json.dumps(manifest, indent=2) + '\n')
+    with sidecar.open('x') as output:
+        output.write(json.dumps(manifest, indent=2) + '\n')
     return manifest
 
 
@@ -36,9 +42,10 @@ def curate(rows, holdout, ledger, seed='velora-public-20261106-v1', dev_percent=
     """Reference-order dedupe, then union group and 8-gram connected components."""
     if not holdout:
         raise ValueError('external holdout must not be empty')
-    held_text = {norm(r[f]) for r in holdout for f in ('raw', 'target', 'template') if isinstance(r.get(f), str)}
-    held_grams = set().union(*(grams(r[f]) for r in holdout for f in ('raw', 'target', 'template') if isinstance(r.get(f), str)))
-    kept, excluded, seen, ids = [], [], set(), set()
+    held_text = {norm(value) for r in holdout for _,value in content_fields(r, include_template=True,ledger=ledger)}
+    held_grams = set().union(*(grams(value) for r in holdout for _,value in content_fields(r, include_template=True,ledger=ledger)))
+    policy = duplicate_policy(ledger)
+    kept, excluded, seen, ids, contracts = [], [], set(), set(), {}
     for source_row in rows:
         # Validate every row's public origin even if its label will be excluded.
         row = copy.deepcopy(source_row)
@@ -53,17 +60,25 @@ def curate(rows, holdout, ledger, seed='velora-public-20261106-v1', dev_percent=
             raise ValueError(f"duplicate id: {row['id']}")
         ids.add(row['id'])
         reason = None
-        values = {norm(row[f]) for f in ('raw', 'target')}
+        values = {norm(value) for _,value in content_fields(row,ledger=ledger)}
+        holdout_values = list(content_fields(row,ledger=ledger,include_short_vocabulary=True))
         if status != 'approved':
             reason = 'not independently approved'
-        elif values & held_text or any(grams(row[f]) & held_grams for f in ('raw', 'target')):
+        elif any(norm(value) in held_text or grams(value) & held_grams for _,value in holdout_values):
             reason = 'frozen holdout overlap'
-        elif values & seen:
+        elif policy == 'strict' and values & seen:
             reason = 'duplicate normalized content'
+        elif policy == 'same-component-contract':
+            key = (task_contract(row), row['raw'])
+            if key in contracts:
+                if contracts[key] != row['target']:
+                    raise ValueError(f"{row['id']}: conflicting targets for task contract and raw")
+                reason = 'duplicate task contract and pair'
         if reason:
             excluded.append({'id': row['id'], 'reason': reason})
             continue
         seen.update(values)
+        if policy == 'same-component-contract':contracts[(task_contract(row),row['raw'])]=row['target']
         kept.append(copy.deepcopy(source_row))
     parent = list(range(len(kept)))
     def find(x):
@@ -75,14 +90,18 @@ def curate(rows, holdout, ledger, seed='velora-public-20261106-v1', dev_percent=
         a, b = find(x), find(y)
         if a != b:
             parent[max(a, b)] = min(a, b)
-    owners, families = {}, {}
+    owners, families, text_owners = {}, {}, {}
     for i, row in enumerate(kept):
         family = row['scenario_group']
         if family in families:
             union(i, families[family])
         else:
             families[family] = i
-        for gram in grams(row['raw']) | grams(row['target']):
+        if policy == 'same-component-contract':
+            for value in {norm(value) for _,value in content_fields(row,ledger=ledger)}:
+                if value in text_owners:union(i,text_owners[value])
+                else:text_owners[value]=i
+        for gram in set().union(*(grams(value) for _,value in content_fields(row,ledger=ledger))):
             if gram in owners:
                 union(i, owners[gram])
             else:

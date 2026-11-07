@@ -20,6 +20,7 @@ BASE_REVISION = '4d6d94c9c2c2f249f1f740f4f08e071b0dbfe099'
 EVAL_CACHE_BYTES = 512 * 1024 * 1024
 PORT = ROOT / SOURCE_REPO_PATH
 COMMON_OPTIONS = {'--data', '--base', '--base-revision', '--out', '--adapter'}
+SCORE_OPTIONS = {'--holdout', '--ledger', '--checkpoint', '--max-seq'}
 TRAIN_OPTIONS = {'--holdout', '--ledger', '--warmup-updates', '--lora-scale',
                  '--clip-grad-norm', '--lr-schedule', '--val-batches', '--report-every',
                  '--eval-every', '--save-every', '--seed', '--skip-overlength',
@@ -57,14 +58,15 @@ def _set_eval_cache_limit(size):
 def main(argv=None, *, runner=None, architecture=None, cache_limit=None):
     argv = list(sys.argv[1:] if argv is None else argv)
     parser = argparse.ArgumentParser(description=__doc__, allow_abbrev=False)
-    parser.add_argument('command', choices=('train', 'generate-eval'))
+    parser.add_argument('command', choices=('train', 'generate-eval', 'score-checkpoints'))
     parser.add_argument('--base', required=True, help='existing local snapshots/<audited revision>')
     parser.add_argument('--base-revision', required=True)
     parser.add_argument('--out', required=True, help='fresh output with an existing parent directory')
-    if argv and argv[0] in ('train', 'generate-eval') and any(x in ('-h', '--help') for x in argv[1:]):
+    if argv and argv[0] in ('train', 'generate-eval', 'score-checkpoints') and any(x in ('-h', '--help') for x in argv[1:]):
         return _call([argv[0], '--help'], runner)
     args, _ = parser.parse_known_args(argv)
-    allowed = COMMON_OPTIONS | (TRAIN_OPTIONS if args.command == 'train' else {'--max-tokens'})
+    allowed = COMMON_OPTIONS | {'train': TRAIN_OPTIONS, 'generate-eval': {'--max-tokens'},
+                                'score-checkpoints': SCORE_OPTIONS}[args.command]
     # The downstream parser accepts abbreviations. Reject them here so an
     # abbreviated duplicate cannot bypass the audited base/output checks.
     for token in argv[1:]:
@@ -95,12 +97,12 @@ def main(argv=None, *, runner=None, architecture=None, cache_limit=None):
                 effective[index] = option + '=' + value
     architecture = lfm3_architecture if architecture is None else architecture
     with architecture(PORT) as info:
-        if args.command == 'generate-eval':
+        if args.command != 'train':
             (cache_limit or _set_eval_cache_limit)(EVAL_CACHE_BYTES)
         payload = {**info, 'wrapper_sha256': digest(__file__),
                    'wrapper_source': 'training/cleanup/scripts/run_lfm3.py',
                    'base_revision': BASE_REVISION, 'invocation': argv, 'effective_invocation': effective,
-                   'evaluation_allocator_cache_limit_bytes': EVAL_CACHE_BYTES if args.command == 'generate-eval' else None}
+                   'evaluation_allocator_cache_limit_bytes': EVAL_CACHE_BYTES if args.command != 'train' else None}
         _write_new(sidecar, payload)
         result = _call(effective, runner)
         if out.is_dir():

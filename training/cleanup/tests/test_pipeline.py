@@ -236,3 +236,64 @@ def test_checkpoint_selection_only_uses_dev_and_finite_loss():
     assert [r['id'] for r in dev_examples([{'id':'train','split':'train'}, {'id':'b','split':'dev'}, {'id':'a','split':'dev'}])] == ['a','b']
     assert select_best([{'checkpoint':'a','dev_loss':2.0},{'checkpoint':'b','dev_loss':1.0}])['checkpoint'] == 'b'
     with pytest.raises(ValueError): select_best([{'dev_loss':float('nan')}])
+
+
+def with_context(item, context, stock='Shared cleanup instruction.'):
+    item['scenario_context'] = context
+    item['instructions'] = stock + '\n\nPrevious text (context only, do NOT repeat it): «' + context + '».'
+    return item
+
+
+def test_scenario_context_heldout_isolation_and_curator():
+    from cleanup.curate import curate
+    ledger = {'allowed_licenses':['CC0'], 'sources': {'synthetic': {'kind':'synthetic','revision':'1','license':'CC0'}}}
+    a = with_context(row(), 'the quiet lantern glows beside the old wooden bridge tonight')
+    held = [{'id':'held', 'raw':'unrelated guard', 'scenario_context':'a quiet lantern glows beside the old wooden bridge tonight outside'}]
+    with pytest.raises(ValueError, match='holdout contamination in scenario_context'):
+        validate([a], held, ledger=ledger)
+    kept, report = curate([a], held, ledger)
+    assert kept == [] and report['excluded'][0]['reason'] == 'frozen holdout overlap'
+    b = row(); b.update(id='b',raw='hidden old context',target='Other thing.')
+    with pytest.raises(ValueError, match='holdout contamination'):
+        validate([b], [{'id':'held','scenario_context':'hidden old context'}], ledger=ledger)
+
+
+@pytest.mark.parametrize('context_a,context_b', [
+    ('short context', 'short context'),
+    ('one two three four five six seven eight nine', 'zero one two three four five six seven eight ten'),
+])
+def test_context_only_train_dev_bridge(context_a, context_b):
+    a=with_context(row(),context_a); b=with_context(row(),context_b)
+    b.update(id='b',raw='different input',target='different output',scenario_group='different',split='dev')
+    with pytest.raises(ValueError, match='crosses splits|train/dev n-gram'):
+        validate([a,b], HOLDOUT, ledger={'duplicate_policy':'same-component-contract','allowed_licenses':['CC0'],
+                                        'sources':{'synthetic':{'kind':'synthetic','revision':'1','license':'CC0'}}})
+
+
+def test_shared_stock_instructions_do_not_connect_optin_components():
+    from cleanup.curate import curate
+    from cleanup.data import connected_components
+    ledger={'duplicate_policy':'same-component-contract','allowed_licenses':['CC0'],
+            'sources':{'synthetic':{'kind':'synthetic','revision':'1','license':'CC0'}}}
+    a=with_context(row(),'first private-free public scenario')
+    b=with_context(row(),'second completely unrelated scenario')
+    b.update(id='b',raw='distinct input',target='distinct output',scenario_group='another')
+    kept,_=curate([a,b],HOLDOUT,ledger)
+    assert len(kept)==2 and len(connected_components(kept))==2
+
+
+@pytest.mark.parametrize('context,instructions', [
+    (None,''), (['wrong'],''), ('context','no suffix'),
+    ('context','Shared\n\nPrevious text (context only, do NOT repeat it): «other».') ,
+    ('','Shared\n\nPrevious text (context only, do NOT repeat it): «hidden».') ,
+    ('context','Shared\n\nPrevious text (context only, do NOT repeat it): «hidden».\n\nPrevious text (context only, do NOT repeat it): «context».'),
+])
+def test_malformed_or_hidden_scenario_context_fails(context,instructions):
+    a=row();a.update(scenario_context=context,instructions=instructions)
+    with pytest.raises(ValueError,match='scenario_context'):
+        validate([a],HOLDOUT)
+
+
+def test_malformed_holdout_context_fails_closed():
+    with pytest.raises(ValueError,match='scenario_context'):
+        validate([row()],[{'id':'held','raw':'unrelated','scenario_context':42}])

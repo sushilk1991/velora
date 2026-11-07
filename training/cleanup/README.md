@@ -101,12 +101,12 @@ skip further MLX/resource probes and retire through the existing failure path.
 
 ## Reproduce the LFM3 A/B/C research recipes
 
-Use [scripts/run_lfm3.py](scripts/run_lfm3.py) for LFM3 `train` and
-`generate-eval`. The pinned environment cannot load this architecture through
+Use [scripts/run_lfm3.py](scripts/run_lfm3.py) for LFM3 `train`, `generate-eval`, and
+`score-checkpoints`. The pinned environment cannot load this architecture through
 bare `python -m cleanup`: the wrapper registers the audited port for the whole
 operation, then removes that registration. It accepts only the audited local
 `snapshots/4d6d94c9c2c2f249f1f740f4f08e071b0dbfe099` base with `model_type=lfm3`.
-It never downloads a base. `train --help` and `generate-eval --help` forward to
+It never downloads a base. `train --help`, `generate-eval --help`, and `score-checkpoints --help` forward to
 the underlying CLI without loading a model or writing provenance.
 
 This is a new portable counterpart to the historical ignored operator wrapper,
@@ -176,6 +176,23 @@ choose a checkpoint. The historical C minimum was 0.144486 versus initial B's
 0.158287 on the same expanded dev set. Lower dev loss did not qualify a default
 model change: additional meaning regressions remained in private evaluation.
 
+When a future dev set is expanded, score the initial C checkpoint and every D
+checkpoint together on that same full dev split before choosing one. For example:
+
+```sh
+"$PY" training/cleanup/scripts/run_lfm3.py score-checkpoints \
+  --data "$RUN/expanded-curated.jsonl" --holdout "$RUN/exclusion-holdout.jsonl" \
+  --ledger "$RUN/ledger.json" --base "$BASE" --base-revision "$REV" \
+  --adapter "$RUN/d-adapter" --checkpoint "$RUN/c-initial.safetensors" \
+  --checkpoint "$RUN/d-adapter/0000100_adapters.safetensors" \
+  --checkpoint "$RUN/d-adapter/0000200_adapters.safetensors" \
+  --max-seq 1024 --out "$RUN/same-dev-selection.json"
+```
+
+Replace the example D paths with **all** saved D checkpoints; they must match
+the adapter's keys and base. The holdout is only an exclusion guard. Do not use
+raw test examples or owner recordings to select a checkpoint.
+
 After selection, generate fresh public challenge predictions separately:
 
 ```sh
@@ -201,3 +218,41 @@ CPU-only inspection, while `--execute` explicitly performs export.
 `--fused PATH --export-provenance PATH/export-provenance.json` for a separate
 fused run, then `compare --left ... --right ... --output ...` reports parity.
 These are research commands; they do not activate an application model.
+
+
+## English-first scale experiment
+
+The [English scale corpus](../../docs/research/2026-11-07-lfm3-english-scale/data-large/README.md)
+contains 7,631 public reviewed rows (6,204 train / 1,427 dev). Its smaller
+[3,101-row predecessor](../../docs/research/2026-11-07-lfm3-english-scale/data-small/README.md)
+is preserved as an exact prefix. These are English cleanup datasets; synthetic
+regional labels do not establish acoustic accent accuracy.
+
+`prepare_lfm3_english.py` preserves the original English base rows and splits,
+checks pinned raw-source provenance for Sotto additions, and isolates related
+families before excluding rejected examples. It never trains models. Run
+`python training/cleanup/scripts/prepare_lfm3_english.py --help` for its explicit input, source,
+ledger and exclusion paths. Identity companions must retain the reviewed
+parent's task contract and family; derived identities are not new independent
+source cases.
+
+The historical `sources.json` ledgers remain unchanged. The separate
+`sources-prompt-isolation.json` ledgers opt in to guarding nonshared instructions,
+previous-text context and vocabulary against heldout content. Template exemptions
+are exact vetted strings, not a general instruction exemption. Validation checks
+provenance declarations, not whether named reviewers really are independent;
+retain actual teacher and reviewer receipts.
+
+D/E warm starts use the selected prior C adapter, rank 16 / scale 8, LR 3e-6,
+8,192 batch-size-one iterations, accumulation 4, warmup 20 optimizer updates,
+cosine decay, clip 1, seed 42, maximum sequence 2,048, and save/evaluate every
+2,048 iterations. Score all saved checkpoints and initial C on the same full
+1,427-row dev set. Equal iteration counts do not imply equal training tokens or
+compute. The cold comparator uses the same larger corpus and LR 1e-5, without
+an initial adapter. Development loss does not establish cleanup fidelity.
+
+The [published challenge](../../docs/research/2026-11-07-lfm3-english-scale/challenge/README.md)
+records what is and is not reproducible from Git. Actual training was guarded
+against 779 cases, including 24 acoustic recognition inputs kept outside Git;
+the published text guards alone are not that complete union. Never substitute
+test results or owner dictations for development selection data.
