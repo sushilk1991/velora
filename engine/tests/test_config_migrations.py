@@ -146,3 +146,19 @@ def test_install_leaves_a_file_that_lands_after_the_check(home, fake_stt, monkey
     cfg.data["builtin_modes_rev"] = 0
     cfg._refresh_builtin_modes()
     assert json.loads(note.read_text()) == _packaged("note.json")
+
+
+def test_email_previous_revision_refreshes_but_custom_email_survives(home):
+    cfg = Config()
+    email = cfg.modes_dir / "email.json"
+    previous = config_mod._BUILTIN_MODE_SUPERSEDED["email.json"][0]
+    assert "best regards, Sushil" in previous["prompt"]
+    email.write_text(json.dumps(previous))
+    cfg.data["builtin_modes_rev"] = 2
+    cfg._refresh_builtin_modes()
+    assert json.loads(email.read_text()) == _packaged("email.json")
+    edited = dict(previous, prompt=previous["prompt"] + " Custom instruction.")
+    email.write_text(json.dumps(edited))
+    cfg.data["builtin_modes_rev"] = 2
+    cfg._refresh_builtin_modes()
+    assert json.loads(email.read_text()) == edited

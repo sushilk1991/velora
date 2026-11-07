@@ -143,10 +143,27 @@ class Mode:
 # When a packaged built-in changes, add its OLD content here and bump
 # _BUILTIN_MODES_REV.
 
-_BUILTIN_MODES_REV = 2
+_BUILTIN_MODES_REV = 3
 
 _BUILTIN_MODE_SUPERSEDED: dict[str, tuple[dict[str, Any], ...]] = {
     "email.json": (
+        {'name': 'Email',
+         'prompt': 'The user is dictating an email. Use a professional but natural tone and keep the '
+                   "user's wording. Structure the body into short paragraphs separated by blank lines "
+                   "where the speech shifts topic. If the user dictates a greeting ('hi Priya', 'dear "
+                   "team'), put it on its own line before the body. If they dictate a sign-off ('best "
+                   "regards, Sushil'), put the sign-off on its own line at the end with the name on the "
+                   'line below it. Never invent a greeting, sign-off, name, or subject the user did not '
+                   'say. When the user enumerates several distinct points, requests, or questions, format '
+                   'them as a short list.',
+         'formatting': 'full',
+         'apps': ['com.apple.mail',
+                  'com.microsoft.Outlook',
+                  'com.readdle.SparkDesktop',
+                  'com.readdle.smartemail-Mac',
+                  'com.mimestream.Mimestream'],
+         'vocabulary': [],
+         'replacements': {}},
         {
             "name": "Email",
             "prompt": (
