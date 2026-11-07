@@ -1,0 +1,203 @@
+{
+  "dataset": "velora-muse-english-v6-s04",
+  "rows": 160,
+  "file": "candidates.jsonl",
+  "sha256": "0e75b2b4f59733a236d30585d79c56ec85d76c40b6d1c02e67445ec7004fd7e0",
+  "counts": {
+    "modes": {
+      "code": 32,
+      "message": 32,
+      "email": 32,
+      "note": 32,
+      "default": 26,
+      "terminal": 6
+    },
+    "no_edit_exact": 49,
+    "vocabulary_rows": 35,
+    "contrast_families": 48,
+    "contrast_rows": 96,
+    "spelling_families": 16,
+    "spelling_rows": 32,
+    "spelling_explicit_instruction_rows": 32,
+    "independent_rows": 32,
+    "context_rows": 16,
+    "long_rows_100_180_words": 16,
+    "english_variants": {
+      "en-US": 46,
+      "en-GB": 40,
+      "en-IN": 21,
+      "en-CA": 20,
+      "en-AU": 23,
+      "international-informal": 10
+    },
+    "instruction_variants": {
+      "stock": 112,
+      "explicit-spelling": 32,
+      "stock+previous-context": 16
+    }
+  },
+  "groups": {
+    "contrast": [
+      "s04-a01",
+      "s04-a02",
+      "s04-a03",
+      "s04-a04",
+      "s04-a05",
+      "s04-a06",
+      "s04-a07",
+      "s04-a08",
+      "s04-a09",
+      "s04-a10",
+      "s04-a11",
+      "s04-a12",
+      "s04-a13",
+      "s04-a14",
+      "s04-a15",
+      "s04-a16",
+      "s04-a17",
+      "s04-a18",
+      "s04-a19",
+      "s04-a20",
+      "s04-a21",
+      "s04-a22",
+      "s04-a23",
+      "s04-a24",
+      "s04-a25",
+      "s04-a26",
+      "s04-a27",
+      "s04-a28",
+      "s04-a29",
+      "s04-a30",
+      "s04-a31",
+      "s04-a32",
+      "s04-a33",
+      "s04-a34",
+      "s04-a35",
+      "s04-a36",
+      "s04-a37",
+      "s04-a38",
+      "s04-a39",
+      "s04-a40",
+      "s04-a41",
+      "s04-a42",
+      "s04-a43",
+      "s04-a44",
+      "s04-a45",
+      "s04-a46",
+      "s04-a47",
+      "s04-a48"
+    ],
+    "spelling": [
+      "s04-b01",
+      "s04-b02",
+      "s04-b03",
+      "s04-b04",
+      "s04-b05",
+      "s04-b06",
+      "s04-b07",
+      "s04-b08",
+      "s04-b09",
+      "s04-b10",
+      "s04-b11",
+      "s04-b12",
+      "s04-b13",
+      "s04-b14",
+      "s04-b15",
+      "s04-b16"
+    ],
+    "independent": [
+      "s04-c01",
+      "s04-c02",
+      "s04-c03",
+      "s04-c04",
+      "s04-c05",
+      "s04-c06",
+      "s04-c07",
+      "s04-c08",
+      "s04-c09",
+      "s04-c10",
+      "s04-c11",
+      "s04-c12",
+      "s04-c13",
+      "s04-c14",
+      "s04-c15",
+      "s04-c16",
+      "s04-c17",
+      "s04-c18",
+      "s04-c19",
+      "s04-c20",
+      "s04-c21",
+      "s04-c22",
+      "s04-c23",
+      "s04-c24",
+      "s04-c25",
+      "s04-c26",
+      "s04-c27",
+      "s04-c28",
+      "s04-c29",
+      "s04-c30",
+      "s04-c31",
+      "s04-c32"
+    ]
+  },
+  "pages": [
+    {
+      "page": 1,
+      "page_size": 32,
+      "rows": 32,
+      "first_id": "en6-s04-0001",
+      "last_id": "en6-s04-0032",
+      "sha256": "2c2fb534762640c9e77c5f91f76e6f9c5f904fbddf07715704d64f2c9195d24f"
+    },
+    {
+      "page": 2,
+      "page_size": 32,
+      "rows": 32,
+      "first_id": "en6-s04-0033",
+      "last_id": "en6-s04-0064",
+      "sha256": "12d0c23484f0ac5722f4ba18e8b96d4f324cae04b659ddb55ba178766e32fd3c"
+    },
+    {
+      "page": 3,
+      "page_size": 32,
+      "rows": 32,
+      "first_id": "en6-s04-0065",
+      "last_id": "en6-s04-0096",
+      "sha256": "20b60d7e2ee1111103cd7c32bbfb3318460f2ccc1a1e44c8b7bcda0c04d5cac4"
+    },
+    {
+      "page": 4,
+      "page_size": 32,
+      "rows": 32,
+      "first_id": "en6-s04-0097",
+      "last_id": "en6-s04-0128",
+      "sha256": "b9446907f0587dcb4cb4dc503a9b418323180764cab9ede91b813404a65e9468"
+    },
+    {
+      "page": 5,
+      "page_size": 32,
+      "rows": 32,
+      "first_id": "en6-s04-0129",
+      "last_id": "en6-s04-0160",
+      "sha256": "2b57044a0f2119f601f15c36a07a4034b3c5d9472c78ac908a4a56a49b4a402b"
+    }
+  ],
+  "page_size": 32,
+  "limits": {
+    "terminal_max": 8,
+    "terminal_actual": 6
+  },
+  "quality_review": {
+    "status": "generated",
+    "reviewer": "pending-independent-review"
+  },
+  "source": {
+    "name": "velora-muse-english-v6-s04",
+    "revision": "20261107-s04",
+    "license": "CC0-1.0"
+  },
+  "teacher": {
+    "name": "Muse",
+    "revision": "muse-wonder-1.0"
+  }
+}

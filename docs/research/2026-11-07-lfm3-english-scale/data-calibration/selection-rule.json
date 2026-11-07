@@ -1,0 +1,15 @@
+{
+  "frozen_at_utc": "2026-11-07T04:41:08.358789+00:00",
+  "before_E_dev_predictions_and_any_fresh_quality_inspection": true,
+  "parent": "Minimum full1427dev loss across D/E/G retained checkpoints and original C; no challenge/owner selection.",
+  "F_eligibility": [
+    "All185supporteddevprobeoutputscompleteEOS",
+    "On43requiredrepairs, no net successful-case loss versus BOTH initialC and parent: the2pp threshold permitszero case loss.",
+    "Protected-literal violation cases must not increase versus parent.",
+    "No-edit exact preservation on86supportedcases must strictly improve versus parent."
+  ],
+  "F_selection": "Among eligible F1000/F2000 candidates choose highest devprobe no-edit exact preservation; tie lower full1427dev answer-tokenloss. If noneeligible retainparent. All full-dev lossesreported, but calibration is explicitly a preservation objective subject torepair/literal constraints, not forcedminimumloss.",
+  "no_semantic_equivalence_overrides": "Strictlexicalproxy+exactprotectedspans determinesguard. Independent blinddevjudge reports materialerrors separately; no posthocpassing oflexicalmisses.",
+  "always_copy_counterbaseline": "Report fresh copybaseline; requiredrepair guard prevents identitycollapse.",
+  "uncertainty": "Devprobe small and used forselection, notuntouchedgeneralization. Pairednewfailuresreported evenifoffset."
+}

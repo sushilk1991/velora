@@ -1,0 +1,42 @@
+{
+  "frozen_at_utc": "2026-11-07T02:59:33.869843+00:00",
+  "frozen_before_new_training_and_all_model_predictions": true,
+  "active": 256,
+  "bypass": 52,
+  "rejected": 4,
+  "repair_required": 32,
+  "no_edit_expected": 61,
+  "protected_literals": 126,
+  "active_modes": {
+    "default": 52,
+    "message": 51,
+    "email": 51,
+    "note": 50,
+    "code": 52
+  },
+  "author": "Terra",
+  "reviewers": [
+    "Muse",
+    "Astra contract adjudication"
+  ],
+  "review_scope": "Modelassistedwrittenfidelity, nothuman/audio/accentcertification",
+  "sourcebase_contamination": "all2216priortrainingrows passed exactand8wordguards; olderweightsseen none ofnewchallenge",
+  "guard_cases": 755,
+  "files_sha256": {
+    "fresh-active.jsonl": "6d964e6b22c80729aa80bff04d499080699193b55d558a55160b13ec4504a1a6",
+    "fresh-bypass.jsonl": "994855d6f401c8842a71cfb1705a8d5976b8364e0e5c280999981501675f8d4b",
+    "fresh-guards.jsonl": "239f2a58f4cf1861ec0cc1fc9302162572afc33fb6fff4f9bf5ca9557c38c8e8",
+    "training-exclusions.jsonl": "d5bbaa12932cc868bdeed52cc64491598f901a31bde71cb437fd0070a4c89dfe"
+  },
+  "stock_mode_sha256": {
+    "code": "d3d2a6e652f92676a3f853c0c384a2c0d45858de6ac82a1d1cde05a42c0705dd",
+    "raw": "3b565aebe638170a8c0f259545362cbd096090ba61fb335dcc5d12b6da505976",
+    "note": "4b0e314222b2ce6f87d41af7dfb0f4623daf500cf234f49f83dbe75fa18a498e",
+    "email": "f2f71e1de7c136595d0b743355ef9434910aa95f3807a517a8d5f395123f1c90",
+    "terminal": "762b41c0642d941d9b013c14ccedc980a96f3553eca57065a386f90b2b3e4876",
+    "default": "f723583c05b1d4b95ddc2c283f6ff3136ed8707f90d539cc46a91ef91f894714",
+    "message": "dd8d35a77ea4e4ccc194f38fec95246ca149a98820131e18e648413a0a799df9"
+  },
+  "quality_metrics": "materialdamage+introducedfacts+requiredrepairrecall+noeditaccuracy+protectedliterals+controls, alwayscopycounterbaseline",
+  "checkpoint_selection": "Devonly; neverthischallenge orowner recordings"
+}

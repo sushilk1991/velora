@@ -1,0 +1,71 @@
+{
+  "allowed_licenses": [
+    "CC-BY-4.0",
+    "CC0-1.0",
+    "MIT",
+    "project-generated"
+  ],
+  "sources": {
+    "velora-original-synthetic": {
+      "kind": "synthetic",
+      "revision": "muse-pilot-v1",
+      "license": "project-generated"
+    },
+    "sotto-transcript-cleanup": {
+      "kind": "public",
+      "revision": "183cc8fd58532f13fa192980185214de1bcd5acc",
+      "license": "MIT"
+    },
+    "velora-frozen-public-eval": {
+      "kind": "synthetic",
+      "revision": "v1",
+      "license": "project-generated"
+    },
+    "velora-train-smoke": {
+      "kind": "synthetic",
+      "revision": "v1",
+      "license": "project-generated"
+    },
+    "velora-original-synthetic-v2": {
+      "kind": "synthetic",
+      "revision": "terra-v2-20261106",
+      "license": "project-generated"
+    },
+    "velora-muse-synthetic-v2": {
+      "kind": "synthetic",
+      "revision": "muse-v2-20261106",
+      "license": "project-generated"
+    },
+    "velora-terra-synthetic-push-v3": {
+      "kind": "synthetic",
+      "revision": "2026-11-06",
+      "license": "CC0-1.0"
+    },
+    "muse-v3-synthetic": {
+      "kind": "synthetic",
+      "revision": "2026-11-06",
+      "license": "CC0-1.0"
+    },
+    "velora-muse-lfm3-long-v4": {
+      "kind": "synthetic",
+      "revision": "20261106",
+      "license": "CC0-1.0"
+    },
+    "velora-muse-contrast-v5": {
+      "kind": "synthetic",
+      "revision": "20261107",
+      "license": "CC0-1.0"
+    },
+    "velora-sotto-identity-english-v6": {
+      "kind": "public",
+      "revision": "sotto-183cc8fd-en6-20261107",
+      "license": "MIT"
+    },
+    "velora-muse-english-v6": {
+      "kind": "synthetic",
+      "revision": "20261107-s02",
+      "license": "CC0-1.0"
+    }
+  },
+  "duplicate_policy": "same-component-contract"
+}

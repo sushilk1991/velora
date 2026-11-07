@@ -1,0 +1,29 @@
+{
+  "rows": 7631,
+  "splits": {
+    "train": 6204,
+    "dev": 1427
+  },
+  "modes": {
+    "default": 7028,
+    "note": 144,
+    "message": 145,
+    "email": 109,
+    "code": 126,
+    "terminal": 79
+  },
+  "exact_identity": 3332,
+  "context_rows": 79,
+  "scenario_components": 4492,
+  "max_component_rows": 15,
+  "teacher_Qwen_rows": 0,
+  "dev_probe_counts": {
+    "repair": 64,
+    "no_edit": 64,
+    "controls": 64
+  },
+  "dev_probe_sha256": "50051bd064064615a4ab01050fc77e8bb0ceed590d8e376734b483c637910ee9",
+  "data_sha256": "06f5640572c6f21f29db16acbbae34a605f2d70171cc9cd103f183dab5d52fb2",
+  "framing": "Derivedidentitycompanionssamefamily; rowcountnotindependentcases; modeworkloaddefaultdominantowner",
+  "selection_use": "onlypublicdev, neverfreshchallenge/owner"
+}

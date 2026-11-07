@@ -1,0 +1,14 @@
+{
+  "frozen_at_utc": "2026-11-07T05:55:06.818289+00:00",
+  "base": "samefinaldev-selectedadapterandBF16exportderivedfrompinnedMLX8bit",
+  "variants": [
+    "naiveQ4_K_M",
+    "TRAIN-onlyimatrixQ4_K_M"
+  ],
+  "activation_source": "ApprovedpublicEnglishE TRAIN only;128-256rows,oneperfamily,<=64chunks ctx512/ub64. No dev/fresh/owner/audio.",
+  "coverage_gate": "All153intendedblocklinearmatmulprojections positive finite correctdimensions/counts; temporalconvandembedding/output excluded explicitly. Unknownlayoutstopmanualaudit.",
+  "selection": "Developmentonly185supportedcases/192protocolinputs. Matrix mustall192EOS, notloseanystrictrequiredrepaircasecount43, noeditexactcount86notlower, annotatedliteralintact81notlower versusnaive; independentblindedreviewmustfindnoadditionalconfirmedmaterial-errorcases. Selectmatrixonlyifastrictmetricimprovesorconfirmedmaterial-errorcasefixedwithoutnewconfirmederror; othertie retainnaive.",
+  "precision_boundary": "OriginalMLX/fusedBF16/naiveQ4/matrixQ4 aredistinctnumericalartifacts. ComparepromptIDsexactly, generateddifferencesrequirequalityreview.",
+  "measurement": "RecordactualGGUFbytes,processfootprint,timings,outputtoken/draftcounts. Sameqtypeisnotproofsamequalityorresidentmemory. Noassumedspeedgain.",
+  "untouched_test": "PrimaryEnglishfresh256andownerneverselectquantvariant; diagnosticsafterselectioncannotretroactivelychooseartifactandclaimuntouchedtest."
+}

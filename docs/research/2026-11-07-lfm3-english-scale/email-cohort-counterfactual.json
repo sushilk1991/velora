@@ -1,0 +1,58 @@
+{
+  "schema": 1,
+  "scope": "Post-hoc diagnostic restricted to51previouslyexaminedemailcases. Old arms are exactsubsets of256caseoriginalruns; newgenericprompt outputs were generated on51cases. No inference about the other205cases and no weight orquantizationselection. Reviewer differsfrom originalsplit on somecases; individualjudgmentsfallible.",
+  "cases": 51,
+  "changed_instruction_count": 51,
+  "only_instructions_changed": true,
+  "arms": {
+    "c": {
+      "cases": 51,
+      "old_prompt": {
+        "material_error": 40,
+        "introduced_content": 40,
+        "mode_format_violation": 41,
+        "uncertain": 0
+      },
+      "generic_prompt": {
+        "material_error": 2,
+        "introduced_content": 40,
+        "unsupported_identity": 0,
+        "invented_signoff": 40,
+        "mode_format_violation": 42,
+        "uncertain": 1
+      },
+      "paired_material": {
+        "fixed": 38,
+        "new": 0
+      }
+    },
+    "g": {
+      "cases": 51,
+      "old_prompt": {
+        "material_error": 2,
+        "introduced_content": 0,
+        "mode_format_violation": 3,
+        "uncertain": 0
+      },
+      "generic_prompt": {
+        "material_error": 2,
+        "introduced_content": 0,
+        "unsupported_identity": 0,
+        "invented_signoff": 0,
+        "mode_format_violation": 1,
+        "uncertain": 1
+      },
+      "paired_material": {
+        "fixed": 0,
+        "new": 0
+      }
+    }
+  },
+  "new_outputs_sha256": {
+    "c": "09233762183fc6d0ada4b27429c0923e6a8b98caa6dbcbdf42bcf1e34fe862c5",
+    "g": "d7a8151152efcc0b3c51e0d0dcc153d6e09beb58ea678d300bb37b5e3607dfb6"
+  },
+  "review_sha256": "4013652b4ac9e1995e9c6d4a2e1779eba761aec8ee92cfff5bbd1a52217cdee3",
+  "new_data_sha256": "ad8beab77c44f9969db4e648e418a69299613e61acc4a38e9d4fb9bbc2ec7cef",
+  "failed_initial_invocation": "v1omittedrequirednative-referencearg, exitedargparsebeforemodelload; preserved. V2onlyaddsoutputreferencepaths, data/prompts/weightsunchanged."
+}

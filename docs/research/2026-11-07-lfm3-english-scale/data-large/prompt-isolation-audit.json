@@ -1,0 +1,11 @@
+{
+  "at_utc": "2026-11-07T04:13:46.862836+00:00",
+  "results": {
+    "D": "passed",
+    "E": "passed"
+  },
+  "generic_nonempty_templates": 137,
+  "generic_empty_template_not_needed": true,
+  "source_classification": "161 inspected/138 genericincl1empty/23scenario strings guarded",
+  "frozen_model_views_unchanged": true
+}

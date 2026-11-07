@@ -1,0 +1,143 @@
+{
+  "scope": "Same full1427dev answer-token loss; these are development selection values, not accuracy or a replicated-seed experiment.",
+  "base_revision": "4d6d94c9c2c2f249f1f740f4f08e071b0dbfe099",
+  "data_sha256": "06f5640572c6f21f29db16acbbae34a605f2d70171cc9cd103f183dab5d52fb2",
+  "dev_rows": 1427,
+  "runs": {
+    "d": {
+      "training_seconds": 1598.4798378944397,
+      "best": {
+        "checkpoint_file": "0002048_adapters.safetensors",
+        "source_run": "train-d-small",
+        "sha256": "c3bed39213bac8be75388527258b1b1d36ec8b955296411e4ecde9c9fa4b8cea",
+        "dev_loss": 0.0777331218123436
+      },
+      "all_scored_checkpoints": [
+        {
+          "checkpoint_file": "adapters.safetensors",
+          "source_run": "lfm3-v5-c-selected",
+          "sha256": "2389b2d67d719e7b7f56b8f348cd6b38c7c7f2f7b59c6c8276cba2501c498f17",
+          "dev_loss": 0.10353314131498337
+        },
+        {
+          "checkpoint_file": "0002048_adapters.safetensors",
+          "source_run": "train-d-small",
+          "sha256": "c3bed39213bac8be75388527258b1b1d36ec8b955296411e4ecde9c9fa4b8cea",
+          "dev_loss": 0.0777331218123436
+        },
+        {
+          "checkpoint_file": "0004096_adapters.safetensors",
+          "source_run": "train-d-small",
+          "sha256": "4c2188c1c4838310217e622c90bbb28ceb0a8b84fbbe2507d2f9fdaad1041afa",
+          "dev_loss": 0.08844408392906189
+        },
+        {
+          "checkpoint_file": "0006144_adapters.safetensors",
+          "source_run": "train-d-small",
+          "sha256": "bdbfd144630891da9c175dea01553dc8fdc54e6ce17d475070c3cb87dfae1bfd",
+          "dev_loss": 0.09589038044214249
+        },
+        {
+          "checkpoint_file": "0008192_adapters.safetensors",
+          "source_run": "train-d-small",
+          "sha256": "a2f2d3666fa52f9161b7839e118ecce0a8682eced761a831fa6711bc827157ce",
+          "dev_loss": 0.09923718869686127
+        }
+      ]
+    },
+    "e": {
+      "training_seconds": 1893.2880160808563,
+      "best": {
+        "checkpoint_file": "0006144_adapters.safetensors",
+        "source_run": "train-e-large-restart",
+        "sha256": "409869dd859ffc49922ae3bf28190072d6dc77115aeb3ed38dffda74b70c4af1",
+        "dev_loss": 0.05289860814809799
+      },
+      "all_scored_checkpoints": [
+        {
+          "checkpoint_file": "adapters.safetensors",
+          "source_run": "lfm3-v5-c-selected",
+          "sha256": "2389b2d67d719e7b7f56b8f348cd6b38c7c7f2f7b59c6c8276cba2501c498f17",
+          "dev_loss": 0.1035330519080162
+        },
+        {
+          "checkpoint_file": "adapters.safetensors",
+          "source_run": "d-selected",
+          "sha256": "c3bed39213bac8be75388527258b1b1d36ec8b955296411e4ecde9c9fa4b8cea",
+          "dev_loss": 0.07773303985595703
+        },
+        {
+          "checkpoint_file": "0002048_adapters.safetensors",
+          "source_run": "train-e-large-restart",
+          "sha256": "8005a263e634077de24ceaaa5f7075fa629b91656a08ba41af71a61473757de3",
+          "dev_loss": 0.056037116795778275
+        },
+        {
+          "checkpoint_file": "0004096_adapters.safetensors",
+          "source_run": "train-e-large-restart",
+          "sha256": "dd662693d70bf647d720aa427a963d15c4a6f8fe52c6b560f74e1540a3ccf888",
+          "dev_loss": 0.05409513786435127
+        },
+        {
+          "checkpoint_file": "0006144_adapters.safetensors",
+          "source_run": "train-e-large-restart",
+          "sha256": "409869dd859ffc49922ae3bf28190072d6dc77115aeb3ed38dffda74b70c4af1",
+          "dev_loss": 0.05289860814809799
+        },
+        {
+          "checkpoint_file": "0008192_adapters.safetensors",
+          "source_run": "train-e-large-restart",
+          "sha256": "14d9d271d5d341384cc310366b75fbac92fc87737960ecfc4c2a43d637919f3d",
+          "dev_loss": 0.05316193029284477
+        }
+      ]
+    },
+    "g": {
+      "training_seconds": 2007.7748098373413,
+      "best": {
+        "checkpoint_file": "0006144_adapters.safetensors",
+        "source_run": "train-g-cold-large",
+        "sha256": "a5b141b7e5b261f04f5888d7943bd2a0c2c6d1e3de7e32a0df10040a390c2dd4",
+        "dev_loss": 0.047588251531124115
+      },
+      "all_scored_checkpoints": [
+        {
+          "checkpoint_file": "adapters.safetensors",
+          "source_run": "lfm3-v5-c-selected",
+          "sha256": "2389b2d67d719e7b7f56b8f348cd6b38c7c7f2f7b59c6c8276cba2501c498f17",
+          "dev_loss": 0.10353308916091919
+        },
+        {
+          "checkpoint_file": "adapters.safetensors",
+          "source_run": "d-selected",
+          "sha256": "c3bed39213bac8be75388527258b1b1d36ec8b955296411e4ecde9c9fa4b8cea",
+          "dev_loss": 0.07773315906524658
+        },
+        {
+          "checkpoint_file": "0002048_adapters.safetensors",
+          "source_run": "train-g-cold-large",
+          "sha256": "3f737fc05e67b460ac561fb05f55b7b1714ad8b53565a5f5b56a517094e6d278",
+          "dev_loss": 0.05586005002260208
+        },
+        {
+          "checkpoint_file": "0004096_adapters.safetensors",
+          "source_run": "train-g-cold-large",
+          "sha256": "4966dbafcdb09b2ba2ee22518055140d4e3fcf46b2480fac534b062e1e0def19",
+          "dev_loss": 0.05003270134329796
+        },
+        {
+          "checkpoint_file": "0006144_adapters.safetensors",
+          "source_run": "train-g-cold-large",
+          "sha256": "a5b141b7e5b261f04f5888d7943bd2a0c2c6d1e3de7e32a0df10040a390c2dd4",
+          "dev_loss": 0.047588251531124115
+        },
+        {
+          "checkpoint_file": "0008192_adapters.safetensors",
+          "source_run": "train-g-cold-large",
+          "sha256": "36e2c98bf9a1aba394b4fa18ae1a14cd899456c30b1b9f707fc6bd97e6dfdf36",
+          "dev_loss": 0.04794090613722801
+        }
+      ]
+    }
+  }
+}

@@ -1,0 +1,49 @@
+{
+  "task": "Independently label all 768 supplied public English transcript candidates in raw-inputs.jsonl for a faithful cleanup specialist.",
+  "teacher": "Muse Code powered by muse-wonder-1.0",
+  "teacher_identity_note": "Actual Muse identity as identified at session start; labels are teacher proposals, not independent review approvals.",
+  "source": {
+    "file": "raw-inputs.jsonl",
+    "name": "sotto-transcript-cleanup",
+    "revision": "183cc8fd58532f13fa192980185214de1bcd5acc",
+    "license": "MIT",
+    "count": 768,
+    "sha256": "26df76d98439abb819284f851b6a8fe5939d8b9c1d018a725d2d1d02d214e086"
+  },
+  "output": {
+    "file": "teacher-labels.jsonl",
+    "count": 768,
+    "sha256": "06ecd4f8abfee8f4abc85f3c02d3b28cac65bd8163fbe04d562d7df58e5c2f07",
+    "fields": ["id", "target", "mode", "language", "english_variant", "edit_policy", "confidence", "reason"]
+  },
+  "guidance_read": ["task.txt", "TEACHER.md", "stock-modes.json"],
+  "mode_distribution": {"default": 767, "message": 1},
+  "language_distribution": {"en": 768},
+  "english_variant_distribution": {"unspecified": 768},
+  "edit_policy_distribution": {"minimal": 578, "repair": 189, "mode": 1, "no_edit": 0},
+  "confidence_distribution": {"supported": 759, "uncertain": 9},
+  "uncertain_ids": [
+    "sotto-train-087290",
+    "sotto-train-036895",
+    "sotto-train-101835",
+    "sotto-train-070498",
+    "sotto-train-032692",
+    "sotto-train-013436",
+    "sotto-train-053414",
+    "sotto-train-000672",
+    "sotto-train-071208"
+  ],
+  "stock_mode_notes": "Default stock prose applied to 767 rows. One clearly addressed casual note to a named recipient (sotto-train-064765) labeled message: single line, informal, no trailing period, edit_policy=mode. No row was clearly email, note, code, or terminal on content alone; nondefault mode was not inferred from imperatives alone. No terminal-mode rows were assigned, so no formatting-off raw-exact terminal targets arise. Code-like literals inside prose (paths, endpoints, identifiers) were preserved in place under default.",
+  "variant_language_notes": "All sources read as genuinely English prose, language=en. Keyword check for regional cues found only substrings (organize inside reorganize, labor inside collaborate) and no lakh/crore/prepone or regional spelling cue, so english_variant=unspecified for all 768; names alone were not treated as dialect evidence.",
+  "checks_run": [
+    "Read task.txt, TEACHER.md, and stock-modes.json in full before labeling.",
+    "Read every raw in 12 pages of 64 (768 total), saving partial teacher-labels.jsonl after each page; final line count 768.",
+    "Validated id_order_exact=true against raw-inputs.jsonl, 768 unique IDs, exact 8-field key order on every row, and no empty targets.",
+    "Validated distributions: mode default 767/message 1; language en 768; english_variant unspecified 768; edit_policy minimal 578/repair 189/mode 1; confidence supported 759/uncertain 9.",
+    "Checked no target equals raw byte-exact (no forced no_edit rows; every raw needed punctuation/casing cleanup), no um/uh filler remains, and the sole message target is single-line with no trailing period.",
+    "Ratio-outlier refutation scan (<0.35 or >1.6 target/raw length): four rows, all explicit final self-corrections; one frame-drop found on recheck (sotto-train-100870) was fixed to retain the client frame and output SHA recomputed.",
+    "Confirmed uniform source provenance across all 768 rows (sotto-transcript-cleanup, revision 183cc8fd58532f13fa192980185214de1bcd5acc, MIT) and recomputed input/output SHA-256."
+  ],
+  "constraints_honored": "No private, heldout, sibling, or upstream-output reads; no network, models/GPU, subagents, dependencies, git, or repository edits. Python was used only to match IDs in order and serialize individually authored labels, and for validation counts/hashes.",
+  "open_risks": "Nine uncertain rows retain a best-faith target with a factual reason and require human review per TEACHER.md. Short self-correction repairs intentionally keep only the final corrected clause, which is the main residual interpretation risk."
+}

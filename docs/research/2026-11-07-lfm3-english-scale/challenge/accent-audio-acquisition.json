@@ -1,0 +1,48 @@
+{
+  "schema": 1,
+  "status": "acquired",
+  "dataset": "CSTR VCTK Corpus version 0.92",
+  "corpus_url": "https://doi.org/10.7488/ds/2645",
+  "official_item": "https://datashare.ed.ac.uk/items/30e7453c-9ea8-48b4-8e18-f96d0dc62928",
+  "official_archive_url": "https://datashare.ed.ac.uk/server/api/core/bitstreams/535f4286-e54c-4038-838c-a02285e32cb2/content",
+  "official_readme_url": "https://datashare.ed.ac.uk/server/api/core/bitstreams/bb7edd96-5d96-4c0e-8989-1e45597e7b72/content",
+  "official_license_url": "https://datashare.ed.ac.uk/server/api/core/bitstreams/956a1688-0b59-428c-8a2f-10837433dde3/content",
+  "license": "CC-BY-4.0",
+  "publishers": [
+    "University of Edinburgh",
+    "Centre for Speech Technology Research"
+  ],
+  "cases": 24,
+  "speakers": 12,
+  "official_accent_groups": 6,
+  "cases_by_official_accent": {
+    "Scottish": 4,
+    "NorthernIrish": 4,
+    "Indian": 4,
+    "American": 4,
+    "SouthAfrican": 4,
+    "Australian": 4
+  },
+  "speakers_by_official_accent": {
+    "Scottish": 2,
+    "NorthernIrish": 2,
+    "Indian": 2,
+    "American": 2,
+    "SouthAfrican": 2,
+    "Australian": 2
+  },
+  "unique_transcripts": 24,
+  "min_utterance_number": 100,
+  "audio_original_flac_bytes": 2900030,
+  "duration_total_s": 79.268774,
+  "archive_payload_bytes_including_probes": 41835247,
+  "official_metadata_bytes": 22652,
+  "archive_network_cap_bytes": 134217728,
+  "range_validation": "HTTP 206 and exact Content-Range, exact lengths and ZIP CRC-32 checked for each extracted entry",
+  "local_manifest_sha256": "a09515adda49d5d116731bfd89b6291d4792ff526300be703d21d18fcbf21cab",
+  "speaker_metadata_sha256": "ee6447edab776828e0c2e726c04a4965c4602c32047b14fac2f5294d18728eee",
+  "training_use": false,
+  "remote_asr": false,
+  "gpu_used": false,
+  "limitations": "Read, studio-recorded sentences, not spontaneous conversation; accent labels are corpus-supplied categories, not independent accent assessments. Transcript fidelity is publisher-provided and has not been manually verified."
+}

@@ -1,0 +1,2466 @@
+{
+  "abba96": {
+    "all_matched_stt_ok": {
+      "complete_timing_cases_with_any_non_ok_status": 5,
+      "current4b_per_case_two_repeat_medians": {
+        "available_cases": 95,
+        "expected_cases": 95,
+        "p50_s": 0.5243389995303005,
+        "p95_s": 3.790745420567691,
+        "unavailable_cases": 0
+      },
+      "eligible_cases": 95,
+      "four_timing_available_cases": 95,
+      "native_per_case_two_repeat_medians": {
+        "available_cases": 95,
+        "expected_cases": 95,
+        "p50_s": 0.2568589999573305,
+        "p95_s": 1.1468330291565505,
+        "unavailable_cases": 0
+      },
+      "paired_native_minus_current4b_s": {
+        "p50": -0.29605449992232025,
+        "p95": 0.028487597883213277
+      },
+      "raw_rounds": [
+        {
+          "call_categories": {
+            "model_work": {
+              "cases": 86,
+              "cleanup_s": {
+                "available_cases": 86,
+                "expected_cases": 86,
+                "p50_s": 0.6078747084829956,
+                "p95_s": 3.907792739162687,
+                "unavailable_cases": 0
+              },
+              "status_counts": {
+                "cleanup_fallback": 3,
+                "ok": 83
+              }
+            },
+            "not_attempted_or_unknown": {
+              "cases": 0,
+              "cleanup_s": {
+                "available_cases": 0,
+                "expected_cases": 0,
+                "p50_s": null,
+                "p95_s": null,
+                "unavailable_cases": 0
+              },
+              "status_counts": {}
+            },
+            "zero_call_bypass_or_pre_call_failure": {
+              "cases": 9,
+              "cleanup_s": {
+                "available_cases": 9,
+                "expected_cases": 9,
+                "p50_s": 2.2916821762919426e-05,
+                "p95_s": 3.76999843865633e-05,
+                "unavailable_cases": 0
+              },
+              "status_counts": {
+                "ok": 9
+              }
+            }
+          },
+          "cleanup_s": {
+            "available_cases": 95,
+            "expected_cases": 95,
+            "p50_s": 0.5405747080221772,
+            "p95_s": 3.905584870534949,
+            "unavailable_cases": 0
+          },
+          "expected_cases": 95,
+          "length_limit_calls": 0,
+          "mode_counts": {
+            "code": 12,
+            "default": 38,
+            "terminal": 45
+          },
+          "native_calls_marked_partial": 0,
+          "recorded_cases": 95,
+          "status_counts": {
+            "cleanup_fallback": 3,
+            "missing": 0,
+            "ok": 92
+          }
+        },
+        {
+          "call_categories": {
+            "model_work": {
+              "cases": 86,
+              "cleanup_s": {
+                "available_cases": 86,
+                "expected_cases": 86,
+                "p50_s": 0.2703186875442043,
+                "p95_s": 1.1966528337216005,
+                "unavailable_cases": 0
+              },
+              "status_counts": {
+                "cleanup_fallback": 1,
+                "cleanup_partial": 1,
+                "ok": 84
+              }
+            },
+            "not_attempted_or_unknown": {
+              "cases": 0,
+              "cleanup_s": {
+                "available_cases": 0,
+                "expected_cases": 0,
+                "p50_s": null,
+                "p95_s": null,
+                "unavailable_cases": 0
+              },
+              "status_counts": {}
+            },
+            "zero_call_bypass_or_pre_call_failure": {
+              "cases": 9,
+              "cleanup_s": {
+                "available_cases": 9,
+                "expected_cases": 9,
+                "p50_s": 6.187520921230316e-05,
+                "p95_s": 8.209156803786754e-05,
+                "unavailable_cases": 0
+              },
+              "status_counts": {
+                "ok": 9
+              }
+            }
+          },
+          "cleanup_s": {
+            "available_cases": 95,
+            "expected_cases": 95,
+            "p50_s": 0.2606499157845974,
+            "p95_s": 1.1610531083308158,
+            "unavailable_cases": 0
+          },
+          "expected_cases": 95,
+          "length_limit_calls": 0,
+          "mode_counts": {
+            "code": 12,
+            "default": 38,
+            "terminal": 45
+          },
+          "native_calls_marked_partial": 0,
+          "recorded_cases": 95,
+          "status_counts": {
+            "cleanup_fallback": 1,
+            "cleanup_partial": 1,
+            "missing": 0,
+            "ok": 93
+          }
+        },
+        {
+          "call_categories": {
+            "model_work": {
+              "cases": 86,
+              "cleanup_s": {
+                "available_cases": 86,
+                "expected_cases": 86,
+                "p50_s": 0.2629233543993905,
+                "p95_s": 1.159266760572791,
+                "unavailable_cases": 0
+              },
+              "status_counts": {
+                "cleanup_fallback": 1,
+                "cleanup_partial": 1,
+                "ok": 84
+              }
+            },
+            "not_attempted_or_unknown": {
+              "cases": 0,
+              "cleanup_s": {
+                "available_cases": 0,
+                "expected_cases": 0,
+                "p50_s": null,
+                "p95_s": null,
+                "unavailable_cases": 0
+              },
+              "status_counts": {}
+            },
+            "zero_call_bypass_or_pre_call_failure": {
+              "cases": 9,
+              "cleanup_s": {
+                "available_cases": 9,
+                "expected_cases": 9,
+                "p50_s": 6.24579843133688e-05,
+                "p95_s": 9.559132158756256e-05,
+                "unavailable_cases": 0
+              },
+              "status_counts": {
+                "ok": 9
+              }
+            }
+          },
+          "cleanup_s": {
+            "available_cases": 95,
+            "expected_cases": 95,
+            "p50_s": 0.25306808413006365,
+            "p95_s": 1.1267033538315443,
+            "unavailable_cases": 0
+          },
+          "expected_cases": 95,
+          "length_limit_calls": 0,
+          "mode_counts": {
+            "code": 12,
+            "default": 38,
+            "terminal": 45
+          },
+          "native_calls_marked_partial": 0,
+          "recorded_cases": 95,
+          "status_counts": {
+            "cleanup_fallback": 1,
+            "cleanup_partial": 1,
+            "missing": 0,
+            "ok": 93
+          }
+        },
+        {
+          "call_categories": {
+            "model_work": {
+              "cases": 86,
+              "cleanup_s": {
+                "available_cases": 86,
+                "expected_cases": 86,
+                "p50_s": 0.5804107498843223,
+                "p95_s": 3.657389718457125,
+                "unavailable_cases": 0
+              },
+              "status_counts": {
+                "cleanup_fallback": 3,
+                "ok": 83
+              }
+            },
+            "not_attempted_or_unknown": {
+              "cases": 0,
+              "cleanup_s": {
+                "available_cases": 0,
+                "expected_cases": 0,
+                "p50_s": null,
+                "p95_s": null,
+                "unavailable_cases": 0
+              },
+              "status_counts": {}
+            },
+            "zero_call_bypass_or_pre_call_failure": {
+              "cases": 9,
+              "cleanup_s": {
+                "available_cases": 9,
+                "expected_cases": 9,
+                "p50_s": 2.38749198615551e-05,
+                "p95_s": 3.7099979817867275e-05,
+                "unavailable_cases": 0
+              },
+              "status_counts": {
+                "ok": 9
+              }
+            }
+          },
+          "cleanup_s": {
+            "available_cases": 95,
+            "expected_cases": 95,
+            "p50_s": 0.5081032910384238,
+            "p95_s": 3.649672687333077,
+            "unavailable_cases": 0
+          },
+          "expected_cases": 95,
+          "length_limit_calls": 0,
+          "mode_counts": {
+            "code": 12,
+            "default": 38,
+            "terminal": 45
+          },
+          "native_calls_marked_partial": 0,
+          "recorded_cases": 95,
+          "status_counts": {
+            "cleanup_fallback": 3,
+            "missing": 0,
+            "ok": 92
+          }
+        }
+      ],
+      "same_case_absolute_repeat_jitter_s": {
+        "current4b": {
+          "available_cases": 95,
+          "expected_cases": 95,
+          "p50_s": 0.021366959204897285,
+          "p95_s": 0.21528616617433713,
+          "unavailable_cases": 0
+        },
+        "native": {
+          "available_cases": 95,
+          "expected_cases": 95,
+          "p50_s": 0.003229000838473439,
+          "p95_s": 0.020359679800458247,
+          "unavailable_cases": 0
+        }
+      },
+      "unavailable_cases": 0
+    },
+    "english_matched_stt_ok": {
+      "complete_timing_cases_with_any_non_ok_status": 4,
+      "current4b_per_case_two_repeat_medians": {
+        "available_cases": 90,
+        "expected_cases": 90,
+        "p50_s": 0.5581152293016203,
+        "p95_s": 3.795243149867747,
+        "unavailable_cases": 0
+      },
+      "eligible_cases": 90,
+      "four_timing_available_cases": 90,
+      "native_per_case_two_repeat_medians": {
+        "available_cases": 90,
+        "expected_cases": 90,
+        "p50_s": 0.2638741771806963,
+        "p95_s": 1.172667966794688,
+        "unavailable_cases": 0
+      },
+      "paired_native_minus_current4b_s": {
+        "p50": -0.3438918440369889,
+        "p95": 0.03165399903082285
+      },
+      "raw_rounds": [
+        {
+          "call_categories": {
+            "model_work": {
+              "cases": 85,
+              "cleanup_s": {
+                "available_cases": 85,
+                "expected_cases": 85,
+                "p50_s": 0.625281292013824,
+                "p95_s": 3.9080380578991027,
+                "unavailable_cases": 0
+              },
+              "status_counts": {
+                "cleanup_fallback": 3,
+                "ok": 82
+              }
+            },
+            "not_attempted_or_unknown": {
+              "cases": 0,
+              "cleanup_s": {
+                "available_cases": 0,
+                "expected_cases": 0,
+                "p50_s": null,
+                "p95_s": null,
+                "unavailable_cases": 0
+              },
+              "status_counts": {}
+            },
+            "zero_call_bypass_or_pre_call_failure": {
+              "cases": 5,
+              "cleanup_s": {
+                "available_cases": 5,
+                "expected_cases": 5,
+                "p50_s": 2.350006252527237e-05,
+                "p95_s": 4.072501324117183e-05,
+                "unavailable_cases": 0
+              },
+              "status_counts": {
+                "ok": 5
+              }
+            }
+          },
+          "cleanup_s": {
+            "available_cases": 90,
+            "expected_cases": 90,
+            "p50_s": 0.5759246874367818,
+            "p95_s": 3.906811464217026,
+            "unavailable_cases": 0
+          },
+          "expected_cases": 90,
+          "length_limit_calls": 0,
+          "mode_counts": {
+            "code": 12,
+            "default": 37,
+            "terminal": 41
+          },
+          "native_calls_marked_partial": 0,
+          "recorded_cases": 90,
+          "status_counts": {
+            "cleanup_fallback": 3,
+            "missing": 0,
+            "ok": 87
+          }
+        },
+        {
+          "call_categories": {
+            "model_work": {
+              "cases": 85,
+              "cleanup_s": {
+                "available_cases": 85,
+                "expected_cases": 85,
+                "p50_s": 0.2704050000756979,
+                "p95_s": 1.2006083587650207,
+                "unavailable_cases": 0
+              },
+              "status_counts": {
+                "cleanup_partial": 1,
+                "ok": 84
+              }
+            },
+            "not_attempted_or_unknown": {
+              "cases": 0,
+              "cleanup_s": {
+                "available_cases": 0,
+                "expected_cases": 0,
+                "p50_s": null,
+                "p95_s": null,
+                "unavailable_cases": 0
+              },
+              "status_counts": {}
+            },
+            "zero_call_bypass_or_pre_call_failure": {
+              "cases": 5,
+              "cleanup_s": {
+                "available_cases": 5,
+                "expected_cases": 5,
+                "p50_s": 6.695790216326714e-05,
+                "p95_s": 8.356682956218719e-05,
+                "unavailable_cases": 0
+              },
+              "status_counts": {
+                "ok": 5
+              }
+            }
+          },
+          "cleanup_s": {
+            "available_cases": 90,
+            "expected_cases": 90,
+            "p50_s": 0.2657941250363365,
+            "p95_s": 1.1808307335479182,
+            "unavailable_cases": 0
+          },
+          "expected_cases": 90,
+          "length_limit_calls": 0,
+          "mode_counts": {
+            "code": 12,
+            "default": 37,
+            "terminal": 41
+          },
+          "native_calls_marked_partial": 0,
+          "recorded_cases": 90,
+          "status_counts": {
+            "cleanup_partial": 1,
+            "missing": 0,
+            "ok": 89
+          }
+        },
+        {
+          "call_categories": {
+            "model_work": {
+              "cases": 85,
+              "cleanup_s": {
+                "available_cases": 85,
+                "expected_cases": 85,
+                "p50_s": 0.26368433400057256,
+                "p95_s": 1.1628849168773738,
+                "unavailable_cases": 0
+              },
+              "status_counts": {
+                "cleanup_partial": 1,
+                "ok": 84
+              }
+            },
+            "not_attempted_or_unknown": {
+              "cases": 0,
+              "cleanup_s": {
+                "available_cases": 0,
+                "expected_cases": 0,
+                "p50_s": null,
+                "p95_s": null,
+                "unavailable_cases": 0
+              },
+              "status_counts": {}
+            },
+            "zero_call_bypass_or_pre_call_failure": {
+              "cases": 5,
+              "cleanup_s": {
+                "available_cases": 5,
+                "expected_cases": 5,
+                "p50_s": 6.570899859070778e-05,
+                "p95_s": 9.835809469223022e-05,
+                "unavailable_cases": 0
+              },
+              "status_counts": {
+                "ok": 5
+              }
+            }
+          },
+          "cleanup_s": {
+            "available_cases": 90,
+            "expected_cases": 90,
+            "p50_s": 0.2599543125834316,
+            "p95_s": 1.144794135354459,
+            "unavailable_cases": 0
+          },
+          "expected_cases": 90,
+          "length_limit_calls": 0,
+          "mode_counts": {
+            "code": 12,
+            "default": 37,
+            "terminal": 41
+          },
+          "native_calls_marked_partial": 0,
+          "recorded_cases": 90,
+          "status_counts": {
+            "cleanup_partial": 1,
+            "missing": 0,
+            "ok": 89
+          }
+        },
+        {
+          "call_categories": {
+            "model_work": {
+              "cases": 85,
+              "cleanup_s": {
+                "available_cases": 85,
+                "expected_cases": 85,
+                "p50_s": 0.5974048748612404,
+                "p95_s": 3.658247166359797,
+                "unavailable_cases": 0
+              },
+              "status_counts": {
+                "cleanup_fallback": 3,
+                "ok": 82
+              }
+            },
+            "not_attempted_or_unknown": {
+              "cases": 0,
+              "cleanup_s": {
+                "available_cases": 0,
+                "expected_cases": 0,
+                "p50_s": null,
+                "p95_s": null,
+                "unavailable_cases": 0
+              },
+              "status_counts": {}
+            },
+            "zero_call_bypass_or_pre_call_failure": {
+              "cases": 5,
+              "cleanup_s": {
+                "available_cases": 5,
+                "expected_cases": 5,
+                "p50_s": 2.4834182113409042e-05,
+                "p95_s": 4.067495465278625e-05,
+                "unavailable_cases": 0
+              },
+              "status_counts": {
+                "ok": 5
+              }
+            }
+          },
+          "cleanup_s": {
+            "available_cases": 90,
+            "expected_cases": 90,
+            "p50_s": 0.5433145835995674,
+            "p95_s": 3.653959926846437,
+            "unavailable_cases": 0
+          },
+          "expected_cases": 90,
+          "length_limit_calls": 0,
+          "mode_counts": {
+            "code": 12,
+            "default": 37,
+            "terminal": 41
+          },
+          "native_calls_marked_partial": 0,
+          "recorded_cases": 90,
+          "status_counts": {
+            "cleanup_fallback": 3,
+            "missing": 0,
+            "ok": 87
+          }
+        }
+      ],
+      "same_case_absolute_repeat_jitter_s": {
+        "current4b": {
+          "available_cases": 90,
+          "expected_cases": 90,
+          "p50_s": 0.023326437338255346,
+          "p95_s": 0.226734812138602,
+          "unavailable_cases": 0
+        },
+        "native": {
+          "available_cases": 90,
+          "expected_cases": 90,
+          "p50_s": 0.0037529589608311653,
+          "p95_s": 0.020828857005108142,
+          "unavailable_cases": 0
+        }
+      },
+      "unavailable_cases": 0
+    },
+    "matched_stt_ok_cases": 95,
+    "order": [
+      "current4b",
+      "native",
+      "native",
+      "current4b"
+    ],
+    "planned_cases": 96
+  },
+  "fresh_performance": {
+    "reference_e_mlx": {
+      "cases": 256,
+      "first_stream_response_s": {
+        "available_cases": 256,
+        "expected_cases": 256,
+        "p50_s": 0.06897714547812939,
+        "p95_s": 0.31924681254895404,
+        "unavailable_cases": 0
+      },
+      "generation_total_s": {
+        "available_cases": 256,
+        "expected_cases": 256,
+        "p50_s": 0.24296770803630352,
+        "p95_s": 4.9359171037212946,
+        "unavailable_cases": 0
+      },
+      "model_load_s": 2.522590042091906,
+      "source_sha256": "4e457b2fa7be7da455d04cadce3f7da8c31a0420d200e0819ef1e322ebb7c8c1",
+      "status_counts": {
+        "eos": 256
+      }
+    },
+    "selected_mlx": {
+      "cases": 256,
+      "first_stream_response_s": {
+        "available_cases": 256,
+        "expected_cases": 256,
+        "p50_s": 0.15318160422611982,
+        "p95_s": 0.32260452053742483,
+        "unavailable_cases": 0
+      },
+      "generation_total_s": {
+        "available_cases": 256,
+        "expected_cases": 256,
+        "p50_s": 0.5707083333982155,
+        "p95_s": 2.338193572941236,
+        "unavailable_cases": 0
+      },
+      "model_load_s": 0.6536327919457108,
+      "source_sha256": "d146d46e37b463b0b7cd74cb94d182120ae72c5da10b8d97ae51042322c6c5c5",
+      "status_counts": {
+        "eos": 256
+      }
+    },
+    "selected_native_header_off": {
+      "cases": 256,
+      "generation_total_s": {
+        "available_cases": 256,
+        "expected_cases": 256,
+        "p50_s": 0.06812008353881538,
+        "p95_s": 0.17097356251906604,
+        "unavailable_cases": 0
+      },
+      "metadata_sha256": "3351480706b76eb43e2ac691b6d91d9c4bf4a57f28c1981a61dfb5876fb6d811",
+      "prompt_token_parity": true,
+      "runtime_qualified": true,
+      "source_sha256": "4bf07239c178c6277c9d2634430f55e9b794b81e578658c48334eb93f171bceb",
+      "status_counts": {
+        "eos": 256
+      }
+    }
+  },
+  "inputs_sha256": {
+    "aggregator": "57bac2b4c7c46b06500803ed9d734e01d509f656cb93f886f0010a0f48bfdb73",
+    "english_cohort": "8791771de93554ae9406f21da0bdf40cb0e2651cbf25ab4cc6020a8a5b511564",
+    "manifest": "90fd823f593d667d6eb7830ce71b2c3600649c89fe35c595f2f1993934f6e000",
+    "original_identity": "0a2f039da2a0cec5d3568057cdd3f9428178b1f616c0382046720a12d54f82a8",
+    "replay_plan_builder": "c6f221c913611f326ea78706a6fd7b37ccd4a8735d82afa7b9ca08f92bbf3cef",
+    "safe_off_aggregator": "5dea0656ee1648ef26b8e69295369e0857e66238dba17be85b5a66d886e9fcc4",
+    "safe_off_identity": "ac761f8f289958a2f4f847081e205fc17a8a6f4656410e820e222aa019faba89",
+    "safe_off_plan": "5874293e7bab8c34267045acb4cc79b7c2bf2a718be51a8c6420a5159d5501de",
+    "safe_off_queue_status": "fdd4c4d1e6cdc60dd0b35db39b62e06da26ca47a0558c43ade48932b38b0ff4c",
+    "stt": "d8f3924d095457dd98e16321761d105bc7e6045544fcce383f41bff989c4dc95"
+  },
+  "limitations": [
+    "Latency only, not quality qualification. No failure, fallback or partial status is excluded when a finite cleanup_s exists.",
+    "Positive calls means recorded cleanup API calls, not proven GPU execution. Zero-call timed cases may include controller bypass or failure before a call; statuses are retained.",
+    "Native, selected MLX, E MLX and current4B are different model/precision/prompt/copy/cap/deadline systems, not backend-only comparisons.",
+    "Historical current4B and C native are single-pass observations at other times; differences are descriptive, not causal.",
+    "ABBA uses per-case median of two repeats for each system, then cohort p50/p95 on the common four-timing cohort; failures remain included.",
+    "Offline saved STT cleanup excludes capture, paste and model load. Owner language classifications are model-assisted, not human/audio truth.",
+    "Missing resources are unavailable. Physical footprint, RSS and MLX allocation are distinct observations; no shared-memory sums or ratios.",
+    "Fresh challenge results are fixed selected-model evaluation, not an independent test after model selection; no fresh header-ON arm exists. Partial-call counts use reason metadata, not generated text."
+  ],
+  "policy": {
+    "combined_parakeet_run": false,
+    "comparison": "Different model, precision, prompt, runtime and controls; not backend-only.",
+    "fresh_header_on_run": false,
+    "header_cache": "OFF for every fresh and owner native run",
+    "reason": "Selected-model development header-ON qualification failed before fresh evaluation.",
+    "weights": "Selected G fixed before fresh/owner; E-warm is a prespecified reference, not a test-driven override."
+  },
+  "population": {
+    "all_cases": 614,
+    "english_cases": 605,
+    "stt_ok": 613
+  },
+  "quantile_method": "linear interpolation at (n-1)*q; p50 median",
+  "runs": {
+    "historical_c_native": {
+      "all_cases": {
+        "call_categories": {
+          "model_work": {
+            "cases": 574,
+            "cleanup_s": {
+              "available_cases": 574,
+              "expected_cases": 574,
+              "p50_s": 0.22076752095017582,
+              "p95_s": 1.5611767517752027,
+              "unavailable_cases": 0
+            },
+            "status_counts": {
+              "cleanup_fallback": 5,
+              "cleanup_partial": 5,
+              "ok": 564
+            }
+          },
+          "not_attempted_or_unknown": {
+            "cases": 1,
+            "cleanup_s": {
+              "available_cases": 0,
+              "expected_cases": 1,
+              "p50_s": null,
+              "p95_s": null,
+              "unavailable_cases": 1
+            },
+            "status_counts": {
+              "stt_failed": 1
+            }
+          },
+          "zero_call_bypass_or_pre_call_failure": {
+            "cases": 39,
+            "cleanup_s": {
+              "available_cases": 39,
+              "expected_cases": 39,
+              "p50_s": 6.0208141803741455e-05,
+              "p95_s": 9.020040743052959e-05,
+              "unavailable_cases": 0
+            },
+            "status_counts": {
+              "ok": 39
+            }
+          }
+        },
+        "cleanup_s": {
+          "available_cases": 613,
+          "expected_cases": 614,
+          "p50_s": 0.20069562504068017,
+          "p95_s": 1.508671174617484,
+          "unavailable_cases": 1
+        },
+        "expected_cases": 614,
+        "length_limit_calls": 6,
+        "mode_counts": {
+          "code": 12,
+          "default": 415,
+          "message": 22,
+          "other_or_unavailable": 1,
+          "terminal": 164
+        },
+        "native_calls_marked_partial": 0,
+        "recorded_cases": 614,
+        "status_counts": {
+          "cleanup_fallback": 5,
+          "cleanup_partial": 5,
+          "missing": 0,
+          "ok": 603,
+          "stt_failed": 1
+        }
+      },
+      "binary_sha256": "6b5ab148f586b881d27577f5a61a5dafa551d1a24edb140213c29321ec044a3c",
+      "case_files_sha256": "1afad94e7bc8e146ac61075a3d10e8f0c8f81e535da1ba6bb16af8291fe3070a",
+      "english_cases": {
+        "call_categories": {
+          "model_work": {
+            "cases": 573,
+            "cleanup_s": {
+              "available_cases": 573,
+              "expected_cases": 573,
+              "p50_s": 0.22145745810121298,
+              "p95_s": 1.5640851747244584,
+              "unavailable_cases": 0
+            },
+            "status_counts": {
+              "cleanup_fallback": 5,
+              "cleanup_partial": 5,
+              "ok": 563
+            }
+          },
+          "not_attempted_or_unknown": {
+            "cases": 0,
+            "cleanup_s": {
+              "available_cases": 0,
+              "expected_cases": 0,
+              "p50_s": null,
+              "p95_s": null,
+              "unavailable_cases": 0
+            },
+            "status_counts": {}
+          },
+          "zero_call_bypass_or_pre_call_failure": {
+            "cases": 32,
+            "cleanup_s": {
+              "available_cases": 32,
+              "expected_cases": 32,
+              "p50_s": 6.116600707173347e-05,
+              "p95_s": 9.075438138097524e-05,
+              "unavailable_cases": 0
+            },
+            "status_counts": {
+              "ok": 32
+            }
+          }
+        },
+        "cleanup_s": {
+          "available_cases": 605,
+          "expected_cases": 605,
+          "p50_s": 0.20552758313715458,
+          "p95_s": 1.5157820581924162,
+          "unavailable_cases": 0
+        },
+        "expected_cases": 605,
+        "length_limit_calls": 6,
+        "mode_counts": {
+          "code": 12,
+          "default": 411,
+          "message": 22,
+          "terminal": 160
+        },
+        "native_calls_marked_partial": 0,
+        "recorded_cases": 605,
+        "status_counts": {
+          "cleanup_fallback": 5,
+          "cleanup_partial": 5,
+          "missing": 0,
+          "ok": 595
+        }
+      },
+      "manifest_mode_counts": {
+        "code": 12,
+        "default": 413,
+        "message": 22,
+        "other_or_unavailable": 2,
+        "terminal": 165
+      },
+      "metadata_sha256": "8685ac74fbe02c080f4342bdf5c87e43ab66912930298c7aeb94b75c6aa07773",
+      "model_identity_sha256": "33368f2651e6d9bef83244339a197f1c7d222e8167caa4afaf7d6f0f7fe98351",
+      "resources": {
+        "case_mlx_allocator_maxima_bytes": {
+          "mlx_active_bytes": null,
+          "mlx_cache_bytes": null,
+          "mlx_peak_bytes": null
+        },
+        "controller_case_peak_rss_bytes": null,
+        "controller_end_samples": [],
+        "interpretation": "Null or empty means unavailable. vmmap rounded units converted with 1024 scaling; separate process observations are not summed. RSS and MLX allocation are distinct; peaks describe process lifetime, not app RAM requirements.",
+        "native_after_recovery_pass_count": 1,
+        "native_before_recovery_pass_count": 1,
+        "native_session_count": 1,
+        "native_session_nonzero_exit_count": 0,
+        "source_sha256": [
+          "b91b04aeb2910870967b42b66ed53e2fee3fb18bfa98101eb340339e3d328ed6"
+        ],
+        "supervisor_end_samples": [
+          {
+            "current_bytes": 11429478,
+            "mlx_allocator_bytes": {
+              "mlx_active_bytes": null,
+              "mlx_cache_bytes": null,
+              "mlx_peak_bytes": null
+            },
+            "peak_bytes": 11534336,
+            "peak_rss_bytes": null,
+            "vmmap_exit_code": 0
+          }
+        ],
+        "worker_end_samples": [
+          {
+            "current_bytes": 1825361100,
+            "mlx_allocator_bytes": {
+              "mlx_active_bytes": null,
+              "mlx_cache_bytes": null,
+              "mlx_peak_bytes": null
+            },
+            "peak_bytes": 2040109465,
+            "peak_rss_bytes": null,
+            "vmmap_exit_code": 0
+          }
+        ],
+        "worker_sampled_peak_rss_bytes": 1940946944
+      },
+      "runtime_controls": {
+        "context_tokens": 4096,
+        "copy_draft_tokens": 8,
+        "decoder": null,
+        "max_input_tokens": null,
+        "max_output_tokens": 512,
+        "mlx_allocator_cache_limit_bytes": null,
+        "prefill_batch": null,
+        "prefix_cache": true,
+        "student_prefix_cache": null,
+        "trace": null
+      },
+      "source_identity_sha256": "2db6b82018187353a39a808b25afd21d8b970b2efd8a6241ebd204a7c7ee5eaa"
+    },
+    "historical_current4b": {
+      "all_cases": {
+        "call_categories": {
+          "model_work": {
+            "cases": 574,
+            "cleanup_s": {
+              "available_cases": 574,
+              "expected_cases": 574,
+              "p50_s": 0.8326662289910018,
+              "p95_s": 4.323077755828854,
+              "unavailable_cases": 0
+            },
+            "status_counts": {
+              "cleanup_fallback": 6,
+              "ok": 568
+            }
+          },
+          "not_attempted_or_unknown": {
+            "cases": 1,
+            "cleanup_s": {
+              "available_cases": 0,
+              "expected_cases": 1,
+              "p50_s": null,
+              "p95_s": null,
+              "unavailable_cases": 1
+            },
+            "status_counts": {
+              "stt_failed": 1
+            }
+          },
+          "zero_call_bypass_or_pre_call_failure": {
+            "cases": 39,
+            "cleanup_s": {
+              "available_cases": 39,
+              "expected_cases": 39,
+              "p50_s": 2.5208108127117157e-05,
+              "p95_s": 4.758371505886317e-05,
+              "unavailable_cases": 0
+            },
+            "status_counts": {
+              "ok": 39
+            }
+          }
+        },
+        "cleanup_s": {
+          "available_cases": 613,
+          "expected_cases": 614,
+          "p50_s": 0.7607255829498172,
+          "p95_s": 4.296552258450538,
+          "unavailable_cases": 1
+        },
+        "expected_cases": 614,
+        "length_limit_calls": 0,
+        "mode_counts": {
+          "code": 12,
+          "default": 415,
+          "message": 22,
+          "other_or_unavailable": 1,
+          "terminal": 164
+        },
+        "native_calls_marked_partial": 0,
+        "recorded_cases": 614,
+        "status_counts": {
+          "cleanup_fallback": 6,
+          "missing": 0,
+          "ok": 607,
+          "stt_failed": 1
+        }
+      },
+      "binary_sha256": null,
+      "case_files_sha256": "d51412ed546178529fc2e8f6d361e010493c3970d96f57d6cf41d29d7cb16666",
+      "english_cases": {
+        "call_categories": {
+          "model_work": {
+            "cases": 573,
+            "cleanup_s": {
+              "available_cases": 573,
+              "expected_cases": 573,
+              "p50_s": 0.8352764169685543,
+              "p95_s": 4.324214066239073,
+              "unavailable_cases": 0
+            },
+            "status_counts": {
+              "cleanup_fallback": 6,
+              "ok": 567
+            }
+          },
+          "not_attempted_or_unknown": {
+            "cases": 0,
+            "cleanup_s": {
+              "available_cases": 0,
+              "expected_cases": 0,
+              "p50_s": null,
+              "p95_s": null,
+              "unavailable_cases": 0
+            },
+            "status_counts": {}
+          },
+          "zero_call_bypass_or_pre_call_failure": {
+            "cases": 32,
+            "cleanup_s": {
+              "available_cases": 32,
+              "expected_cases": 32,
+              "p50_s": 2.6270514354109764e-05,
+              "p95_s": 4.991720197722315e-05,
+              "unavailable_cases": 0
+            },
+            "status_counts": {
+              "ok": 32
+            }
+          }
+        },
+        "cleanup_s": {
+          "available_cases": 605,
+          "expected_cases": 605,
+          "p50_s": 0.7703725828323513,
+          "p95_s": 4.298068474791944,
+          "unavailable_cases": 0
+        },
+        "expected_cases": 605,
+        "length_limit_calls": 0,
+        "mode_counts": {
+          "code": 12,
+          "default": 411,
+          "message": 22,
+          "terminal": 160
+        },
+        "native_calls_marked_partial": 0,
+        "recorded_cases": 605,
+        "status_counts": {
+          "cleanup_fallback": 6,
+          "missing": 0,
+          "ok": 599
+        }
+      },
+      "manifest_mode_counts": {
+        "code": 12,
+        "default": 413,
+        "message": 22,
+        "other_or_unavailable": 2,
+        "terminal": 165
+      },
+      "metadata_sha256": "aa1f413779ff9485e1c5c476b495d606f76f1ffcbe0e74ad81cb79cca7d1dbb3",
+      "model_identity_sha256": "4366deaa322c156593ebdfd8b7d7d28555e837c72c43c5835be14c31fb1121cf",
+      "resources": {
+        "case_mlx_allocator_maxima_bytes": {
+          "mlx_active_bytes": 4761296394,
+          "mlx_cache_bytes": 544092732,
+          "mlx_peak_bytes": 5500489648
+        },
+        "controller_case_peak_rss_bytes": 4330389504,
+        "controller_end_samples": [
+          {
+            "current_bytes": 5905580032,
+            "mlx_allocator_bytes": {
+              "mlx_active_bytes": 4761296394,
+              "mlx_cache_bytes": 498085904,
+              "mlx_peak_bytes": 5500489648
+            },
+            "peak_bytes": 6657199308,
+            "peak_rss_bytes": 4330389504,
+            "vmmap_exit_code": 0
+          }
+        ],
+        "interpretation": "Null or empty means unavailable. vmmap rounded units converted with 1024 scaling; separate process observations are not summed. RSS and MLX allocation are distinct; peaks describe process lifetime, not app RAM requirements.",
+        "native_after_recovery_pass_count": 0,
+        "native_before_recovery_pass_count": 0,
+        "native_session_count": 0,
+        "native_session_nonzero_exit_count": 0,
+        "source_sha256": [
+          "5bd6e15fe9d56a4760c32b548a25f2064cd0c3ab5e48f0460fff1eeab217f543"
+        ],
+        "supervisor_end_samples": [],
+        "worker_end_samples": [],
+        "worker_sampled_peak_rss_bytes": null
+      },
+      "runtime_controls": {
+        "context_tokens": null,
+        "copy_draft_tokens": 3,
+        "decoder": null,
+        "max_input_tokens": null,
+        "max_output_tokens": null,
+        "mlx_allocator_cache_limit_bytes": 536870912,
+        "prefill_batch": null,
+        "prefix_cache": null,
+        "student_prefix_cache": null,
+        "trace": false
+      },
+      "source_identity_sha256": "8daf1acd26b26784f90a804976420a6fd0cc3dcfbace1b469f777e15c4bd490c"
+    },
+    "owner-e-mlx": {
+      "all_cases": {
+        "call_categories": {
+          "model_work": {
+            "cases": 574,
+            "cleanup_s": {
+              "available_cases": 574,
+              "expected_cases": 574,
+              "p50_s": 0.7631431870395318,
+              "p95_s": 3.749686142022256,
+              "unavailable_cases": 0
+            },
+            "status_counts": {
+              "cleanup_fallback": 4,
+              "cleanup_partial": 2,
+              "ok": 568
+            }
+          },
+          "not_attempted_or_unknown": {
+            "cases": 1,
+            "cleanup_s": {
+              "available_cases": 0,
+              "expected_cases": 1,
+              "p50_s": null,
+              "p95_s": null,
+              "unavailable_cases": 1
+            },
+            "status_counts": {
+              "stt_failed": 1
+            }
+          },
+          "zero_call_bypass_or_pre_call_failure": {
+            "cases": 39,
+            "cleanup_s": {
+              "available_cases": 39,
+              "expected_cases": 39,
+              "p50_s": 7.391697727143764e-05,
+              "p95_s": 0.0001233879011124373,
+              "unavailable_cases": 0
+            },
+            "status_counts": {
+              "ok": 39
+            }
+          }
+        },
+        "cleanup_s": {
+          "available_cases": 613,
+          "expected_cases": 614,
+          "p50_s": 0.6886928749736398,
+          "p95_s": 3.7436488918960094,
+          "unavailable_cases": 1
+        },
+        "expected_cases": 614,
+        "length_limit_calls": 4,
+        "mode_counts": {
+          "code": 12,
+          "default": 415,
+          "message": 22,
+          "other_or_unavailable": 1,
+          "terminal": 164
+        },
+        "native_calls_marked_partial": 0,
+        "recorded_cases": 614,
+        "status_counts": {
+          "cleanup_fallback": 4,
+          "cleanup_partial": 2,
+          "missing": 0,
+          "ok": 607,
+          "stt_failed": 1
+        }
+      },
+      "binary_sha256": null,
+      "case_files_sha256": "d1fd5c2b2d4eb26981610806d35b5e5a784bcb39e8b3bbebbceea02952ebd3a3",
+      "english_cases": {
+        "call_categories": {
+          "model_work": {
+            "cases": 573,
+            "cleanup_s": {
+              "available_cases": 573,
+              "expected_cases": 573,
+              "p50_s": 0.7636525831185281,
+              "p95_s": 3.750033817021176,
+              "unavailable_cases": 0
+            },
+            "status_counts": {
+              "cleanup_fallback": 4,
+              "cleanup_partial": 2,
+              "ok": 567
+            }
+          },
+          "not_attempted_or_unknown": {
+            "cases": 0,
+            "cleanup_s": {
+              "available_cases": 0,
+              "expected_cases": 0,
+              "p50_s": null,
+              "p95_s": null,
+              "unavailable_cases": 0
+            },
+            "status_counts": {}
+          },
+          "zero_call_bypass_or_pre_call_failure": {
+            "cases": 32,
+            "cleanup_s": {
+              "available_cases": 32,
+              "expected_cases": 32,
+              "p50_s": 7.643748540431261e-05,
+              "p95_s": 0.0001350981183350086,
+              "unavailable_cases": 0
+            },
+            "status_counts": {
+              "ok": 32
+            }
+          }
+        },
+        "cleanup_s": {
+          "available_cases": 605,
+          "expected_cases": 605,
+          "p50_s": 0.703539791982621,
+          "p95_s": 3.743660158663988,
+          "unavailable_cases": 0
+        },
+        "expected_cases": 605,
+        "length_limit_calls": 4,
+        "mode_counts": {
+          "code": 12,
+          "default": 411,
+          "message": 22,
+          "terminal": 160
+        },
+        "native_calls_marked_partial": 0,
+        "recorded_cases": 605,
+        "status_counts": {
+          "cleanup_fallback": 4,
+          "cleanup_partial": 2,
+          "missing": 0,
+          "ok": 599
+        }
+      },
+      "manifest_mode_counts": {
+        "code": 12,
+        "default": 413,
+        "message": 22,
+        "other_or_unavailable": 2,
+        "terminal": 165
+      },
+      "metadata_sha256": "d5ee4635efe070c31b91f2bb4fc4d3189b95a601d066adeedd275ce30d3aa7dc",
+      "model_identity_sha256": "eee5d168df035a8b290b480db0b454bf06ed951ff63771fdea281c6ca0eae378",
+      "resources": {
+        "case_mlx_allocator_maxima_bytes": {
+          "mlx_active_bytes": 1903146248,
+          "mlx_cache_bytes": 60054030,
+          "mlx_peak_bytes": 3207730626
+        },
+        "controller_case_peak_rss_bytes": 700350464,
+        "controller_end_samples": [
+          {
+            "current_bytes": 2362232012,
+            "mlx_allocator_bytes": {
+              "mlx_active_bytes": 1903146248,
+              "mlx_cache_bytes": 27729212,
+              "mlx_peak_bytes": 3207730626
+            },
+            "peak_bytes": 3758096384,
+            "peak_rss_bytes": 700350464,
+            "vmmap_exit_code": 0
+          }
+        ],
+        "interpretation": "Null or empty means unavailable. vmmap rounded units converted with 1024 scaling; separate process observations are not summed. RSS and MLX allocation are distinct; peaks describe process lifetime, not app RAM requirements.",
+        "native_after_recovery_pass_count": 0,
+        "native_before_recovery_pass_count": 0,
+        "native_session_count": 0,
+        "native_session_nonzero_exit_count": 0,
+        "source_sha256": [
+          "3360fcac9ef9f478650befba31446e2bf5ec1ea0135743f021d40dfd7d5ba8ad"
+        ],
+        "supervisor_end_samples": [],
+        "worker_end_samples": [],
+        "worker_sampled_peak_rss_bytes": null
+      },
+      "runtime_controls": {
+        "context_tokens": null,
+        "copy_draft_tokens": 3,
+        "decoder": "stream",
+        "max_input_tokens": 4096,
+        "max_output_tokens": 1024,
+        "mlx_allocator_cache_limit_bytes": 536870912,
+        "prefill_batch": null,
+        "prefix_cache": null,
+        "student_prefix_cache": null,
+        "trace": null
+      },
+      "source_identity_sha256": "560b5ee7627a6a7370bcfc02a00687d2b9ad59521e5d812dcd2d7df7312139c4"
+    },
+    "owner-mlx": {
+      "all_cases": {
+        "call_categories": {
+          "model_work": {
+            "cases": 574,
+            "cleanup_s": {
+              "available_cases": 574,
+              "expected_cases": 574,
+              "p50_s": 0.9049341460922733,
+              "p95_s": 4.596672656107694,
+              "unavailable_cases": 0
+            },
+            "status_counts": {
+              "cleanup_fallback": 2,
+              "cleanup_partial": 1,
+              "ok": 571
+            }
+          },
+          "not_attempted_or_unknown": {
+            "cases": 1,
+            "cleanup_s": {
+              "available_cases": 0,
+              "expected_cases": 1,
+              "p50_s": null,
+              "p95_s": null,
+              "unavailable_cases": 1
+            },
+            "status_counts": {
+              "stt_failed": 1
+            }
+          },
+          "zero_call_bypass_or_pre_call_failure": {
+            "cases": 39,
+            "cleanup_s": {
+              "available_cases": 39,
+              "expected_cases": 39,
+              "p50_s": 0.0001347081270068884,
+              "p95_s": 0.00019751633517444135,
+              "unavailable_cases": 0
+            },
+            "status_counts": {
+              "ok": 39
+            }
+          }
+        },
+        "cleanup_s": {
+          "available_cases": 613,
+          "expected_cases": 614,
+          "p50_s": 0.8409874169155955,
+          "p95_s": 4.480757058551534,
+          "unavailable_cases": 1
+        },
+        "expected_cases": 614,
+        "length_limit_calls": 0,
+        "mode_counts": {
+          "code": 12,
+          "default": 415,
+          "message": 22,
+          "other_or_unavailable": 1,
+          "terminal": 164
+        },
+        "native_calls_marked_partial": 0,
+        "recorded_cases": 614,
+        "status_counts": {
+          "cleanup_fallback": 2,
+          "cleanup_partial": 1,
+          "missing": 0,
+          "ok": 610,
+          "stt_failed": 1
+        }
+      },
+      "binary_sha256": null,
+      "case_files_sha256": "f48ba39709357b4bd78f3292a6da11122565e47073f3c1cdf7b4f77c5f882623",
+      "english_cases": {
+        "call_categories": {
+          "model_work": {
+            "cases": 573,
+            "cleanup_s": {
+              "available_cases": 573,
+              "expected_cases": 573,
+              "p50_s": 0.9062027921900153,
+              "p95_s": 4.5974615415558215,
+              "unavailable_cases": 0
+            },
+            "status_counts": {
+              "cleanup_fallback": 1,
+              "cleanup_partial": 1,
+              "ok": 571
+            }
+          },
+          "not_attempted_or_unknown": {
+            "cases": 0,
+            "cleanup_s": {
+              "available_cases": 0,
+              "expected_cases": 0,
+              "p50_s": null,
+              "p95_s": null,
+              "unavailable_cases": 0
+            },
+            "status_counts": {}
+          },
+          "zero_call_bypass_or_pre_call_failure": {
+            "cases": 32,
+            "cleanup_s": {
+              "available_cases": 32,
+              "expected_cases": 32,
+              "p50_s": 0.00013631198089569807,
+              "p95_s": 0.00019990825094282628,
+              "unavailable_cases": 0
+            },
+            "status_counts": {
+              "ok": 32
+            }
+          }
+        },
+        "cleanup_s": {
+          "available_cases": 605,
+          "expected_cases": 605,
+          "p50_s": 0.8538056251127273,
+          "p95_s": 4.497146742092443,
+          "unavailable_cases": 0
+        },
+        "expected_cases": 605,
+        "length_limit_calls": 0,
+        "mode_counts": {
+          "code": 12,
+          "default": 411,
+          "message": 22,
+          "terminal": 160
+        },
+        "native_calls_marked_partial": 0,
+        "recorded_cases": 605,
+        "status_counts": {
+          "cleanup_fallback": 1,
+          "cleanup_partial": 1,
+          "missing": 0,
+          "ok": 603
+        }
+      },
+      "manifest_mode_counts": {
+        "code": 12,
+        "default": 413,
+        "message": 22,
+        "other_or_unavailable": 2,
+        "terminal": 165
+      },
+      "metadata_sha256": "351ffd3f72c689eedbb6c15c9a1d170ece51baad357152a60c26ea5812fc8948",
+      "model_identity_sha256": "0c34eae1f6e42099a358a57add5f4e8ed5c4b0e73bb7a15bd9616680f22696b2",
+      "resources": {
+        "case_mlx_allocator_maxima_bytes": {
+          "mlx_active_bytes": 1903146248,
+          "mlx_cache_bytes": 60237550,
+          "mlx_peak_bytes": 3207730626
+        },
+        "controller_case_peak_rss_bytes": 1377026048,
+        "controller_end_samples": [
+          {
+            "current_bytes": 2362232012,
+            "mlx_allocator_bytes": {
+              "mlx_active_bytes": 1903146248,
+              "mlx_cache_bytes": 27718246,
+              "mlx_peak_bytes": 3207730626
+            },
+            "peak_bytes": 3758096384,
+            "peak_rss_bytes": 1377026048,
+            "vmmap_exit_code": 0
+          }
+        ],
+        "interpretation": "Null or empty means unavailable. vmmap rounded units converted with 1024 scaling; separate process observations are not summed. RSS and MLX allocation are distinct; peaks describe process lifetime, not app RAM requirements.",
+        "native_after_recovery_pass_count": 0,
+        "native_before_recovery_pass_count": 0,
+        "native_session_count": 0,
+        "native_session_nonzero_exit_count": 0,
+        "source_sha256": [
+          "a321b301634c034ad97493a4cade72e209b75f1228d0a2183c5d0140a064f21a"
+        ],
+        "supervisor_end_samples": [],
+        "worker_end_samples": [],
+        "worker_sampled_peak_rss_bytes": null
+      },
+      "runtime_controls": {
+        "context_tokens": null,
+        "copy_draft_tokens": 3,
+        "decoder": "stream",
+        "max_input_tokens": 4096,
+        "max_output_tokens": 1024,
+        "mlx_allocator_cache_limit_bytes": 536870912,
+        "prefill_batch": null,
+        "prefix_cache": null,
+        "student_prefix_cache": null,
+        "trace": null
+      },
+      "source_identity_sha256": "560b5ee7627a6a7370bcfc02a00687d2b9ad59521e5d812dcd2d7df7312139c4"
+    },
+    "owner-native": {
+      "all_cases": {
+        "call_categories": {
+          "model_work": {
+            "cases": 574,
+            "cleanup_s": {
+              "available_cases": 574,
+              "expected_cases": 574,
+              "p50_s": 0.2687430630903691,
+              "p95_s": 1.300911956338678,
+              "unavailable_cases": 0
+            },
+            "status_counts": {
+              "cleanup_fallback": 1,
+              "cleanup_partial": 1,
+              "ok": 572
+            }
+          },
+          "not_attempted_or_unknown": {
+            "cases": 1,
+            "cleanup_s": {
+              "available_cases": 0,
+              "expected_cases": 1,
+              "p50_s": null,
+              "p95_s": null,
+              "unavailable_cases": 1
+            },
+            "status_counts": {
+              "stt_failed": 1
+            }
+          },
+          "zero_call_bypass_or_pre_call_failure": {
+            "cases": 39,
+            "cleanup_s": {
+              "available_cases": 39,
+              "expected_cases": 39,
+              "p50_s": 7.349997758865356e-05,
+              "p95_s": 0.00015561247710138562,
+              "unavailable_cases": 0
+            },
+            "status_counts": {
+              "ok": 39
+            }
+          }
+        },
+        "cleanup_s": {
+          "available_cases": 613,
+          "expected_cases": 614,
+          "p50_s": 0.2615490409079939,
+          "p95_s": 1.2785038334783163,
+          "unavailable_cases": 1
+        },
+        "expected_cases": 614,
+        "length_limit_calls": 0,
+        "mode_counts": {
+          "code": 12,
+          "default": 415,
+          "message": 22,
+          "other_or_unavailable": 1,
+          "terminal": 164
+        },
+        "native_calls_marked_partial": 0,
+        "recorded_cases": 614,
+        "status_counts": {
+          "cleanup_fallback": 1,
+          "cleanup_partial": 1,
+          "missing": 0,
+          "ok": 611,
+          "stt_failed": 1
+        }
+      },
+      "binary_sha256": "6b5ab148f586b881d27577f5a61a5dafa551d1a24edb140213c29321ec044a3c",
+      "case_files_sha256": "44c1740912af42eb1d704a493fe6ad5c426ee5576c61420cfebfbbd4d334b489",
+      "english_cases": {
+        "call_categories": {
+          "model_work": {
+            "cases": 573,
+            "cleanup_s": {
+              "available_cases": 573,
+              "expected_cases": 573,
+              "p50_s": 0.26877416716888547,
+              "p95_s": 1.3016467000823464,
+              "unavailable_cases": 0
+            },
+            "status_counts": {
+              "cleanup_partial": 1,
+              "ok": 572
+            }
+          },
+          "not_attempted_or_unknown": {
+            "cases": 0,
+            "cleanup_s": {
+              "available_cases": 0,
+              "expected_cases": 0,
+              "p50_s": null,
+              "p95_s": null,
+              "unavailable_cases": 0
+            },
+            "status_counts": {}
+          },
+          "zero_call_bypass_or_pre_call_failure": {
+            "cases": 32,
+            "cleanup_s": {
+              "available_cases": 32,
+              "expected_cases": 32,
+              "p50_s": 7.735402323305607e-05,
+              "p95_s": 0.0001616937224753201,
+              "unavailable_cases": 0
+            },
+            "status_counts": {
+              "ok": 32
+            }
+          }
+        },
+        "cleanup_s": {
+          "available_cases": 605,
+          "expected_cases": 605,
+          "p50_s": 0.26275779097341,
+          "p95_s": 1.284628583164885,
+          "unavailable_cases": 0
+        },
+        "expected_cases": 605,
+        "length_limit_calls": 0,
+        "mode_counts": {
+          "code": 12,
+          "default": 411,
+          "message": 22,
+          "terminal": 160
+        },
+        "native_calls_marked_partial": 0,
+        "recorded_cases": 605,
+        "status_counts": {
+          "cleanup_partial": 1,
+          "missing": 0,
+          "ok": 604
+        }
+      },
+      "manifest_mode_counts": {
+        "code": 12,
+        "default": 413,
+        "message": 22,
+        "other_or_unavailable": 2,
+        "terminal": 165
+      },
+      "metadata_sha256": "b85ba5237c1cc9c68ffd74d321c185d83761a1b3a60aebc5eaff901d9dd0801a",
+      "model_identity_sha256": "89534a9c368b4940286957a4f27f78d2d0bd3d0163e49402eceaf29acf08ffdf",
+      "resources": {
+        "case_mlx_allocator_maxima_bytes": {
+          "mlx_active_bytes": null,
+          "mlx_cache_bytes": null,
+          "mlx_peak_bytes": null
+        },
+        "controller_case_peak_rss_bytes": null,
+        "controller_end_samples": [],
+        "interpretation": "Null or empty means unavailable. vmmap rounded units converted with 1024 scaling; separate process observations are not summed. RSS and MLX allocation are distinct; peaks describe process lifetime, not app RAM requirements.",
+        "native_after_recovery_pass_count": 1,
+        "native_before_recovery_pass_count": 1,
+        "native_session_count": 1,
+        "native_session_nonzero_exit_count": 0,
+        "source_sha256": [
+          "045587f818f9b12aff2b125b9086b6d9d3bed76588a6a8a73732b589ae06b205"
+        ],
+        "supervisor_end_samples": [
+          {
+            "current_bytes": 11429478,
+            "mlx_allocator_bytes": {
+              "mlx_active_bytes": null,
+              "mlx_cache_bytes": null,
+              "mlx_peak_bytes": null
+            },
+            "peak_bytes": 11534336,
+            "peak_rss_bytes": null,
+            "vmmap_exit_code": 0
+          }
+        ],
+        "worker_end_samples": [
+          {
+            "current_bytes": 1717986918,
+            "mlx_allocator_bytes": {
+              "mlx_active_bytes": null,
+              "mlx_cache_bytes": null,
+              "mlx_peak_bytes": null
+            },
+            "peak_bytes": 1932735283,
+            "peak_rss_bytes": null,
+            "vmmap_exit_code": 0
+          }
+        ],
+        "worker_sampled_peak_rss_bytes": 1693057024
+      },
+      "runtime_controls": {
+        "context_tokens": 4096,
+        "copy_draft_tokens": 8,
+        "decoder": null,
+        "max_input_tokens": null,
+        "max_output_tokens": 512,
+        "mlx_allocator_cache_limit_bytes": null,
+        "prefill_batch": 128,
+        "prefix_cache": true,
+        "student_prefix_cache": false,
+        "trace": null
+      },
+      "source_identity_sha256": "560b5ee7627a6a7370bcfc02a00687d2b9ad59521e5d812dcd2d7df7312139c4"
+    },
+    "paired96-1-current4b": {
+      "all_cases": {
+        "call_categories": {
+          "model_work": {
+            "cases": 86,
+            "cleanup_s": {
+              "available_cases": 86,
+              "expected_cases": 86,
+              "p50_s": 0.6078747084829956,
+              "p95_s": 3.907792739162687,
+              "unavailable_cases": 0
+            },
+            "status_counts": {
+              "cleanup_fallback": 3,
+              "ok": 83
+            }
+          },
+          "not_attempted_or_unknown": {
+            "cases": 1,
+            "cleanup_s": {
+              "available_cases": 0,
+              "expected_cases": 1,
+              "p50_s": null,
+              "p95_s": null,
+              "unavailable_cases": 1
+            },
+            "status_counts": {
+              "stt_failed": 1
+            }
+          },
+          "zero_call_bypass_or_pre_call_failure": {
+            "cases": 9,
+            "cleanup_s": {
+              "available_cases": 9,
+              "expected_cases": 9,
+              "p50_s": 2.2916821762919426e-05,
+              "p95_s": 3.76999843865633e-05,
+              "unavailable_cases": 0
+            },
+            "status_counts": {
+              "ok": 9
+            }
+          }
+        },
+        "cleanup_s": {
+          "available_cases": 95,
+          "expected_cases": 96,
+          "p50_s": 0.5405747080221772,
+          "p95_s": 3.905584870534949,
+          "unavailable_cases": 1
+        },
+        "expected_cases": 96,
+        "length_limit_calls": 0,
+        "mode_counts": {
+          "code": 12,
+          "default": 38,
+          "other_or_unavailable": 1,
+          "terminal": 45
+        },
+        "native_calls_marked_partial": 0,
+        "recorded_cases": 96,
+        "status_counts": {
+          "cleanup_fallback": 3,
+          "missing": 0,
+          "ok": 92,
+          "stt_failed": 1
+        }
+      },
+      "binary_sha256": null,
+      "case_files_sha256": "088081ab7ca7722a0bdf82e0be435173caf98c48f7e6652d9d2e562cbaa3cf9b",
+      "english_cases": {
+        "call_categories": {
+          "model_work": {
+            "cases": 85,
+            "cleanup_s": {
+              "available_cases": 85,
+              "expected_cases": 85,
+              "p50_s": 0.625281292013824,
+              "p95_s": 3.9080380578991027,
+              "unavailable_cases": 0
+            },
+            "status_counts": {
+              "cleanup_fallback": 3,
+              "ok": 82
+            }
+          },
+          "not_attempted_or_unknown": {
+            "cases": 0,
+            "cleanup_s": {
+              "available_cases": 0,
+              "expected_cases": 0,
+              "p50_s": null,
+              "p95_s": null,
+              "unavailable_cases": 0
+            },
+            "status_counts": {}
+          },
+          "zero_call_bypass_or_pre_call_failure": {
+            "cases": 5,
+            "cleanup_s": {
+              "available_cases": 5,
+              "expected_cases": 5,
+              "p50_s": 2.350006252527237e-05,
+              "p95_s": 4.072501324117183e-05,
+              "unavailable_cases": 0
+            },
+            "status_counts": {
+              "ok": 5
+            }
+          }
+        },
+        "cleanup_s": {
+          "available_cases": 90,
+          "expected_cases": 90,
+          "p50_s": 0.5759246874367818,
+          "p95_s": 3.906811464217026,
+          "unavailable_cases": 0
+        },
+        "expected_cases": 90,
+        "length_limit_calls": 0,
+        "mode_counts": {
+          "code": 12,
+          "default": 37,
+          "terminal": 41
+        },
+        "native_calls_marked_partial": 0,
+        "recorded_cases": 90,
+        "status_counts": {
+          "cleanup_fallback": 3,
+          "missing": 0,
+          "ok": 87
+        }
+      },
+      "manifest_mode_counts": {
+        "code": 12,
+        "default": 38,
+        "terminal": 46
+      },
+      "metadata_sha256": "41d3b20aae4f98b3a65361d16afa67a9ac68fba61c397c4b468b17975390a2b6",
+      "model_identity_sha256": "4366deaa322c156593ebdfd8b7d7d28555e837c72c43c5835be14c31fb1121cf",
+      "resources": {
+        "case_mlx_allocator_maxima_bytes": {
+          "mlx_active_bytes": 4761296394,
+          "mlx_cache_bytes": 544074672,
+          "mlx_peak_bytes": 5500474800
+        },
+        "controller_case_peak_rss_bytes": 1355661312,
+        "controller_end_samples": [
+          {
+            "current_bytes": 5798205849,
+            "mlx_allocator_bytes": {
+              "mlx_active_bytes": 4761296394,
+              "mlx_cache_bytes": 369446896,
+              "mlx_peak_bytes": 5500474800
+            },
+            "peak_bytes": 6657199308,
+            "peak_rss_bytes": 1355661312,
+            "vmmap_exit_code": 0
+          }
+        ],
+        "interpretation": "Null or empty means unavailable. vmmap rounded units converted with 1024 scaling; separate process observations are not summed. RSS and MLX allocation are distinct; peaks describe process lifetime, not app RAM requirements.",
+        "native_after_recovery_pass_count": 0,
+        "native_before_recovery_pass_count": 0,
+        "native_session_count": 0,
+        "native_session_nonzero_exit_count": 0,
+        "source_sha256": [
+          "e6dd8e5f99a830d753c2bd1eb426f0d7c2f91128d822674b1b50056d5fe293e0"
+        ],
+        "supervisor_end_samples": [],
+        "worker_end_samples": [],
+        "worker_sampled_peak_rss_bytes": null
+      },
+      "runtime_controls": {
+        "context_tokens": null,
+        "copy_draft_tokens": 3,
+        "decoder": null,
+        "max_input_tokens": null,
+        "max_output_tokens": null,
+        "mlx_allocator_cache_limit_bytes": 536870912,
+        "prefill_batch": null,
+        "prefix_cache": null,
+        "student_prefix_cache": null,
+        "trace": false
+      },
+      "source_identity_sha256": "3493ca714a2d36988d833059042ed429e2d67967486cce6ffa23a7fbdf4741eb"
+    },
+    "paired96-2-native": {
+      "all_cases": {
+        "call_categories": {
+          "model_work": {
+            "cases": 86,
+            "cleanup_s": {
+              "available_cases": 86,
+              "expected_cases": 86,
+              "p50_s": 0.2703186875442043,
+              "p95_s": 1.1966528337216005,
+              "unavailable_cases": 0
+            },
+            "status_counts": {
+              "cleanup_fallback": 1,
+              "cleanup_partial": 1,
+              "ok": 84
+            }
+          },
+          "not_attempted_or_unknown": {
+            "cases": 1,
+            "cleanup_s": {
+              "available_cases": 0,
+              "expected_cases": 1,
+              "p50_s": null,
+              "p95_s": null,
+              "unavailable_cases": 1
+            },
+            "status_counts": {
+              "stt_failed": 1
+            }
+          },
+          "zero_call_bypass_or_pre_call_failure": {
+            "cases": 9,
+            "cleanup_s": {
+              "available_cases": 9,
+              "expected_cases": 9,
+              "p50_s": 6.187520921230316e-05,
+              "p95_s": 8.209156803786754e-05,
+              "unavailable_cases": 0
+            },
+            "status_counts": {
+              "ok": 9
+            }
+          }
+        },
+        "cleanup_s": {
+          "available_cases": 95,
+          "expected_cases": 96,
+          "p50_s": 0.2606499157845974,
+          "p95_s": 1.1610531083308158,
+          "unavailable_cases": 1
+        },
+        "expected_cases": 96,
+        "length_limit_calls": 0,
+        "mode_counts": {
+          "code": 12,
+          "default": 38,
+          "other_or_unavailable": 1,
+          "terminal": 45
+        },
+        "native_calls_marked_partial": 0,
+        "recorded_cases": 96,
+        "status_counts": {
+          "cleanup_fallback": 1,
+          "cleanup_partial": 1,
+          "missing": 0,
+          "ok": 93,
+          "stt_failed": 1
+        }
+      },
+      "binary_sha256": "6b5ab148f586b881d27577f5a61a5dafa551d1a24edb140213c29321ec044a3c",
+      "case_files_sha256": "37bcfc894d6defb1149791e19a02aa918c1e63f03309c268d949e059567b9fc7",
+      "english_cases": {
+        "call_categories": {
+          "model_work": {
+            "cases": 85,
+            "cleanup_s": {
+              "available_cases": 85,
+              "expected_cases": 85,
+              "p50_s": 0.2704050000756979,
+              "p95_s": 1.2006083587650207,
+              "unavailable_cases": 0
+            },
+            "status_counts": {
+              "cleanup_partial": 1,
+              "ok": 84
+            }
+          },
+          "not_attempted_or_unknown": {
+            "cases": 0,
+            "cleanup_s": {
+              "available_cases": 0,
+              "expected_cases": 0,
+              "p50_s": null,
+              "p95_s": null,
+              "unavailable_cases": 0
+            },
+            "status_counts": {}
+          },
+          "zero_call_bypass_or_pre_call_failure": {
+            "cases": 5,
+            "cleanup_s": {
+              "available_cases": 5,
+              "expected_cases": 5,
+              "p50_s": 6.695790216326714e-05,
+              "p95_s": 8.356682956218719e-05,
+              "unavailable_cases": 0
+            },
+            "status_counts": {
+              "ok": 5
+            }
+          }
+        },
+        "cleanup_s": {
+          "available_cases": 90,
+          "expected_cases": 90,
+          "p50_s": 0.2657941250363365,
+          "p95_s": 1.1808307335479182,
+          "unavailable_cases": 0
+        },
+        "expected_cases": 90,
+        "length_limit_calls": 0,
+        "mode_counts": {
+          "code": 12,
+          "default": 37,
+          "terminal": 41
+        },
+        "native_calls_marked_partial": 0,
+        "recorded_cases": 90,
+        "status_counts": {
+          "cleanup_partial": 1,
+          "missing": 0,
+          "ok": 89
+        }
+      },
+      "manifest_mode_counts": {
+        "code": 12,
+        "default": 38,
+        "terminal": 46
+      },
+      "metadata_sha256": "c881563d3a8ee83e84ca4cec7763988454aa2c036d6804dc3f0e59782b381d12",
+      "model_identity_sha256": "89534a9c368b4940286957a4f27f78d2d0bd3d0163e49402eceaf29acf08ffdf",
+      "resources": {
+        "case_mlx_allocator_maxima_bytes": {
+          "mlx_active_bytes": null,
+          "mlx_cache_bytes": null,
+          "mlx_peak_bytes": null
+        },
+        "controller_case_peak_rss_bytes": null,
+        "controller_end_samples": [],
+        "interpretation": "Null or empty means unavailable. vmmap rounded units converted with 1024 scaling; separate process observations are not summed. RSS and MLX allocation are distinct; peaks describe process lifetime, not app RAM requirements.",
+        "native_after_recovery_pass_count": 1,
+        "native_before_recovery_pass_count": 1,
+        "native_session_count": 1,
+        "native_session_nonzero_exit_count": 0,
+        "source_sha256": [
+          "ad20aff8a6ffba6d54843c64676ab9dd7271236fbdf23e8fe012641fb2b03562"
+        ],
+        "supervisor_end_samples": [
+          {
+            "current_bytes": 11324620,
+            "mlx_allocator_bytes": {
+              "mlx_active_bytes": null,
+              "mlx_cache_bytes": null,
+              "mlx_peak_bytes": null
+            },
+            "peak_bytes": 11324620,
+            "peak_rss_bytes": null,
+            "vmmap_exit_code": 0
+          }
+        ],
+        "worker_end_samples": [
+          {
+            "current_bytes": 2040109465,
+            "mlx_allocator_bytes": {
+              "mlx_active_bytes": null,
+              "mlx_cache_bytes": null,
+              "mlx_peak_bytes": null
+            },
+            "peak_bytes": 2040109465,
+            "peak_rss_bytes": null,
+            "vmmap_exit_code": 0
+          }
+        ],
+        "worker_sampled_peak_rss_bytes": 1845608448
+      },
+      "runtime_controls": {
+        "context_tokens": 4096,
+        "copy_draft_tokens": 8,
+        "decoder": null,
+        "max_input_tokens": null,
+        "max_output_tokens": 512,
+        "mlx_allocator_cache_limit_bytes": null,
+        "prefill_batch": 128,
+        "prefix_cache": true,
+        "student_prefix_cache": false,
+        "trace": null
+      },
+      "source_identity_sha256": "560b5ee7627a6a7370bcfc02a00687d2b9ad59521e5d812dcd2d7df7312139c4"
+    },
+    "paired96-3-native": {
+      "all_cases": {
+        "call_categories": {
+          "model_work": {
+            "cases": 86,
+            "cleanup_s": {
+              "available_cases": 86,
+              "expected_cases": 86,
+              "p50_s": 0.2629233543993905,
+              "p95_s": 1.159266760572791,
+              "unavailable_cases": 0
+            },
+            "status_counts": {
+              "cleanup_fallback": 1,
+              "cleanup_partial": 1,
+              "ok": 84
+            }
+          },
+          "not_attempted_or_unknown": {
+            "cases": 1,
+            "cleanup_s": {
+              "available_cases": 0,
+              "expected_cases": 1,
+              "p50_s": null,
+              "p95_s": null,
+              "unavailable_cases": 1
+            },
+            "status_counts": {
+              "stt_failed": 1
+            }
+          },
+          "zero_call_bypass_or_pre_call_failure": {
+            "cases": 9,
+            "cleanup_s": {
+              "available_cases": 9,
+              "expected_cases": 9,
+              "p50_s": 6.24579843133688e-05,
+              "p95_s": 9.559132158756256e-05,
+              "unavailable_cases": 0
+            },
+            "status_counts": {
+              "ok": 9
+            }
+          }
+        },
+        "cleanup_s": {
+          "available_cases": 95,
+          "expected_cases": 96,
+          "p50_s": 0.25306808413006365,
+          "p95_s": 1.1267033538315443,
+          "unavailable_cases": 1
+        },
+        "expected_cases": 96,
+        "length_limit_calls": 0,
+        "mode_counts": {
+          "code": 12,
+          "default": 38,
+          "other_or_unavailable": 1,
+          "terminal": 45
+        },
+        "native_calls_marked_partial": 0,
+        "recorded_cases": 96,
+        "status_counts": {
+          "cleanup_fallback": 1,
+          "cleanup_partial": 1,
+          "missing": 0,
+          "ok": 93,
+          "stt_failed": 1
+        }
+      },
+      "binary_sha256": "6b5ab148f586b881d27577f5a61a5dafa551d1a24edb140213c29321ec044a3c",
+      "case_files_sha256": "d8d2b66a1db7bedb284d05de8af24177ead45426a3fcaf6af322fd81465bc504",
+      "english_cases": {
+        "call_categories": {
+          "model_work": {
+            "cases": 85,
+            "cleanup_s": {
+              "available_cases": 85,
+              "expected_cases": 85,
+              "p50_s": 0.26368433400057256,
+              "p95_s": 1.1628849168773738,
+              "unavailable_cases": 0
+            },
+            "status_counts": {
+              "cleanup_partial": 1,
+              "ok": 84
+            }
+          },
+          "not_attempted_or_unknown": {
+            "cases": 0,
+            "cleanup_s": {
+              "available_cases": 0,
+              "expected_cases": 0,
+              "p50_s": null,
+              "p95_s": null,
+              "unavailable_cases": 0
+            },
+            "status_counts": {}
+          },
+          "zero_call_bypass_or_pre_call_failure": {
+            "cases": 5,
+            "cleanup_s": {
+              "available_cases": 5,
+              "expected_cases": 5,
+              "p50_s": 6.570899859070778e-05,
+              "p95_s": 9.835809469223022e-05,
+              "unavailable_cases": 0
+            },
+            "status_counts": {
+              "ok": 5
+            }
+          }
+        },
+        "cleanup_s": {
+          "available_cases": 90,
+          "expected_cases": 90,
+          "p50_s": 0.2599543125834316,
+          "p95_s": 1.144794135354459,
+          "unavailable_cases": 0
+        },
+        "expected_cases": 90,
+        "length_limit_calls": 0,
+        "mode_counts": {
+          "code": 12,
+          "default": 37,
+          "terminal": 41
+        },
+        "native_calls_marked_partial": 0,
+        "recorded_cases": 90,
+        "status_counts": {
+          "cleanup_partial": 1,
+          "missing": 0,
+          "ok": 89
+        }
+      },
+      "manifest_mode_counts": {
+        "code": 12,
+        "default": 38,
+        "terminal": 46
+      },
+      "metadata_sha256": "c881563d3a8ee83e84ca4cec7763988454aa2c036d6804dc3f0e59782b381d12",
+      "model_identity_sha256": "89534a9c368b4940286957a4f27f78d2d0bd3d0163e49402eceaf29acf08ffdf",
+      "resources": {
+        "case_mlx_allocator_maxima_bytes": {
+          "mlx_active_bytes": null,
+          "mlx_cache_bytes": null,
+          "mlx_peak_bytes": null
+        },
+        "controller_case_peak_rss_bytes": null,
+        "controller_end_samples": [],
+        "interpretation": "Null or empty means unavailable. vmmap rounded units converted with 1024 scaling; separate process observations are not summed. RSS and MLX allocation are distinct; peaks describe process lifetime, not app RAM requirements.",
+        "native_after_recovery_pass_count": 1,
+        "native_before_recovery_pass_count": 1,
+        "native_session_count": 1,
+        "native_session_nonzero_exit_count": 0,
+        "source_sha256": [
+          "31385d95194b0224f4b51707ac34d19bb859a2a00bb9a02038714c9fbaf1e524"
+        ],
+        "supervisor_end_samples": [
+          {
+            "current_bytes": 11534336,
+            "mlx_allocator_bytes": {
+              "mlx_active_bytes": null,
+              "mlx_cache_bytes": null,
+              "mlx_peak_bytes": null
+            },
+            "peak_bytes": 11534336,
+            "peak_rss_bytes": null,
+            "vmmap_exit_code": 0
+          }
+        ],
+        "worker_end_samples": [
+          {
+            "current_bytes": 1717986918,
+            "mlx_allocator_bytes": {
+              "mlx_active_bytes": null,
+              "mlx_cache_bytes": null,
+              "mlx_peak_bytes": null
+            },
+            "peak_bytes": 2040109465,
+            "peak_rss_bytes": null,
+            "vmmap_exit_code": 0
+          }
+        ],
+        "worker_sampled_peak_rss_bytes": 1786494976
+      },
+      "runtime_controls": {
+        "context_tokens": 4096,
+        "copy_draft_tokens": 8,
+        "decoder": null,
+        "max_input_tokens": null,
+        "max_output_tokens": 512,
+        "mlx_allocator_cache_limit_bytes": null,
+        "prefill_batch": 128,
+        "prefix_cache": true,
+        "student_prefix_cache": false,
+        "trace": null
+      },
+      "source_identity_sha256": "560b5ee7627a6a7370bcfc02a00687d2b9ad59521e5d812dcd2d7df7312139c4"
+    },
+    "paired96-4-current4b": {
+      "all_cases": {
+        "call_categories": {
+          "model_work": {
+            "cases": 86,
+            "cleanup_s": {
+              "available_cases": 86,
+              "expected_cases": 86,
+              "p50_s": 0.5804107498843223,
+              "p95_s": 3.657389718457125,
+              "unavailable_cases": 0
+            },
+            "status_counts": {
+              "cleanup_fallback": 3,
+              "ok": 83
+            }
+          },
+          "not_attempted_or_unknown": {
+            "cases": 1,
+            "cleanup_s": {
+              "available_cases": 0,
+              "expected_cases": 1,
+              "p50_s": null,
+              "p95_s": null,
+              "unavailable_cases": 1
+            },
+            "status_counts": {
+              "stt_failed": 1
+            }
+          },
+          "zero_call_bypass_or_pre_call_failure": {
+            "cases": 9,
+            "cleanup_s": {
+              "available_cases": 9,
+              "expected_cases": 9,
+              "p50_s": 2.38749198615551e-05,
+              "p95_s": 3.7099979817867275e-05,
+              "unavailable_cases": 0
+            },
+            "status_counts": {
+              "ok": 9
+            }
+          }
+        },
+        "cleanup_s": {
+          "available_cases": 95,
+          "expected_cases": 96,
+          "p50_s": 0.5081032910384238,
+          "p95_s": 3.649672687333077,
+          "unavailable_cases": 1
+        },
+        "expected_cases": 96,
+        "length_limit_calls": 0,
+        "mode_counts": {
+          "code": 12,
+          "default": 38,
+          "other_or_unavailable": 1,
+          "terminal": 45
+        },
+        "native_calls_marked_partial": 0,
+        "recorded_cases": 96,
+        "status_counts": {
+          "cleanup_fallback": 3,
+          "missing": 0,
+          "ok": 92,
+          "stt_failed": 1
+        }
+      },
+      "binary_sha256": null,
+      "case_files_sha256": "e2cebebd7913ac209564dba927339b18b7d6968faab0fb110889afe0b7ed65dc",
+      "english_cases": {
+        "call_categories": {
+          "model_work": {
+            "cases": 85,
+            "cleanup_s": {
+              "available_cases": 85,
+              "expected_cases": 85,
+              "p50_s": 0.5974048748612404,
+              "p95_s": 3.658247166359797,
+              "unavailable_cases": 0
+            },
+            "status_counts": {
+              "cleanup_fallback": 3,
+              "ok": 82
+            }
+          },
+          "not_attempted_or_unknown": {
+            "cases": 0,
+            "cleanup_s": {
+              "available_cases": 0,
+              "expected_cases": 0,
+              "p50_s": null,
+              "p95_s": null,
+              "unavailable_cases": 0
+            },
+            "status_counts": {}
+          },
+          "zero_call_bypass_or_pre_call_failure": {
+            "cases": 5,
+            "cleanup_s": {
+              "available_cases": 5,
+              "expected_cases": 5,
+              "p50_s": 2.4834182113409042e-05,
+              "p95_s": 4.067495465278625e-05,
+              "unavailable_cases": 0
+            },
+            "status_counts": {
+              "ok": 5
+            }
+          }
+        },
+        "cleanup_s": {
+          "available_cases": 90,
+          "expected_cases": 90,
+          "p50_s": 0.5433145835995674,
+          "p95_s": 3.653959926846437,
+          "unavailable_cases": 0
+        },
+        "expected_cases": 90,
+        "length_limit_calls": 0,
+        "mode_counts": {
+          "code": 12,
+          "default": 37,
+          "terminal": 41
+        },
+        "native_calls_marked_partial": 0,
+        "recorded_cases": 90,
+        "status_counts": {
+          "cleanup_fallback": 3,
+          "missing": 0,
+          "ok": 87
+        }
+      },
+      "manifest_mode_counts": {
+        "code": 12,
+        "default": 38,
+        "terminal": 46
+      },
+      "metadata_sha256": "41d3b20aae4f98b3a65361d16afa67a9ac68fba61c397c4b468b17975390a2b6",
+      "model_identity_sha256": "4366deaa322c156593ebdfd8b7d7d28555e837c72c43c5835be14c31fb1121cf",
+      "resources": {
+        "case_mlx_allocator_maxima_bytes": {
+          "mlx_active_bytes": 4761296394,
+          "mlx_cache_bytes": 544032080,
+          "mlx_peak_bytes": 5500491184
+        },
+        "controller_case_peak_rss_bytes": 1411842048,
+        "controller_end_samples": [
+          {
+            "current_bytes": 5798205849,
+            "mlx_allocator_bytes": {
+              "mlx_active_bytes": 4761296394,
+              "mlx_cache_bytes": 372026352,
+              "mlx_peak_bytes": 5500491184
+            },
+            "peak_bytes": 6657199308,
+            "peak_rss_bytes": 1411842048,
+            "vmmap_exit_code": 0
+          }
+        ],
+        "interpretation": "Null or empty means unavailable. vmmap rounded units converted with 1024 scaling; separate process observations are not summed. RSS and MLX allocation are distinct; peaks describe process lifetime, not app RAM requirements.",
+        "native_after_recovery_pass_count": 0,
+        "native_before_recovery_pass_count": 0,
+        "native_session_count": 0,
+        "native_session_nonzero_exit_count": 0,
+        "source_sha256": [
+          "0b7822c7fdf684aec55589113d5170c93ed1731dbefc2f002f657f50c7a699db"
+        ],
+        "supervisor_end_samples": [],
+        "worker_end_samples": [],
+        "worker_sampled_peak_rss_bytes": null
+      },
+      "runtime_controls": {
+        "context_tokens": null,
+        "copy_draft_tokens": 3,
+        "decoder": null,
+        "max_input_tokens": null,
+        "max_output_tokens": null,
+        "mlx_allocator_cache_limit_bytes": 536870912,
+        "prefill_batch": null,
+        "prefix_cache": null,
+        "student_prefix_cache": null,
+        "trace": false
+      },
+      "source_identity_sha256": "3493ca714a2d36988d833059042ed429e2d67967486cce6ffa23a7fbdf4741eb"
+    }
+  },
+  "schema": 1
+}

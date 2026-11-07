@@ -1,0 +1,56 @@
+{
+  "case_level_counts_per_arm": {
+    "candidate": {
+      "additions": 0,
+      "cases": 305,
+      "deletions": 4,
+      "mechanically_unchanged": 178,
+      "numbers_or_identifiers_changed": 14,
+      "statuses": {
+        "cleanup_partial": 1,
+        "ok": 304
+      },
+      "unavailable_text": 0,
+      "uncertain": 75,
+      "unresolved_clear_repair": 7
+    },
+    "native_c": {
+      "additions": 7,
+      "cases": 305,
+      "deletions": 7,
+      "mechanically_unchanged": 133,
+      "numbers_or_identifiers_changed": 15,
+      "statuses": {
+        "cleanup_fallback": 3,
+        "cleanup_partial": 5,
+        "ok": 297
+      },
+      "unavailable_text": 0,
+      "uncertain": 75,
+      "unresolved_clear_repair": 5
+    },
+    "production_4b3": {
+      "additions": 10,
+      "cases": 305,
+      "deletions": 12,
+      "mechanically_unchanged": 50,
+      "numbers_or_identifiers_changed": 18,
+      "statuses": {
+        "cleanup_fallback": 2,
+        "ok": 303
+      },
+      "unavailable_text": 0,
+      "uncertain": 94,
+      "unresolved_clear_repair": 8
+    }
+  },
+  "cases": 305,
+  "limitations": [
+    "Byte equality is mechanical, not a quality or repair pass.",
+    "Source text alone cannot establish ASR accuracy or intended words.",
+    "Flags are source-supported reviewer judgments, not end-to-end accuracy and not directly comparable with the 300 supported-reference scores."
+  ],
+  "reviewed_groups": 711,
+  "schema": 1,
+  "scope": "Source-only text audit of 305 cases with uncertain references; no references or audio used. Every group, including unchanged and fallback groups, reviewed."
+}

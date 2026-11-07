@@ -1,0 +1,15 @@
+{
+  "rows": 160,
+  "counts": {
+    "approved": 154,
+    "rejected": 6
+  },
+  "target_edits": 11,
+  "input_sha256": "f224dab19881bbd41be153cc25bd1a8de6537ca8113c0281dd84c7e052864a7b",
+  "output_sha256": "f2a3701788f1ed04563c6389c7e19e42ae866d0b7f63e53f2b252c4349ac871a",
+  "immutable_fields": "All original fields except target and quality_review checked identical in order; terminal targets equal raw.",
+  "context_checks": "Read all current and previous context text; checked target against current raw for imported names, numbers, pronoun expansions, and unsupported facts. 64 context rows use exact supplied previous-piece suffix. No approved target relies on prior-piece content.",
+  "regional_cues": "Cues checked for presence in raw; presence alone is not native-speaker certification. Regional appropriateness remains uncertain for synthetic examples.",
+  "coverage_limits": "35 scenario groups, not 160 independent scenarios. Text-only synthetic review, not audio or native-speaker certification.",
+  "method": "Independent full pair review by Terra in pages of 16, respecting stock mode instructions and vocabulary decoys; ambiguous cases rejected and unambiguous targets corrected."
+}

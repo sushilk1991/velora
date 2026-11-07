@@ -1,0 +1,11 @@
+# English cleanup data: large (E)
+
+This is the frozen public English-only E dataset: **7,631 rows**, with **6,204 train** and **1,427 dev**. The original 3,101 D rows are a byte-preserved prefix with their original splits. `reviewed.jsonl`, `sources.json` and `curation.json` are exact copies of the frozen artifacts.
+
+Across the four new public-raw proposal batches, 2,839 of 3,072 teacher proposals were approved and 233 rejected; the reviewer edited 403 proposed targets. The three new genuine synthetic batches yielded 500 approved of 512 proposed. These are review-stage counts before final curation, not independent evaluation results. E contains 3,332 exact identity rows, 79 rows with scenario context and 4,492 effective connected components. Identity rows are derived from approved parent targets; they do not represent independent raw cases. The effective component count differs from the count of distinct stored scenario-group labels.
+
+Local records identify Muse as teacher and Terra as reviewer for the new batches. The `provenance/` manifests and summaries preserve the recorded counts and source hashes; these are text-only model-assisted reviews, not human, audio, or native-speaker certification. No E row names Qwen as its teacher. No evaluation predictions or private dictation are included.
+
+`sources.json` is the frozen training ledger. It retains the original declared source licenses, including MIT for Sotto-derived rows, CC0 for the named new synthetic sources, and `project-generated` for older project sources; do not treat the entire dataset as CC0. `sources-prompt-isolation.json` is a separate audited ledger with 137 exact nonempty generic instruction templates. Both D and E passed validation with their respective opt-in ledgers against the full 779-case heldout union, as recorded in `prompt-isolation-audit.json`; their frozen model inputs remain unchanged. That validation does not establish model quality.
+
+The frozen curation report's `review_status` is a historical assertion, not a validator guarantee: validation checks declared provenance and, for approved additions, distinct teacher and reviewer strings; it cannot prove reviewer type or actual independence. The public challenge is reserved for final evaluation and must not be used for training or checkpoint selection.

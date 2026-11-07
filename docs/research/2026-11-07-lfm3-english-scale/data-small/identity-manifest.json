@@ -1,0 +1,8 @@
+{
+  "parents": 768,
+  "identity_rows": 721,
+  "rule": "exactcleanedtarget copied asinputandoutput afterindependentparentapproval; group/promptunchanged; notnewindependentfamilies",
+  "source_license": "MIT inheritedpublicSotto",
+  "newsynthetic": 192,
+  "approved_beforecuration": 1635
+}

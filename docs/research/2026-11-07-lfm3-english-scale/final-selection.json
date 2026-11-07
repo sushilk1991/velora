@@ -1,0 +1,120 @@
+{
+  "schema": 1,
+  "selected": {
+    "arm": "parent",
+    "recipe": "G cold",
+    "checkpoint_examples": 6144,
+    "adapter_sha256": "a5b141b7e5b261f04f5888d7943bd2a0c2c6d1e3de7e32a0df10040a390c2dd4",
+    "full_dev_loss_in_f_rescore": 0.047588273882865906,
+    "global_parent_selection_loss": 0.047588251531124115,
+    "selection": "F candidates failed the frozen required-repair guard; retained the minimum-loss D/E/G parent."
+  },
+  "full_dev": {
+    "examples": 1427,
+    "method": "answer-token loss on the same full development split; lower is better",
+    "checkpoints": {
+      "parent": {
+        "adapter_sha256": "a5b141b7e5b261f04f5888d7943bd2a0c2c6d1e3de7e32a0df10040a390c2dd4",
+        "full_dev_loss": 0.047588273882865906
+      },
+      "f1000": {
+        "adapter_sha256": "2ed26595ea0542ec940dfafbf1f8c5d00c89797e8b72f0fcb4d89b652d93702d",
+        "full_dev_loss": 0.04931315407156944
+      },
+      "f2000": {
+        "adapter_sha256": "e8f0f2c6256f2387f8f28f6e8222d046293d495da6da2055bb52b1adca41bd0e",
+        "full_dev_loss": 0.04942508786916733
+      }
+    }
+  },
+  "strict_development_probe": {
+    "examples": 192,
+    "supported_examples": 185,
+    "required_repairs": 43,
+    "no_edit_examples": 86,
+    "protected_literal_examples": 81,
+    "method": "strict normalized lexical target equality plus case-sensitive protected literals; no semantic equivalence overrides",
+    "arms": {
+      "c": {
+        "supported": 185,
+        "complete": 185,
+        "repair_required": 43,
+        "repair_success": 30,
+        "no_edit_cases": 86,
+        "no_edit_exact": 76,
+        "literal_cases": 81,
+        "literal_intact": 71
+      },
+      "parent": {
+        "supported": 185,
+        "complete": 185,
+        "repair_required": 43,
+        "repair_success": 33,
+        "no_edit_cases": 86,
+        "no_edit_exact": 83,
+        "literal_cases": 81,
+        "literal_intact": 79
+      },
+      "f1000": {
+        "supported": 185,
+        "complete": 185,
+        "repair_required": 43,
+        "repair_success": 32,
+        "no_edit_cases": 86,
+        "no_edit_exact": 84,
+        "literal_cases": 81,
+        "literal_intact": 80
+      },
+      "f2000": {
+        "supported": 185,
+        "complete": 185,
+        "repair_required": 43,
+        "repair_success": 32,
+        "no_edit_cases": 86,
+        "no_edit_exact": 84,
+        "literal_cases": 81,
+        "literal_intact": 80
+      }
+    },
+    "f_eligibility": {
+      "f1000": {
+        "complete_185": true,
+        "repair_at_least_c_and_parent": false,
+        "literal_intact_at_least_parent": true,
+        "no_edit_strictly_exceeds_parent": true,
+        "eligible": false,
+        "repair_new_failures_vs_parent_count": 1,
+        "repair_new_failures_vs_c_count": 3
+      },
+      "f2000": {
+        "complete_185": true,
+        "repair_at_least_c_and_parent": false,
+        "literal_intact_at_least_parent": true,
+        "no_edit_strictly_exceeds_parent": true,
+        "eligible": false,
+        "repair_new_failures_vs_parent_count": 1,
+        "repair_new_failures_vs_c_count": 3
+      }
+    }
+  },
+  "f_training": {
+    "status": "complete",
+    "training_examples": 2000,
+    "learning_rate": 1e-06,
+    "elapsed_seconds": 729.3907,
+    "peak_mlx_memory_bytes": 3977281252,
+    "peak_scope": "MLX reported peak allocation, not system or process resident memory",
+    "last_adapter_sha256": "e8f0f2c6256f2387f8f28f6e8222d046293d495da6da2055bb52b1adca41bd0e"
+  },
+  "provenance": {
+    "private_selection_receipt_sha256": "05116b0e04df32616c4fa1d09bdca4250ab74ce061abf4ce6d914f67be0fb5a2",
+    "strict_score_sha256": "77d92c96d8c3d773f4de4878281e419e7c02338b358ae8d2a6e42032e059e67c",
+    "probe_data_sha256": "e412844303fb6520f9b309e399262e539ddfed345f70518ddeed637abe98f69a",
+    "selection_rule_sha256": "0b9b907c2f02988b4cc730ac4ae09ca7931eaae46c490a9709b05fe6f0c648f7"
+  },
+  "limits": [
+    "Strict probe was used for development selection; it is not untouched generalization or semantic certification.",
+    "Both F checkpoints increased exact no-edit preservation by one case but lost one required repair versus the parent, so neither passed.",
+    "Four training recipes were completed; F ended before the 2026-11-07 08:35:59 UTC self-limit. Verification after that deadline is reported separately."
+  ]
+}

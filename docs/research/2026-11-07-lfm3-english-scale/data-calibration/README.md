@@ -1,0 +1,7 @@
+# Optional preservation calibration subset (F)
+
+This frozen subset contains 2,000 training rows from E: 1,500 exact identities and 500 changed examples with an explicit correction cue. The cue is a deterministic selection feature, not an independently verified repair label. It includes the same 1,427 development rows as E, for a total of 3,427 rows. No new target was generated and no heldout row was moved into training.
+
+Selection hashes the fixed seed `F-calibration-v1` plus each row ID and takes the first 1,500 identity and 500 changed-cue training rows. Changed-cue selection uses the case-insensitive word-boundary pattern `sorry|rather|correction|i mean|no wait|actually|scratch that|make that`. `freeze.json` records the exact input hash and training recipe; `selection-rule.json` records the development-only acceptance objective, frozen before E development predictions or fresh quality inspection. This stage is optional and does not imply a selected model or an improvement.
+
+The source licenses and reviewed provenance are inherited from E, with the unchanged ledger copied as `sources.json`. Derived identities remain linked source families. The larger [dataset README](../data-large/README.md) and [challenge scope](../challenge/README.md) describe the source reviews, historical and stronger guard ledgers, and the incomplete publication of the 779-case exclusion union. Do not treat this subset as additional independent training data or as an untouched evaluation benchmark.

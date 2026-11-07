@@ -1,0 +1,28 @@
+{
+  "source_path": ".context/compound-engineering/ce-optimize/public-cleanup-student/sotto-acquired-raw.jsonl",
+  "source_sha256": "8ae733269c7471a027c690daa2bea7268d228ebbfcb81ac50323a93c2c234f79",
+  "source_revision": "183cc8fd58532f13fa192980185214de1bcd5acc",
+  "upstream_targets_used": false,
+  "filtered_pool": {
+    "short": 97083,
+    "medium": 3466,
+    "long": 1658
+  },
+  "selected": 6144,
+  "selected_lengths": {
+    "short": 3072,
+    "long": 768,
+    "medium": 2304
+  },
+  "selection": "fixedSHAordering and lengthstrata; excludes existing training/guard exact8gram; languageheuristic only independentreview required",
+  "files": {
+    "muse-natural-02/raw-inputs.jsonl": "26df76d98439abb819284f851b6a8fe5939d8b9c1d018a725d2d1d02d214e086",
+    "muse-natural-05/raw-inputs.jsonl": "40798398a05721eb3f14286fa18e806a76fb8bc38c6a3e67669ebcbd1778f3de",
+    "muse-natural-04/raw-inputs.jsonl": "9bbf0d590bcd95f93443d633f001522cb55e08a51c1a1774607c0199abae3636",
+    "muse-natural-03/raw-inputs.jsonl": "f0dd8def29bbbd64417f3ab38516c71187d00a945919c798822bab2a84eee409",
+    "muse-natural-06/raw-inputs.jsonl": "a664a40e4226bf8689dd5013b8f070c32d608e7a92848bc5fae3388ab34a03ab",
+    "muse-natural-01/raw-inputs.jsonl": "ace2308a5098381d062f2324743c2088fcf45249d00bb201a0c30fdff81a730a",
+    "muse-natural-08/raw-inputs.jsonl": "cb671be644eea51643f46647fd5f925296e5c76e39c829ef8e420c24aa2ceb12",
+    "muse-natural-07/raw-inputs.jsonl": "d6f38843e4f6dcee235851dd4b0026243e6416f03d0855095d886184ee781826"
+  }
+}

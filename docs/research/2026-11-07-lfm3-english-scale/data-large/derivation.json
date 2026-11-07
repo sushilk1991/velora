@@ -1,0 +1,9 @@
+{
+  "new_public_raw_proposals": 2304,
+  "identity_companions": 2112,
+  "synthetic_proposals": 320,
+  "identity_rule": "Sameprompt/familyandexactapprovedparenttarget,notindependentfamilies",
+  "originalDprefix_required": true,
+  "data_complete_at_utc": "2026-11-07T03:51:46.825432+00:00",
+  "freshpredictioncontent_used": false
+}

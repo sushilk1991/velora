@@ -1,0 +1,153 @@
+{
+  "schema": 1,
+  "scope": "Development-only16emailcases:14stockinstructionchanges plus2unchanged custom/empty controls; nine frozen model/renderer/prompt arms. No universal quality or live-app accuracy claim.",
+  "arms": {
+    "4b-prod-old": {
+      "cases": 16,
+      "material_error": 0,
+      "introduced_content": 0,
+      "unsupported_identity": 0,
+      "invented_greeting": 0,
+      "invented_signoff": 0,
+      "invented_subject": 0,
+      "substantive_omission": 0,
+      "mode_format_violation": 6,
+      "uncertain": 2
+    },
+    "c-name-control": {
+      "cases": 16,
+      "material_error": 5,
+      "introduced_content": 4,
+      "unsupported_identity": 4,
+      "invented_greeting": 0,
+      "invented_signoff": 4,
+      "invented_subject": 0,
+      "substantive_omission": 0,
+      "mode_format_violation": 5,
+      "uncertain": 1
+    },
+    "4b-common-new": {
+      "cases": 16,
+      "material_error": 1,
+      "introduced_content": 10,
+      "unsupported_identity": 0,
+      "invented_greeting": 1,
+      "invented_signoff": 3,
+      "invented_subject": 10,
+      "substantive_omission": 1,
+      "mode_format_violation": 15,
+      "uncertain": 1
+    },
+    "c-new": {
+      "cases": 16,
+      "material_error": 1,
+      "introduced_content": 4,
+      "unsupported_identity": 0,
+      "invented_greeting": 0,
+      "invented_signoff": 3,
+      "invented_subject": 0,
+      "substantive_omission": 0,
+      "mode_format_violation": 5,
+      "uncertain": 1
+    },
+    "g-new": {
+      "cases": 16,
+      "material_error": 0,
+      "introduced_content": 0,
+      "unsupported_identity": 0,
+      "invented_greeting": 0,
+      "invented_signoff": 0,
+      "invented_subject": 0,
+      "substantive_omission": 0,
+      "mode_format_violation": 0,
+      "uncertain": 1
+    },
+    "g-old": {
+      "cases": 16,
+      "material_error": 0,
+      "introduced_content": 0,
+      "unsupported_identity": 0,
+      "invented_greeting": 0,
+      "invented_signoff": 0,
+      "invented_subject": 0,
+      "substantive_omission": 0,
+      "mode_format_violation": 0,
+      "uncertain": 1
+    },
+    "4b-prod-new": {
+      "cases": 16,
+      "material_error": 0,
+      "introduced_content": 0,
+      "unsupported_identity": 0,
+      "invented_greeting": 0,
+      "invented_signoff": 0,
+      "invented_subject": 0,
+      "substantive_omission": 0,
+      "mode_format_violation": 6,
+      "uncertain": 2
+    },
+    "c-old": {
+      "cases": 16,
+      "material_error": 5,
+      "introduced_content": 4,
+      "unsupported_identity": 4,
+      "invented_greeting": 0,
+      "invented_signoff": 4,
+      "invented_subject": 0,
+      "substantive_omission": 0,
+      "mode_format_violation": 5,
+      "uncertain": 1
+    },
+    "4b-common-old": {
+      "cases": 16,
+      "material_error": 3,
+      "introduced_content": 10,
+      "unsupported_identity": 3,
+      "invented_greeting": 2,
+      "invented_signoff": 3,
+      "invented_subject": 10,
+      "substantive_omission": 0,
+      "mode_format_violation": 11,
+      "uncertain": 2
+    }
+  },
+  "paired": {
+    "c": {
+      "fixed_material_cases": 4,
+      "new_material_cases": 0
+    },
+    "4b-common": {
+      "fixed_material_cases": 3,
+      "new_material_cases": 1
+    },
+    "4b-prod": {
+      "fixed_material_cases": 0,
+      "new_material_cases": 0
+    },
+    "g": {
+      "fixed_material_cases": 0,
+      "new_material_cases": 0
+    }
+  },
+  "repeatability_c_old": 16,
+  "name_substitution_control": {
+    "novel_example_name": "Zorvellan",
+    "outputs_containing_novel_name": 4,
+    "novel_name_absent_from_raw_targets_vocabulary": true,
+    "interpretation": "Changing only a conditional example sender changes the invented identity; examples can leak into output."
+  },
+  "decision": "Remove named examples while preserving conditional formatting and no-invention rule. Current production-renderer and selectedG material0to0; C inventedidentities4to0. Student-renderer4B hasone newomission despite netmaterial3to1; it is nottheproductionrenderer.",
+  "review_sha256": "4623c775c4fecbd8554e4c35c15c00034acd20691237f044b8272d0caebd85f3",
+  "packet_sha256": "a3866dc68ba3e76684d676d1c09c295cd1313f4908c060685d94aba3444a747e",
+  "source_outputs_sha256": {
+    "c-old": "4158b6fef7a8967d6a12e3675f0b8f7dd76db197f0a37ce2c82b452a33e05792",
+    "c-new": "755530b518a8da9b8911b775cabd5c03700b30b25471b40404a9c547fa6516f2",
+    "4b-common-old": "bd630f3548f6958e90f2f082c8b8c3a93539e47e69cfd9ad47505f3960c89f25",
+    "4b-common-new": "369f89cffdf181a299575985ef3853bc507b685b2b04e0f82dd49d109ccad597",
+    "g-old": "a96325d4ff4053a242a49f40fefaccea1c1a1cf110fcc2ce95d95379cdf80872",
+    "g-new": "07faef3b80ad25c98f4c9aef1a605b15ca97c90efc067ae521469cb943dc1cc9",
+    "4b-prod-old": "b7d512fa7ebf80baecea29df67fb0d65ab05363975216e08a4ab832b6da118fe",
+    "4b-prod-new": "aacc47447691d8c32067576ebaf28c26c446b1e0606c0c35276176b823850261",
+    "c-name-control": "c185565cff5be41fcca73295527d796821f25755c068ed2ee83720023e1682c8"
+  }
+}

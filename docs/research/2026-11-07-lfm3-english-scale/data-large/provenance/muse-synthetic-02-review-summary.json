@@ -1,0 +1,14 @@
+{
+  "rows": 192,
+  "counts": {
+    "approved": 187,
+    "rejected": 5
+  },
+  "target_edits": 18,
+  "input_sha256": "4159222e72f51e6471fd40fc4bffef711a09fa1ae53c0cadcb3f20434c4e0109",
+  "output_sha256": "648dc29794f9ce5566569aaa8624a7a55fdbc7beaa6a7d79cf90d3721befc108",
+  "method": "Independent text review by Terra of each raw/target pair and cue against actual stock mode instructions; edits restricted to unambiguous corrections, and ambiguous cases rejected. No audio or human certification.",
+  "regional_cues": "Every stated cue appears in its raw text, case-insensitively; cue presence does not certify speaker region.",
+  "coverage_limits": "No exact raw duplicates and scenario group names are unique, but there are similar synthetic families across modes: plant-watering long cases 0037/0142, tiffin-delivery emails 0105/0125, and a sequence of title-cased short messages 0089\u20130096. Distinct IDs and unique group labels do not establish independent scale or linguistic diversity.",
+  "generated_assumptions": "Cases are synthetic and often associate one regional word with an otherwise generic scenario; regional labels are supplied metadata, not verified speaker origin. The mate/mates possessive and correction scopes remain ambiguous in rejected examples."
+}

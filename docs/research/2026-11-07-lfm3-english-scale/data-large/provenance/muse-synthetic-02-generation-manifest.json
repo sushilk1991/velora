@@ -1,0 +1,68 @@
+{
+  "batch": "s02",
+  "language": "en",
+  "count": 192,
+  "teacher": {
+    "name": "Muse",
+    "revision": "muse-wonder-1.0",
+    "actual_model_identity": "muse-wonder-1.0 (Muse Code)"
+  },
+  "source": {
+    "name": "velora-muse-english-v6",
+    "revision": "20261107-s02",
+    "license": "CC0-1.0"
+  },
+  "modes": {
+    "terminal": 32,
+    "default": 32,
+    "message": 32,
+    "email": 32,
+    "note": 32,
+    "code": 32
+  },
+  "mode_note": "6 production modes x32 (default,message,email,note,code,terminal); stock 'raw' pseudo-mode with empty prompt excluded",
+  "english_variants": {
+    "US": 32,
+    "British": 32,
+    "Indian": 32,
+    "Australian": 32,
+    "Canadian": 32,
+    "informal-international": 32
+  },
+  "edit_policies": {
+    "no_edit": 48,
+    "minimal": 64,
+    "repair": 48,
+    "mode": 32
+  },
+  "vocabulary_rows": 35,
+  "long_rows_100_180_words": 16,
+  "unique_ids": 192,
+  "unique_scenario_groups": 192,
+  "unique_raws": 192,
+  "unique_targets": 192,
+  "terminal_target_equals_raw": 32,
+  "no_edit_target_equals_raw": 48,
+  "candidates_sha256": "4159222e72f51e6471fd40fc4bffef711a09fa1ae53c0cadcb3f20434c4e0109",
+  "quality_review": {
+    "status": "generated",
+    "reviewer": "pending-independent-review",
+    "note": "Metadata is not approval; no independent review performed in this generation pass."
+  },
+  "self_check": {
+    "instructions_exact_stock_prompt": true,
+    "regional_cues_verbatim_in_raw": true,
+    "artificial_numbered_filler_found": false,
+    "message_targets_ending_period": 0,
+    "code_targets_ending_period": 0
+  },
+  "gaps": [
+    "Independent human review pending; generated label is not approval.",
+    "192 scenario_groups are author-declared distinct families, not independently audited family count.",
+    "Regional variants are intended lexical strata in text, not acoustic accent evidence."
+  ],
+  "files": [
+    "candidates.jsonl",
+    "generation-manifest.json"
+  ]
+}

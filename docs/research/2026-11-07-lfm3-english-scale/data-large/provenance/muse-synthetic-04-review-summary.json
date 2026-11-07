@@ -1,0 +1,14 @@
+{
+  "rows": 160,
+  "counts": {
+    "approved": 159,
+    "rejected": 1
+  },
+  "target_edits": 11,
+  "input_sha256": "0e75b2b4f59733a236d30585d79c56ec85d76c40b6d1c02e67445ec7004fd7e0",
+  "output_sha256": "4a75f46b4da8b2c15cd6984a1901d2d9700f563635cb4a2b37de317aa449ba9d",
+  "immutable_fields_sha256": "48c688e34e67457ca23ee2ccfbed036200e6833e48f45e9c6a634b7a3309ef35",
+  "validation": "All original fields except target and quality_review are identical in order; terminal targets equal raw. Reviewed 16 prior-piece context examples against current raw: no approved target imports context facts. Context suffixes match.",
+  "coverage_limits": "48 contrast pairs plus 16 spelling pairs and 32 independent examples; not 160 independent scenarios. Text-only synthetic review is not audio or native-speaker certification.",
+  "method": "Terra independently read all 160 pairs in pages of 16, including long-form cases, comparing stock and custom spelling instructions; corrected unambiguous labels and rejected ambiguous program/programme context."
+}

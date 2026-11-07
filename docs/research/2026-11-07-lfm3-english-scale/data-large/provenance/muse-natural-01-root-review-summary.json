@@ -1,0 +1,11 @@
+{
+  "rows": 768,
+  "reviews": {
+    "rejected": 41,
+    "approved": 727
+  },
+  "target_edits": 99,
+  "sha256": "9cec662b62ed97a04d702a7725b39d87060b71f5ddf39fd285e593fbe5bff64e",
+  "independence": "Muse teacher/Terra independent fulltextreview; not human/audio certification",
+  "mode_instructions": "actualstockprompts attachedbeforereview"
+}

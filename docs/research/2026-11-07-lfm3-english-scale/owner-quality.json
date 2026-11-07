@@ -1,0 +1,345 @@
+{
+  "arms": {
+    "candidate": {
+      "acceptable": 231,
+      "ambiguous": 63,
+      "cases": 300,
+      "cleanup_introduced_error": 42,
+      "inherited_asr_error": 44,
+      "material_error": 45,
+      "scores": {
+        "1": 1,
+        "2": 2,
+        "3": 47,
+        "4": 63,
+        "5": 187
+      },
+      "statuses": {
+        "ok": 300
+      }
+    },
+    "native_c": {
+      "acceptable": 229,
+      "ambiguous": 64,
+      "cases": 300,
+      "cleanup_introduced_error": 50,
+      "inherited_asr_error": 44,
+      "material_error": 46,
+      "scores": {
+        "1": 1,
+        "2": 3,
+        "3": 46,
+        "4": 67,
+        "5": 183
+      },
+      "statuses": {
+        "cleanup_fallback": 2,
+        "ok": 298
+      }
+    },
+    "production_4b3": {
+      "acceptable": 212,
+      "ambiguous": 62,
+      "cases": 300,
+      "cleanup_introduced_error": 71,
+      "inherited_asr_error": 42,
+      "material_error": 47,
+      "scores": {
+        "1": 1,
+        "2": 3,
+        "3": 48,
+        "4": 75,
+        "5": 173
+      },
+      "statuses": {
+        "cleanup_fallback": 4,
+        "ok": 296
+      }
+    }
+  },
+  "cases": 300,
+  "judgments": 900,
+  "limitations": [
+    "One reviewer per case; no inter-rater estimate.",
+    "Ambiguous cases remain in all-case counts and are separately reported; no unreviewed cases treated as pass.",
+    "Scores combine material fidelity and format; material-error and cleanup-introduced flags are reported independently.",
+    "Do not infer population-wide accuracy or causal backend-only differences from this cohort."
+  ],
+  "paired_candidate_vs": {
+    "native_c": {
+      "all_cases": {
+        "acceptable": {
+          "candidate_only_better": 7,
+          "comparator_only_better": 5,
+          "same": 288
+        },
+        "cases": 300,
+        "no_cleanup_introduced_error": {
+          "candidate_only_better": 12,
+          "comparator_only_better": 4,
+          "same": 284
+        },
+        "no_material_error": {
+          "candidate_only_better": 3,
+          "comparator_only_better": 2,
+          "same": 295
+        },
+        "score": {
+          "candidate_higher": 11,
+          "comparator_higher": 7,
+          "equal": 282
+        }
+      },
+      "both_not_ambiguous": {
+        "acceptable": {
+          "candidate_only_better": 7,
+          "comparator_only_better": 4,
+          "same": 225
+        },
+        "cases": 236,
+        "no_cleanup_introduced_error": {
+          "candidate_only_better": 10,
+          "comparator_only_better": 3,
+          "same": 223
+        },
+        "no_material_error": {
+          "candidate_only_better": 3,
+          "comparator_only_better": 2,
+          "same": 231
+        },
+        "score": {
+          "candidate_higher": 10,
+          "comparator_higher": 6,
+          "equal": 220
+        }
+      }
+    },
+    "production_4b3": {
+      "all_cases": {
+        "acceptable": {
+          "candidate_only_better": 25,
+          "comparator_only_better": 6,
+          "same": 269
+        },
+        "cases": 300,
+        "no_cleanup_introduced_error": {
+          "candidate_only_better": 34,
+          "comparator_only_better": 5,
+          "same": 261
+        },
+        "no_material_error": {
+          "candidate_only_better": 8,
+          "comparator_only_better": 6,
+          "same": 286
+        },
+        "score": {
+          "candidate_higher": 32,
+          "comparator_higher": 15,
+          "equal": 253
+        }
+      },
+      "both_not_ambiguous": {
+        "acceptable": {
+          "candidate_only_better": 22,
+          "comparator_only_better": 3,
+          "same": 210
+        },
+        "cases": 235,
+        "no_cleanup_introduced_error": {
+          "candidate_only_better": 28,
+          "comparator_only_better": 3,
+          "same": 204
+        },
+        "no_material_error": {
+          "candidate_only_better": 8,
+          "comparator_only_better": 3,
+          "same": 224
+        },
+        "score": {
+          "candidate_higher": 30,
+          "comparator_higher": 12,
+          "equal": 193
+        }
+      }
+    }
+  },
+  "per_mode": {
+    "code": {
+      "candidate": {
+        "acceptable": 5,
+        "ambiguous": 0,
+        "cases": 6,
+        "cleanup_introduced_error": 2,
+        "inherited_asr_error": 0,
+        "material_error": 1,
+        "scores": {
+          "3": 1,
+          "4": 1,
+          "5": 4
+        }
+      },
+      "native_c": {
+        "acceptable": 5,
+        "ambiguous": 0,
+        "cases": 6,
+        "cleanup_introduced_error": 2,
+        "inherited_asr_error": 0,
+        "material_error": 1,
+        "scores": {
+          "3": 1,
+          "4": 1,
+          "5": 4
+        }
+      },
+      "production_4b3": {
+        "acceptable": 5,
+        "ambiguous": 0,
+        "cases": 6,
+        "cleanup_introduced_error": 2,
+        "inherited_asr_error": 0,
+        "material_error": 1,
+        "scores": {
+          "3": 1,
+          "4": 1,
+          "5": 4
+        }
+      }
+    },
+    "default": {
+      "candidate": {
+        "acceptable": 161,
+        "ambiguous": 35,
+        "cases": 189,
+        "cleanup_introduced_error": 2,
+        "inherited_asr_error": 25,
+        "material_error": 27,
+        "scores": {
+          "2": 2,
+          "3": 26,
+          "4": 23,
+          "5": 138
+        }
+      },
+      "native_c": {
+        "acceptable": 160,
+        "ambiguous": 35,
+        "cases": 189,
+        "cleanup_introduced_error": 6,
+        "inherited_asr_error": 25,
+        "material_error": 28,
+        "scores": {
+          "2": 3,
+          "3": 26,
+          "4": 22,
+          "5": 138
+        }
+      },
+      "production_4b3": {
+        "acceptable": 160,
+        "ambiguous": 33,
+        "cases": 189,
+        "cleanup_introduced_error": 5,
+        "inherited_asr_error": 24,
+        "material_error": 28,
+        "scores": {
+          "1": 1,
+          "2": 3,
+          "3": 25,
+          "4": 17,
+          "5": 143
+        }
+      }
+    },
+    "message": {
+      "candidate": {
+        "acceptable": 8,
+        "ambiguous": 5,
+        "cases": 11,
+        "cleanup_introduced_error": 0,
+        "inherited_asr_error": 3,
+        "material_error": 3,
+        "scores": {
+          "3": 3,
+          "4": 3,
+          "5": 5
+        }
+      },
+      "native_c": {
+        "acceptable": 8,
+        "ambiguous": 5,
+        "cases": 11,
+        "cleanup_introduced_error": 0,
+        "inherited_asr_error": 3,
+        "material_error": 3,
+        "scores": {
+          "3": 3,
+          "4": 3,
+          "5": 5
+        }
+      },
+      "production_4b3": {
+        "acceptable": 8,
+        "ambiguous": 5,
+        "cases": 11,
+        "cleanup_introduced_error": 0,
+        "inherited_asr_error": 3,
+        "material_error": 3,
+        "scores": {
+          "3": 3,
+          "4": 2,
+          "5": 6
+        }
+      }
+    },
+    "terminal": {
+      "candidate": {
+        "acceptable": 57,
+        "ambiguous": 23,
+        "cases": 94,
+        "cleanup_introduced_error": 38,
+        "inherited_asr_error": 16,
+        "material_error": 14,
+        "scores": {
+          "1": 1,
+          "3": 17,
+          "4": 36,
+          "5": 40
+        }
+      },
+      "native_c": {
+        "acceptable": 56,
+        "ambiguous": 24,
+        "cases": 94,
+        "cleanup_introduced_error": 42,
+        "inherited_asr_error": 16,
+        "material_error": 14,
+        "scores": {
+          "1": 1,
+          "3": 16,
+          "4": 41,
+          "5": 36
+        }
+      },
+      "production_4b3": {
+        "acceptable": 39,
+        "ambiguous": 24,
+        "cases": 94,
+        "cleanup_introduced_error": 64,
+        "inherited_asr_error": 15,
+        "material_error": 15,
+        "scores": {
+          "3": 19,
+          "4": 55,
+          "5": 20
+        }
+      }
+    }
+  },
+  "schema": 1,
+  "scope": "Blind single-reviewer model-assisted text review of all 300 English cases with approved, non-uncertain references; all three arms and execution statuses retained. References are fallible; no audio adjudication.",
+  "uncertain_reference_source_audit": {
+    "cases": 305,
+    "separate_report": "owner-source-audit.json",
+    "status": "pending at primary publication"
+  }
+}

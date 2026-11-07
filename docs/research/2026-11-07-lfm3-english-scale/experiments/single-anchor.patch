@@ -1,0 +1,202 @@
+--- native/cleanup/benchmark.py
++++ single-anchor-src/benchmark.py
+@@ -2,7 +2,7 @@
+ """Public-data native worker benchmark; requires explicit reserved GPU window."""
+ import argparse,hashlib,json,os,pathlib,selectors,statistics,subprocess,sys,time
+ p=argparse.ArgumentParser();p.add_argument('--binary',required=True);p.add_argument('--model',required=True);p.add_argument('--sha256',required=True);p.add_argument('--data',required=True);p.add_argument('--out',required=True);p.add_argument('--reference-tokens');p.add_argument('--reference-output');p.add_argument('--limit',type=int,default=64);p.add_argument('--context',type=int,default=4096);p.add_argument('--copy-draft',action='store_true');p.add_argument('--prefix-cache',action='store_true');p.add_argument('--verbose',action='store_true');
+-for flag in ('recurrent-rollback','backend-sampling','backend-token-only','direct-argmax','trace-runtime','bounded-swa','student-prefix-cache'):p.add_argument('--'+flag,action='store_true')
++for flag in ('recurrent-rollback','backend-sampling','backend-token-only','direct-argmax','trace-runtime','bounded-swa','student-prefix-cache','copy-single-anchor'):p.add_argument('--'+flag,action='store_true')
+ p.add_argument('--draft-max',type=int,choices=range(1,9),default=3)
+ p.add_argument('--prefill-batch',type=int,choices=(16,32,64,128,256,512),default=128)
+ p.add_argument('--research-long-context',action='store_true')
+@@ -26,7 +26,7 @@
+   reference_output=[json.loads(line) for line in reference_path.read_text().splitlines() if line.strip()]
+   reference_output_meta=json.loads(pathlib.Path(str(reference_path)+'.meta.json').read_text())
+  except (OSError,ValueError,TypeError) as exc:reference_output_error=type(exc).__name__
+-child=subprocess.Popen([sys.executable,str(pathlib.Path(__file__).with_name('supervise.py')),a.binary,a.model,a.sha256,'--context',str(a.context),'--prefill-batch',str(a.prefill_batch),'--max-output-tokens',str(a.max_output_tokens)]+(['--research-long-context'] if a.research_long_context else [])+(['--copy-draft'] if a.copy_draft else [])+(['--prefix-cache'] if a.prefix_cache else [])+(['--verbose'] if a.verbose else [])+['--draft-max',str(a.draft_max)]+['--'+flag for flag in ('recurrent-rollback','backend-sampling','backend-token-only','direct-argmax','trace-runtime','bounded-swa','student-prefix-cache') if getattr(a,flag.replace('-','_'))],stdin=subprocess.PIPE,stdout=subprocess.PIPE,stderr=None,bufsize=0)
++child=subprocess.Popen([sys.executable,str(pathlib.Path(__file__).with_name('supervise.py')),a.binary,a.model,a.sha256,'--context',str(a.context),'--prefill-batch',str(a.prefill_batch),'--max-output-tokens',str(a.max_output_tokens)]+(['--research-long-context'] if a.research_long_context else [])+(['--copy-draft'] if a.copy_draft else [])+(['--prefix-cache'] if a.prefix_cache else [])+(['--verbose'] if a.verbose else [])+['--draft-max',str(a.draft_max)]+['--'+flag for flag in ('recurrent-rollback','backend-sampling','backend-token-only','direct-argmax','trace-runtime','bounded-swa','student-prefix-cache','copy-single-anchor') if getattr(a,flag.replace('-','_'))],stdin=subprocess.PIPE,stdout=subprocess.PIPE,stderr=None,bufsize=0)
+ selector=selectors.DefaultSelector();selector.register(child.stdout,selectors.EVENT_READ);buffer=b'';events=[]
+ def read(timeout=130):
+  global buffer
+@@ -54,7 +54,7 @@
+ meta={'runtime_qualified':False,'model_sha256':a.sha256,'quantization':'official GGUF Q8_0; differs from MLX8bit','data_sha256':hashlib.sha256(pathlib.Path(a.data).read_bytes()).hexdigest(),'copy_draft':a.copy_draft,'draft_max_tokens':a.draft_max,'recurrent_rollback':a.recurrent_rollback,'backend_sampling':a.backend_sampling,'backend_token_only':a.backend_token_only,'direct_argmax':a.direct_argmax,'trace_runtime':a.trace_runtime,'prefix_reuse':a.prefix_cache,'context_tokens':a.context,'verbose':a.verbose,'temperature':0,'max_tokens':256}
+ meta.update(prefill_batch_tokens=a.prefill_batch,research_long_context=a.research_long_context,max_tokens=a.max_tokens,
+             max_output_tokens=a.max_output_tokens,deadline_ms=a.deadline_ms,bounded_swa=a.bounded_swa,
+-            student_prefix_cache=a.student_prefix_cache,
++            student_prefix_cache=a.student_prefix_cache,copy_single_anchor=a.copy_single_anchor,
+             quantization='explicit GGUF artifact identified by SHA256; no inferred quantization or backend-only parity')
+ meta.update(reference_output_supplied=bool(a.reference_output),reference_output_sha256=hashlib.sha256(pathlib.Path(a.reference_output).read_bytes()).hexdigest() if a.reference_output and reference_output_error is None else None,
+             output_reference_parity=False,output_reference_errors=[reference_output_error] if reference_output_error else [],
+@@ -68,6 +68,7 @@
+ try:
+  before=time.perf_counter();meta['ready']=read();meta['load_seconds']=time.perf_counter()-before
+  if meta['ready'].get('event')!='ready':raise RuntimeError('no ready event')
++ if meta['ready'].get('copy_single_anchor',False)!=a.copy_single_anchor:raise RuntimeError('single anchor activation mismatch')
+  if a.student_prefix_cache and meta['ready'].get('student_prefix_cache') is not True:raise RuntimeError('student prefix flag not activated')
+  if a.bounded_swa and (meta['ready'].get('bounded_swa') is not True or meta['ready'].get('swa_full') is not False):raise RuntimeError('bounded SWA flag not activated')
+  warmup=generate(rows[0],'warmup',1);meta['warmup_status']=warmup.get('status','request_error')
+--- native/cleanup/benchmark_checks.py
++++ single-anchor-src/benchmark_checks.py
+@@ -17,7 +17,7 @@
+ def summarize(records,expected):
+     eos=[r for r in records if r['status']=='eos']
+     return {'expected_rows':expected,'attempted_rows':len(records),'eos_rows':len(eos),
+-            'copy_draft_totals':{key:sum((r.get('copy_draft') or {}).get(key,0) for r in records) for key in ['proposed','accepted','rollbacks','forward_calls','forward_tokens']},
++            'copy_draft_totals':{key:sum((r.get('copy_draft') or {}).get(key,0) for r in records) for key in ['proposed','accepted','rollbacks','forward_calls','forward_tokens','single_anchor_candidates','single_anchor_precheck_rejected','single_anchor_verifications','single_anchor_proposed','single_anchor_accepted','single_anchor_rollbacks']},
+             'failed_rows':expected-len(eos),'status_counts':dict(collections.Counter(r['status'] for r in records)),
+             'failed_ids':[r['id'] for r in records if r['status']!='eos'],
+             'all_attempts_timing':timing([r['seconds'] for r in records]),
+--- native/cleanup/copy_draft.h
++++ single-anchor-src/copy_draft.h
+@@ -4,7 +4,7 @@
+ #include <stdexcept>
+ #include <vector>
+ 
+-struct CopyProposal { std::vector<int32_t> tokens; size_t start; };
++struct CopyProposal { std::vector<int32_t> tokens; size_t start; bool single_anchor = false; };
+ // Independently authored alignment policy: prefer the next 3/2-token suffix
+ // occurrence at/after the cursor, otherwise the last earlier occurrence.
+ inline CopyProposal copy_proposal(const std::vector<int32_t> & source,
+@@ -20,6 +20,39 @@
+     }
+     return {{},cursor};
+ }
++// Opt-in only: after normal 2/3-token matching fails and >=2 tokens were
++// emitted, a globally unique exact token may locate a candidate. This does not
++// accept any token: the existing target precheck and batched verifier own that.
++inline CopyProposal copy_proposal_single_anchor(const std::vector<int32_t> & source,
++        const std::vector<int32_t> & output,size_t cursor,size_t limit,bool enabled) {
++    auto normal=copy_proposal(source,output,cursor,limit);
++    if(!enabled || !normal.tokens.empty() || output.size()<2 || !limit)return normal;
++    size_t found=source.size();
++    for(size_t i=0;i<source.size();++i)if(source[i]==output.back()){
++        if(found!=source.size())return {{},cursor};
++        found=i;
++    }
++    if(found==source.size() || found+1==source.size())return {{},cursor};
++    ++found;limit=std::min<size_t>(limit,8);
++    return {{source.begin()+found,source.begin()+std::min(source.size(),found+limit)},found,true};
++}
++inline void single_anchor_selftest(){
++    auto p=copy_proposal_single_anchor({1,2,3,4},{9,2},0,8,true);
++    if(!p.single_anchor || p.start!=2 || p.tokens!=std::vector<int32_t>({3,4}))throw std::runtime_error("single unique");
++    for(auto out: {std::vector<int32_t>{},std::vector<int32_t>{2},std::vector<int32_t>{9,8},std::vector<int32_t>{9,4}})
++        if(!copy_proposal_single_anchor({1,2,3,4},out,0,8,true).tokens.empty())throw std::runtime_error("single short/absent/end");
++    if(!copy_proposal_single_anchor({1,2,3,2},{9,2},0,8,true).tokens.empty())throw std::runtime_error("single ambiguous incl end");
++    if(!copy_proposal_single_anchor({}, {9,2},0,8,true).tokens.empty())throw std::runtime_error("single empty source");
++    if(!copy_proposal_single_anchor({1,2,3,4},{9,2},0,8,false).tokens.empty())throw std::runtime_error("single default off");
++    if(!copy_proposal_single_anchor({1,2,3,4},{9,2},0,0,true).tokens.empty())throw std::runtime_error("single zero cap");
++    if(!copy_proposal_single_anchor({1,2,3,4},{9,22},0,8,true).tokens.empty())throw std::runtime_error("single exact token casing");
++    p=copy_proposal_single_anchor({1,2,3,4},{1,2},0,8,true);
++    if(p.single_anchor || p.tokens!=std::vector<int32_t>({3,4}))throw std::runtime_error("single normal priority");
++    p=copy_proposal_single_anchor({1,2,3,4,5,6,7,8,9,10,11,12},{99,2},0,99,true);
++    if(p.tokens.size()!=8 || p.tokens.back()!=10)throw std::runtime_error("single max8");
++    p=copy_proposal_single_anchor({1,2,3,4},{9,2},99,1,true);
++    if(p.tokens!=std::vector<int32_t>({3}))throw std::runtime_error("single remaining cap");
++}
+ inline size_t verified_copy_prefix(const std::vector<int32_t> & proposed,const std::vector<int32_t> & choices) {
+     if(proposed.size()!=choices.size())throw std::runtime_error("draft verification shape");
+     size_t n=0;while(n<proposed.size() && proposed[n]==choices[n])++n;return n;
+--- native/cleanup/runtime_experiments.h
++++ single-anchor-src/runtime_experiments.h
+@@ -18,7 +18,9 @@
+     int max_output_tokens = 512;
+     bool bounded_swa = false;
+     bool student_prefix_cache = false;
++    bool copy_single_anchor = false;
+     void validate(bool copy) const {
++        if(copy_single_anchor && (!copy || draft_max<2))throw std::runtime_error("copy-single-anchor requires copy-draft and draft-max>=2");
+         if (draft_max < 1 || draft_max > 8) throw std::runtime_error("draft-max must be 1..8");
+         if (recurrent_rollback && (!copy || draft_max < 2))
+             throw std::runtime_error("recurrent rollback requires copy-draft and draft-max >=2");
+--- native/cleanup/supervise.py
++++ single-anchor-src/supervise.py
+@@ -18,7 +18,7 @@
+     p.add_argument('--prefill-batch',type=int,choices=(16,32,64,128,256,512),default=128)
+     p.add_argument('--research-long-context',action='store_true')
+     p.add_argument('--max-output-tokens',type=int,default=512)
+-    for flag in ('recurrent-rollback','backend-sampling','backend-token-only','direct-argmax','trace-runtime','bounded-swa','student-prefix-cache'):p.add_argument('--'+flag,action='store_true')
++    for flag in ('recurrent-rollback','backend-sampling','backend-token-only','direct-argmax','trace-runtime','bounded-swa','student-prefix-cache','copy-single-anchor'):p.add_argument('--'+flag,action='store_true')
+     p.add_argument('--startup-deadline-ms',type=int,default=120000)
+     p.add_argument('--hard-grace-ms',type=int,default=2000)
+     a=p.parse_args()
+@@ -34,7 +34,7 @@
+     flags+=['--draft-max='+str(a.draft_max)]
+     flags+=['--prefill-batch='+str(a.prefill_batch),'--max-output-tokens='+str(a.max_output_tokens)]
+     if a.research_long_context:flags+=['--research-long-context']
+-    flags+=['--'+flag for flag in ('recurrent-rollback','backend-sampling','backend-token-only','direct-argmax','trace-runtime','bounded-swa','student-prefix-cache') if getattr(a,flag.replace('-','_'))]
++    flags+=['--'+flag for flag in ('recurrent-rollback','backend-sampling','backend-token-only','direct-argmax','trace-runtime','bounded-swa','student-prefix-cache','copy-single-anchor') if getattr(a,flag.replace('-','_'))]
+     child=subprocess.Popen([a.binary,a.model,a.sha256,str(a.gpu_layers),str(a.context),str(a.max_rss_mb)]+flags,stdin=subprocess.PIPE,stdout=subprocess.PIPE,stderr=None,start_new_session=True,bufsize=0)
+     selector=selectors.DefaultSelector();input_fd=sys.stdin.fileno();output_fd=sys.stdout.fileno()
+     write_fd=child.stdin.fileno();read_fd=child.stdout.fileno()
+--- native/cleanup/worker.cpp
++++ single-anchor-src/worker.cpp
+@@ -191,7 +191,7 @@
+         if (rss()>control.max_rss) throw std::runtime_error("resident memory limit exceeded during load");
+         emit({{"event","ready"},{"pid",getpid()},{"protocol",1},{"llama_commit",PIN},{"architecture",arch},{"model_sha256",expected},
+               {"template_sha256",hash_text(common_chat_templates_source(templates.get()))},{"vocab_size",llama_vocab_n_tokens(vocab)},
+-              {"context_tokens",ctx},{"batch_tokens",cp.n_batch},{"ubatch_tokens",cp.n_ubatch},{"prefill_batch_tokens",experiments.prefill_batch},{"research_long_context",experiments.research_long_context},{"max_output_tokens",experiments.max_output_tokens},{"max_rss_mb",max_mb},{"rss_bytes",rss()},{"copy_draft",copy_enabled},{"copy_draft_max",experiments.draft_max},{"prefix_reuse",cache_enabled},{"prefix_cache_limit_bytes",prefix_cache.limit()},
++              {"context_tokens",ctx},{"batch_tokens",cp.n_batch},{"ubatch_tokens",cp.n_ubatch},{"prefill_batch_tokens",experiments.prefill_batch},{"research_long_context",experiments.research_long_context},{"max_output_tokens",experiments.max_output_tokens},{"max_rss_mb",max_mb},{"rss_bytes",rss()},{"copy_draft",copy_enabled},{"copy_draft_max",experiments.draft_max},{"copy_single_anchor",experiments.copy_single_anchor},{"prefix_reuse",cache_enabled},{"prefix_cache_limit_bytes",prefix_cache.limit()},
+               {"bounded_swa",experiments.bounded_swa},{"swa_full",cp.swa_full},
+               {"student_prefix_cache",experiments.student_prefix_cache},{"student_prefix_max_tokens",1024},{"student_prefix_alignment","system_prefix_plus_prefill_batches"},
+               {"recurrent_rollback",experiments.recurrent_rollback},{"recurrent_snapshots",llama_n_rs_seq(context.get())},{"sampling",experiments.backend_sampling?"backend_greedy":experiments.direct_argmax?"direct_cpu_argmax":"upstream_cpu_greedy"},{"sampling_output_reserve",cp.n_outputs_max_per_seq},{"backend_token_only",experiments.backend_token_only},{"trace_runtime",experiments.trace}});
+@@ -336,10 +336,12 @@
+             auto expected=sample(greedy.get(),-1);
+             if(trace.enabled && first_decision_ms<0)first_decision_ms=std::chrono::duration<double,std::milli>(Clock::now()-request_start).count();
+             if(llama_vocab_is_eog(vocab,expected))return "eos";
+-            auto proposal=enabled?copy_proposal(source,output,cursor,std::min(experiments.draft_max,q.max_tokens-output.size())):CopyProposal{{},cursor};
++            auto proposal=enabled?copy_proposal_single_anchor(source,output,cursor,std::min(experiments.draft_max,q.max_tokens-output.size()),experiments.copy_single_anchor):CopyProposal{{},cursor};
++            if(proposal.single_anchor)stats["single_anchor_candidates"]=stats["single_anchor_candidates"].get<size_t>()+1;
+             // No draft EOG is eligible for acceptance. The target owns stopping.
+             auto eog=std::find_if(proposal.tokens.begin(),proposal.tokens.end(),[&](auto t){return llama_vocab_is_eog(vocab,t);});proposal.tokens.erase(eog,proposal.tokens.end());
+             if(proposal.tokens.size()<2 || proposal.tokens[0]!=expected){
++                if(proposal.single_anchor)stats["single_anchor_precheck_rejected"]=stats["single_anchor_precheck_rejected"].get<size_t>()+1;
+                 append_token(expected,answer,output);
+                 if(output.size()<size_t(q.max_tokens))decode({expected},n+output.size()-1);
+                 continue;
+@@ -355,6 +357,7 @@
+                 stats["snapshot_saved_bytes"]=stats["snapshot_saved_bytes"].get<size_t>()+bytes;
+             }
+             int position=n+output.size();
++            if(proposal.single_anchor)stats["single_anchor_verifications"]=stats["single_anchor_verifications"].get<size_t>()+1;
+             decode(proposal.tokens,position,true);
+             if(auto reason=control.reason();!reason.empty())throw std::runtime_error(reason);
+             std::vector<llama_token> choices{expected};
+@@ -362,6 +365,11 @@
+                 choices.push_back(sample(greedy.get(),i-1));
+             }
+             size_t accepted=verified_copy_prefix(proposal.tokens,choices);
++            if(proposal.single_anchor){
++                stats["single_anchor_proposed"]=stats["single_anchor_proposed"].get<size_t>()+proposal.tokens.size();
++                stats["single_anchor_accepted"]=stats["single_anchor_accepted"].get<size_t>()+accepted;
++                if(accepted<proposal.tokens.size())stats["single_anchor_rollbacks"]=stats["single_anchor_rollbacks"].get<size_t>()+1;
++            }
+             if(accepted==0)throw std::runtime_error("draft lost preverified first token");
+             stats["proposed"]=stats["proposed"].get<size_t>()+proposal.tokens.size();
+             stats["accepted"]=stats["accepted"].get<size_t>()+accepted;
+@@ -404,7 +412,7 @@
+         if(backend_greedy)llama_sampler_reset(backend_greedy.get());
+         forward_calls=0;forward_tokens=0;
+         backend_sampled_tokens=0;filtered_rows_checked=0;
+-        json copy_stats={{"enabled",copy_enabled},{"proposed",0},{"accepted",0},{"rollbacks",0},{"snapshot_peak_bytes",0},{"snapshot_saved_bytes",0},{"fallback",nullptr}};
++        json copy_stats={{"single_anchor_enabled",experiments.copy_single_anchor},{"single_anchor_candidates",0},{"single_anchor_precheck_rejected",0},{"single_anchor_verifications",0},{"single_anchor_proposed",0},{"single_anchor_accepted",0},{"single_anchor_rollbacks",0},{"enabled",copy_enabled},{"proposed",0},{"accepted",0},{"rollbacks",0},{"snapshot_peak_bytes",0},{"snapshot_saved_bytes",0},{"fallback",nullptr}};
+         auto start=Clock::now();std::string answer,status="length";std::vector<llama_token> output;std::vector<llama_token> input;
+         request_start=start;first_decision_ms=-1;
+         json cache_metrics={{"enabled",cache_enabled},{"hit",false},{"prefix_tokens",0},{"reason",cache_enabled?"miss":"disabled"}};
+@@ -448,7 +456,7 @@
+     void cancel(const std::string & id) {std::lock_guard<std::mutex> lock(state_mutex);bool matched=active&&active_id==id;if(matched)control.cancelled=true;emit({{"event","cancel_ack"},{"id",id},{"matched",matched}});}
+ };
+ static void selftest(){
+-    student_prefix_selftest();prefix_cache_selftest();copy_draft_selftest();runtime_experiments_selftest();backend_output_filter_selftest();
++    single_anchor_selftest();student_prefix_selftest();prefix_cache_selftest();copy_draft_selftest();runtime_experiments_selftest();backend_output_filter_selftest();
+     if(hash_text("abc")!="ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad")throw std::runtime_error("SHA test failed");
+     json good={{"id","one"},{"system","Edit faithfully."},{"user","hello"}};auto q=Request::parse(good);if(q.max_tokens!=256)throw std::runtime_error("defaults");
+     auto long_output=good;long_output["max_tokens"]=2048;
+@@ -476,6 +484,7 @@
+             else if(flag=="--prefix-cache")cache=true;
+             else if(flag=="--student-prefix-cache")experiments.student_prefix_cache=true;
+             else if(flag=="--copy-draft")copy=true;
++            else if(flag=="--copy-single-anchor")experiments.copy_single_anchor=true;
+             else if(flag=="--recurrent-rollback")experiments.recurrent_rollback=true;
+             else if(flag=="--backend-sampling")experiments.backend_sampling=true;
+             else if(flag=="--backend-token-only")experiments.backend_token_only=true;

@@ -1,0 +1,22 @@
+{
+  "train_rows": 2000,
+  "dev_rows": 1427,
+  "identity_rows": 1500,
+  "changed_cue_rows": 500,
+  "selection": "deterministic SHA rank; no outputs used; source labels unchanged. Cue selection is not independently verified repair annotation.",
+  "parent": "best full-dev eligible D/E/G selected before fresh results",
+  "recipe": {
+    "samples": 2000,
+    "lr": 1e-06,
+    "rank": 16,
+    "scale": 8,
+    "grad_accum": 4,
+    "warmup_updates": 20,
+    "max_seq": 2048,
+    "seed": 42,
+    "schedule": "cosine",
+    "eval_save_every": 1000
+  },
+  "data_sha256": "dae9a137ba13d081794ccdf4c3fff785e782d7c9b57875f97bff68488511b3ac",
+  "acceptance": "full1427dev loss with preregistered43repaircase guard; nofresh/ownerselection"
+}

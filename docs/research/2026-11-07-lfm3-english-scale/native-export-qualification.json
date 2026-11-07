@@ -1,0 +1,89 @@
+{
+  "model_sha256": "ec3710cf3bc12c0fbdfcf24587e5f87a2bf197f4c3129d390052af67e3d1a666",
+  "adapter_sha256": "a5b141b7e5b261f04f5888d7943bd2a0c2c6d1e3de7e32a0df10040a390c2dd4",
+  "dev_cases": 192,
+  "scope": "Development qualification only; not untouched quality or a backend-only comparison.",
+  "fusion-comparison": {
+    "schema": 1,
+    "data_sha256": "e412844303fb6520f9b309e399262e539ddfed345f70518ddeed637abe98f69a",
+    "cases": 192,
+    "prompt_parity": true,
+    "exact_output_parity": true,
+    "completion_counts": {
+      "left": {
+        "eos": 192,
+        "length": 0,
+        "incomplete": 0
+      },
+      "right": {
+        "eos": 192,
+        "length": 0,
+        "incomplete": 0
+      }
+    },
+    "note": "Output differences are allowed across fusion; they require separate quality assessment.",
+    "left_sha256": "8da5061bb73a5219600147481db777dd85147afafe873c1b9e5ee0f402011cbb",
+    "right_sha256": "f82d98904c6cdb677bde586d83722c98fa04afa166249fa3e36120e9df897b40"
+  },
+  "native-copy8-parity": {
+    "cases": 192,
+    "exact_eos_output_parity": true,
+    "left_sha256": "2acea80ba29baab17b5ca650c9023cc1b093fff48d0571b2eb0ce1ff6eff0b66",
+    "right_sha256": "d2655d26a16ae947072889380349cd0c2e69a019300a256dedb9991f431e41f0",
+    "intentional_setting_changes": [
+      "copy_draft",
+      "draft_max_tokens",
+      "prefix_reuse"
+    ],
+    "semantic_quality_qualified": false
+  },
+  "native-scalar": {
+    "runtime_qualified": true,
+    "eos_rows": 192,
+    "failed_rows": 0,
+    "all_main_rows_eos": true,
+    "prompt_token_parity": true,
+    "output_reference_parity": false,
+    "protocol_recovery_passed": true,
+    "student_header_exercised": false,
+    "load_seconds": 2.685329749947414,
+    "physical_footprint": [
+      "Physical footprint:         1.5G",
+      "Physical footprint (peak):  1.7G"
+    ],
+    "output_reference_error_count": 0
+  },
+  "native-copy8": {
+    "runtime_qualified": true,
+    "eos_rows": 192,
+    "failed_rows": 0,
+    "all_main_rows_eos": true,
+    "prompt_token_parity": true,
+    "output_reference_parity": false,
+    "protocol_recovery_passed": true,
+    "student_header_exercised": false,
+    "load_seconds": 2.6297186659649014,
+    "physical_footprint": [
+      "Physical footprint:         1.6G",
+      "Physical footprint (peak):  1.7G"
+    ],
+    "output_reference_error_count": 0
+  },
+  "native-header8": {
+    "runtime_qualified": false,
+    "eos_rows": 191,
+    "failed_rows": 1,
+    "all_main_rows_eos": false,
+    "prompt_token_parity": true,
+    "output_reference_parity": false,
+    "protocol_recovery_passed": false,
+    "student_header_exercised": true,
+    "load_seconds": 2.52950374991633,
+    "physical_footprint": [
+      "Physical footprint:         1.6G",
+      "Physical footprint (peak):  1.7G"
+    ],
+    "output_reference_error_count": 2
+  },
+  "decision": "Header cache failed qualification for this selected model. Subsequent frozen-model validation uses header OFF. No runtime or model default changed."
+}

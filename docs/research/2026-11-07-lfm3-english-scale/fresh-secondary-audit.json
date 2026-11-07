@@ -1,0 +1,87 @@
+{
+  "schema": 1,
+  "selection": {
+    "primary_flag_union_cases": 47,
+    "hash_controls": 16,
+    "cases": 63,
+    "selection": "Union of C/E/G MLX/Q4 material flags plus16deterministic controls; not independent accuracy sample."
+  },
+  "method": "Independent Muse secondaryaudit of63publiccases selectedfromprimary C/E/Gmaterialflagunion +16hashedcontrols. Notfullindependenttest oraccuracyestimate. Primaryfull256scores remainseparate; disagreements anduncertaintyretained, notposthocresolvedbyvote.",
+  "packet_sha256": "f52900e17ed21ae2312a38173cd987168016c5ee7515564d1cb94e6e789ecc80",
+  "judgments_sha256": "f9ee0262c452e66640b5300c3aea384d54d05a9d7db698b9edaec8cf210e8a0c",
+  "manifest_sha256": "8463e10667c4acf66f9aa3437e59a158e670523261f844904246a255dae3eece",
+  "arms": {
+    "selected-MLX": {
+      "cases": 63,
+      "material_error": 3,
+      "introduced_content": 0,
+      "annotated_literal_violation": 1,
+      "mode_format_violation": 0,
+      "uncertain": 10,
+      "unresolved_explicit_repair": 0
+    },
+    "selected-Q4": {
+      "cases": 63,
+      "material_error": 3,
+      "introduced_content": 0,
+      "annotated_literal_violation": 1,
+      "mode_format_violation": 0,
+      "uncertain": 10,
+      "unresolved_explicit_repair": 0
+    },
+    "COPY": {
+      "cases": 63,
+      "material_error": 3,
+      "introduced_content": 0,
+      "annotated_literal_violation": 0,
+      "mode_format_violation": 55,
+      "uncertain": 0,
+      "unresolved_explicit_repair": 3
+    },
+    "base": {
+      "cases": 63,
+      "material_error": 49,
+      "introduced_content": 47,
+      "annotated_literal_violation": 0,
+      "mode_format_violation": 48,
+      "uncertain": 9,
+      "unresolved_explicit_repair": 3
+    },
+    "E-MLX": {
+      "cases": 63,
+      "material_error": 8,
+      "introduced_content": 2,
+      "annotated_literal_violation": 2,
+      "mode_format_violation": 2,
+      "uncertain": 12,
+      "unresolved_explicit_repair": 0
+    },
+    "4B-common": {
+      "cases": 63,
+      "material_error": 35,
+      "introduced_content": 34,
+      "annotated_literal_violation": 2,
+      "mode_format_violation": 35,
+      "uncertain": 10,
+      "unresolved_explicit_repair": 2
+    },
+    "C": {
+      "cases": 63,
+      "material_error": 44,
+      "introduced_content": 39,
+      "annotated_literal_violation": 2,
+      "mode_format_violation": 41,
+      "uncertain": 12,
+      "unresolved_explicit_repair": 0
+    }
+  },
+  "material_disagreements_by_arm": {
+    "selected-MLX": 1,
+    "selected-Q4": 1,
+    "COPY": 0,
+    "base": 4,
+    "E-MLX": 1,
+    "4B-common": 5,
+    "C": 2
+  }
+}

@@ -1,0 +1,111 @@
+{
+  "rows": 160,
+  "mode_counts": {
+    "default": 48,
+    "message": 32,
+    "email": 24,
+    "note": 24,
+    "code": 24,
+    "terminal": 8
+  },
+  "variant_counts": {
+    "US": 16,
+    "British": 16,
+    "Indian": 16,
+    "Australian": 16,
+    "Canadian": 16,
+    "informal-international": 16,
+    "Irish": 8,
+    "Scottish": 8,
+    "New Zealand": 8,
+    "Singaporean": 8,
+    "Nigerian": 8,
+    "South African": 8,
+    "African American": 8,
+    "Caribbean": 8
+  },
+  "edit_policy_counts": {
+    "minimal_cleanup": 72,
+    "clear_repair": 34,
+    "no_edit": 54
+  },
+  "context_rows": 64,
+  "context_mode_counts": {
+    "default": 32,
+    "message": 16,
+    "email": 8,
+    "note": 8
+  },
+  "long_rows_100_180": 16,
+  "long_ids": [
+    "en6-s03-0097",
+    "en6-s03-0098",
+    "en6-s03-0099",
+    "en6-s03-0100",
+    "en6-s03-0101",
+    "en6-s03-0102",
+    "en6-s03-0103",
+    "en6-s03-0104",
+    "en6-s03-0121",
+    "en6-s03-0122",
+    "en6-s03-0123",
+    "en6-s03-0124",
+    "en6-s03-0125",
+    "en6-s03-0126",
+    "en6-s03-0127",
+    "en6-s03-0128"
+  ],
+  "vocab_rows": 32,
+  "scenario_groups": {
+    "harbor-bike-trip": 4,
+    "maple-workshop-weekend": 4,
+    "clinic-appointment-shift": 4,
+    "grand-garden-fete": 4,
+    "jollof-family-lunch": 4,
+    "school-sidewalk-safety": 6,
+    "craic-music-night": 6,
+    "market-morning-errands": 4,
+    "river-trail-maintenance": 6,
+    "inishowen-weather-watch": 6,
+    "favorite-snack-run": 4,
+    "coffee-order-change": 4,
+    "dairy-milk-run": 4,
+    "porch-cookout-plan": 4,
+    "train-meetup-msgs": 5,
+    "highland-train-msgs": 4,
+    "lekker-weekend-msgs": 4,
+    "station-cafe-msgs": 3,
+    "grant-report-email": 4,
+    "winter-grant-email": 4,
+    "dairy-order-email": 4,
+    "cookout-fundraiser-email": 4,
+    "hall-renovation-email": 4,
+    "harbour-cleanup-email": 4,
+    "jollof-shopping-note": 4,
+    "pantry-stock-note": 4,
+    "winter-kit-note": 4,
+    "flat-supplies-note": 4,
+    "garden-party-note": 4,
+    "office-steps-note": 4,
+    "code-print-labels": 6,
+    "code-spoken-symbols": 6,
+    "code-config-names": 6,
+    "code-duplicate-fix": 6,
+    "terminal-file-ops": 8
+  },
+  "candidates_sha256": "f224dab19881bbd41be153cc25bd1a8de6537ca8113c0281dd84c7e052864a7b",
+  "source": {
+    "name": "velora-muse-english-v6-s03",
+    "revision": "20261107-s03",
+    "license": "CC0-1.0"
+  },
+  "teacher": {
+    "name": "Muse",
+    "revision": "muse-wonder-1.0"
+  },
+  "independent_review": "pending-independent-review",
+  "gaps": [
+    "independent review not yet performed",
+    "regional variants are written lexical strata, not native-speaker or acoustic certification"
+  ]
+}

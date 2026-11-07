@@ -1,0 +1,67 @@
+{
+  "artifact": "teacher-labels.jsonl",
+  "task": "Faithful cleanup teacher labels for supplied public English transcript candidates",
+  "teacher": "Muse Code powered by muse-wonder-1.0 (Muse/default teacher via user-requested yoyo delegation)",
+  "teacher_identity_note": "Actual runtime identity as available in session; labels are teacher proposals, not independent review approvals.",
+  "source": {
+    "name": "sotto-transcript-cleanup",
+    "revision": "183cc8fd58532f13fa192980185214de1bcd5acc",
+    "license": "MIT",
+    "inputs_file": "raw-inputs.jsonl",
+    "upstream_outputs_used": false
+  },
+  "counts": {
+    "source_rows": 768,
+    "label_rows": 768,
+    "unique_ids": 768,
+    "nonempty_targets": 768,
+    "no_edit_byte_exact": 0
+  },
+  "confidence_distribution": {
+    "supported": 756,
+    "uncertain": 12
+  },
+  "edit_policy_distribution": {
+    "repair": 212,
+    "minimal": 548,
+    "mode": 8
+  },
+  "mode_distribution": {
+    "default": 760,
+    "message": 2,
+    "terminal": 3,
+    "code": 3
+  },
+  "language_distribution": {
+    "en": 768
+  },
+  "english_variant_distribution": {
+    "unspecified": 768
+  },
+  "uncertain_ids": [
+    "sotto-train-038321",
+    "sotto-train-012006",
+    "sotto-train-016687",
+    "sotto-train-091266",
+    "sotto-train-084009",
+    "sotto-train-064990",
+    "sotto-train-128772",
+    "sotto-train-092573",
+    "sotto-train-083466",
+    "sotto-train-028571",
+    "sotto-train-115717",
+    "sotto-train-049483"
+  ],
+  "input_sha256": "ace2308a5098381d062f2324743c2088fcf45249d00bb201a0c30fdff81a730a",
+  "output_sha256": "05b35af21d3d37b68badc67c447ee29cb1cd1b6552a1bd79e51e67f567dfb389",
+  "checks_run": [
+    "Read task.txt, TEACHER.md, and every raw in pages of 64 (12 pages, rows 1-768, plus full text of 18 rows over 550 chars).",
+    "ID integrity: label count 768, unique IDs 768, exact ID set match with source, label order matches source order.",
+    "Schema: every label has exactly keys id,target,mode,language,english_variant,edit_policy,confidence,reason; zero empty targets.",
+    "Reason presence: zero uncertain, repair, or mode-policy labels without a brief factual reason.",
+    "Artifact scans: zero targets with filler tokens um/uh/er/ah, dictated comma/slash/question-mark words, double spaces, lowercase starts, or missing final punctuation; zero artificial itemN-N suffix patterns.",
+    "Faithfulness spot basis: explicit self-corrections applied only where a clear final correction marker was present; ambiguous corrections and unclear terms preserved and marked uncertain (12 rows listed).",
+    "No network, models/GPU, subagents, dependencies, git, private/heldout, or upstream-output retrieval used."
+  ],
+  "review_status": "Teacher proposals only; no independent reviewer approval recorded."
+}

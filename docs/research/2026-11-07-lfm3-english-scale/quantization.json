@@ -1,0 +1,105 @@
+{
+  "schema": 1,
+  "selected": "naive Q4_K_M retained",
+  "decision": "Both strict185-case development metrics and relative blind material flags tied. Frozen rule requires improvement; calibrated artifact not selected. No owner or fresh imatrix evaluation was used for selection.",
+  "calibration": {
+    "data_sha256": "06f5640572c6f21f29db16acbbae34a605f2d70171cc9cd103f183dab5d52fb2",
+    "selected_rows": 163,
+    "total_rendered_tokens": 32899,
+    "planned_chunks": 64,
+    "planned_tokens": 32768,
+    "token_ids_sha256": "259e7adea9a7de671b479ebc6ffb0f6dacaf6e2ba61c086bac83386776336d66",
+    "train_text_sha256": "d81ebc43299a6d87cbd9855da8ae51e88b12dc749e6c57db7dff1ea510d6e905",
+    "source_adapter_sha256": "a5b141b7e5b261f04f5888d7943bd2a0c2c6d1e3de7e32a0df10040a390c2dd4"
+  },
+  "coverage": {
+    "passed": true,
+    "intended_projections": 153,
+    "covered_projections": 153,
+    "warning_count": 10,
+    "warnings_scope": "Raw importance energies/counts finite; ten derived cross-layer statistics are nonfinite and ignored by the pinned Q4_K_M loader. Zero-energy channels are recorded, not fabricated positive energies."
+  },
+  "tensor_policy": {
+    "policy_match": true,
+    "naive_tensor_count": 287,
+    "imatrix_tensor_count": 287,
+    "naive_only": [],
+    "imatrix_only": [],
+    "type_or_shape_differences": [],
+    "naive_type_counts": {
+      "F32": 133,
+      "Q4_K": 136,
+      "Q6_K": 18
+    },
+    "imatrix_type_counts": {
+      "F32": 133,
+      "Q4_K": 136,
+      "Q6_K": 18
+    },
+    "missing_imatrix_log_count": 1,
+    "allowed_missing_imatrix_tensors": [
+      "token_embd.weight"
+    ],
+    "unexpected_missing_imatrix_tensors": [],
+    "missing_log_unknown_model_tensor": [],
+    "imatrix_size_mismatch_logged": false,
+    "input_sha256": {
+      "naive": "ec3710cf3bc12c0fbdfcf24587e5f87a2bf197f4c3129d390052af67e3d1a666",
+      "imatrix": "f63ceee3199e14827aecb05b25c3f8bbffd539c10fd5ed0753d56d78872e72f5",
+      "quant_log": "c78d5f2941d1777553f1a5505b47a823dfc9fa635f42729d89b5bd4c0d6279a9",
+      "coverage": "b7d17114b57d4a954e2d0fbfa624e6ae3f179cd5a8aaa96e4aa195c019db1ee9"
+    },
+    "source_tree_sha256": "9ed56cfe2f6554d6ff40e137b609e1f9e152bc58c9db0c9d51b87891bdf1bd0d",
+    "checker_sha256": "ea976640a4ad8da2595b6bcd85f4232d55723eda9b2dae0d060a882763f2f4e9",
+    "scope": "Per-tensor GGUF name, shape and storage type; expected-only missing importance warnings. Does not prove same quantized values, quality, runtime or provenance."
+  },
+  "strict_dev": {
+    "naive": {
+      "supported": 185,
+      "complete": 185,
+      "repair_required": 43,
+      "repair_success": 32,
+      "no_edit_cases": 86,
+      "no_edit_exact": 83,
+      "literal_cases": 81,
+      "literal_intact": 79
+    },
+    "imatrix": {
+      "supported": 185,
+      "complete": 185,
+      "repair_required": 43,
+      "repair_success": 32,
+      "no_edit_cases": 86,
+      "no_edit_exact": 83,
+      "literal_cases": 81,
+      "literal_intact": 79
+    }
+  },
+  "blind_relative_dev": {
+    "arms": {
+      "naive": {
+        "audit_cases": 21,
+        "material_error": 4,
+        "uncertain": 1
+      },
+      "imatrix": {
+        "audit_cases": 21,
+        "material_error": 4,
+        "uncertain": 1
+      }
+    },
+    "changed_supported_cases": 5,
+    "hash_controls": 16,
+    "new_material_cases": 0,
+    "fixed_material_cases": 0,
+    "all_other_supported_outputs_identical": true,
+    "not_independent_accuracy_estimate": true
+  },
+  "artifact_sha256": "f63ceee3199e14827aecb05b25c3f8bbffd539c10fd5ed0753d56d78872e72f5",
+  "receipts_sha256": {
+    "coverage.json": "b7d17114b57d4a954e2d0fbfa624e6ae3f179cd5a8aaa96e4aa195c019db1ee9",
+    "tensor-policy-check.json": "6c08934cc4a6dec56c3d664dff03b6009b58de799ce8950a17a2c13232e1dcaf",
+    "manifest.json": "3eebc9098fd56d281c3bbd4bdc8c7dab8799521937619bbcb9d80a07f9250fbd",
+    "quantization-selection-rule.json": "6fd1a5deb7e1d64b8f8cb8e5a19bc28e563de78e5b22a80cc5ebad62844acc89"
+  }
+}

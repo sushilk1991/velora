@@ -1,0 +1,99 @@
+{
+  "schema": 1,
+  "notes": {
+    "status": "failed",
+    "chunks": 16,
+    "failed_chunks": 16,
+    "successfully_mapped_chars": 0,
+    "input_chars": 59194,
+    "request_status_counts": {
+      "length": 4,
+      "eos": 12
+    },
+    "final_notes_available": false,
+    "scope": "Same frozen56-minute podcast transcript and hierarchicalcomprehensive policy aspreviousround.16mapchunks allinvalidJSON;12EOS and4length failures. Failurepreventsfinalsummary quality/coverageclaim."
+  },
+  "prompt_probes": {
+    "scope": "Three registered first-chunk probes: plain JSON, correct student mode note JSON, student mode note bullets. All failed768-token completion; no full-hour followup. V1 two wrapped probes used invalid mode notes and are excluded; v2 corrected singular note before rerun.",
+    "cases": [
+      {
+        "name": "plain_json_map",
+        "status": "length",
+        "wall_s": 3.434541374910623,
+        "output_chars": 3395,
+        "json_validation": {
+          "valid": false,
+          "clipped": false
+        },
+        "bullet_observation": null
+      },
+      {
+        "name": "student_json_map",
+        "status": "length",
+        "wall_s": 3.4317446248605847,
+        "output_chars": 3388,
+        "json_validation": {
+          "valid": false,
+          "clipped": false
+        },
+        "bullet_observation": null
+      },
+      {
+        "name": "student_bullets",
+        "status": "length",
+        "wall_s": 3.406128916889429,
+        "output_chars": 3392,
+        "json_validation": null,
+        "bullet_observation": {
+          "output_chars": 3392,
+          "source_chars": 3715,
+          "compression_ratio_chars": 0.9130551816958278,
+          "nonempty_lines": 4,
+          "bullet_lines": 0,
+          "semantic_pass": null,
+          "semantic_review_required": true
+        }
+      }
+    ],
+    "identity_unchanged": true,
+    "artifact_sha256": "b76b2f59d02c25265cc2f45feea26dc469929895ecc4580acb897366a58d4768"
+  },
+  "fixed_prompt_batch_test": {
+    "complete": true,
+    "recorded_requests_including_warmup": 12,
+    "exact_response_parity": true,
+    "fixed_prompt_backend_comparison_gate": true,
+    "all_measured_outputs_eos": true,
+    "scope": "fixed prompt only; this is not full runtime or meeting-summary qualification",
+    "per_batch": {
+      "128": {
+        "measured_requests": 4,
+        "eligible_requests": 4,
+        "expected_requests": 4,
+        "status_counts": {
+          "eos": 4
+        },
+        "all_attempts_wall_median_ms": 4865.000333520584,
+        "eligible_worker_median_ms": 4860.964458,
+        "eligible_wall_median_ms": 4865.000333520584,
+        "eligible_first_decision_median_ms": null,
+        "worker_rss_max_bytes": 2092400640
+      },
+      "512": {
+        "measured_requests": 4,
+        "eligible_requests": 4,
+        "expected_requests": 4,
+        "status_counts": {
+          "eos": 4
+        },
+        "all_attempts_wall_median_ms": 4013.4457290405408,
+        "eligible_worker_median_ms": 4008.2350834999997,
+        "eligible_wall_median_ms": 4013.4457290405408,
+        "eligible_first_decision_median_ms": null,
+        "worker_rss_max_bytes": 2153185280
+      }
+    }
+  },
+  "batch512_full_request_reduction_percent": 17.50369056735113,
+  "limitations": "Batch result measures full-request time, not isolated prefill or visible TTFT, and does not qualify meeting summaries. Cleanup adapter remains unqualified for summarization."
+}

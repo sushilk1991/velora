@@ -1,0 +1,33 @@
+{
+  "schema": 1,
+  "model_sha256": "ec3710cf3bc12c0fbdfcf24587e5f87a2bf197f4c3129d390052af67e3d1a666",
+  "worker_sha256": "4fc519ba242305a693663c244612b5597b65db8cd1d351836d899dc6e12183fd",
+  "selected": false,
+  "development_gate_passed": true,
+  "dev_cases": 192,
+  "matched_cases": 44,
+  "exact_prompt_output_text_status_parity": true,
+  "performance_gate_passed": false,
+  "speed": {
+    "passed": false,
+    "paired_case_median_p50_seconds": {
+      "off": 0.06374944804701954,
+      "on": 0.061032562458422035
+    },
+    "paired_case_median_p95_seconds": {
+      "off": 0.22016252084285953,
+      "on": 0.21933618428884075
+    },
+    "p50_improvement_percent": 4.261818214635548,
+    "p95_change_percent": -0.37533025641933726,
+    "raw_round_p50_seconds": [
+      0.0627503750147298,
+      0.059975749580189586,
+      0.06057733343914151,
+      0.06474852107930928
+    ],
+    "quantile_method": "linear at (n-1)*q; case median of two same-mode runs before cohort quantiles"
+  },
+  "decision": "4.26% p50 gain misses preregistered5% minimum. No full614candidate run emitted; no native source promotion. Derived continuation used headerOFF; legacy report headerON limitation text is superseded by the safety-derived plan.",
+  "performance_report_sha256": "6cde362700bf9a3106aa133027e64638d7a022b0e1de96f31791a9c6468bab17"
+}

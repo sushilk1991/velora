@@ -1,0 +1,10 @@
+{
+  "rows": 768,
+  "reviews": {
+    "approved": 707,
+    "rejected": 61
+  },
+  "target_edits": 108,
+  "sha256": "1f6928fd40b31abaa8b98f1536d31061628a09b7da207343e9f23ac756ff8731",
+  "method": "Muse labels andindependent fullTerrareview; nothuman/audio"
+}

@@ -1,0 +1,418 @@
+{
+  "schema": 1,
+  "data_sha256": "6d964e6b22c80729aa80bff04d499080699193b55d558a55160b13ec4504a1a6",
+  "method": "Two blind model judges split256cases; eachjudge reviews all7arms foritscases. A hashselected12case/84arm sharedanchor audit reportsagreementseparately. Countsarefallibletextjudgments, nothuman/audio/nativeEnglishcertification. Allcandidateidentities were frozen before outputs inspected. Modeformatflags separatefrommaterialfidelity; uncertaintyretained.",
+  "cases": 256,
+  "arms": {
+    "selected-MLX": {
+      "overall": {
+        "cases": 256,
+        "material_error": 4,
+        "introduced_content": 0,
+        "unresolved_explicit_repair": 0,
+        "annotated_literal_violation": 1,
+        "mode_format_violation": 11,
+        "uncertain": 0,
+        "material_flags_without_uncertainty": 4
+      },
+      "by_written_variant": {
+        "Australian": {
+          "cases": 4,
+          "material_error": 1,
+          "introduced_content": 0,
+          "unresolved_explicit_repair": 0,
+          "annotated_literal_violation": 1,
+          "mode_format_violation": 0,
+          "uncertain": 0,
+          "material_flags_without_uncertainty": 1
+        },
+        "Canadian": {
+          "cases": 2,
+          "material_error": 0,
+          "introduced_content": 0,
+          "unresolved_explicit_repair": 0,
+          "annotated_literal_violation": 0,
+          "mode_format_violation": 0,
+          "uncertain": 0,
+          "material_flags_without_uncertainty": 0
+        },
+        "neutral/unspecified": {
+          "cases": 250,
+          "material_error": 3,
+          "introduced_content": 0,
+          "unresolved_explicit_repair": 0,
+          "annotated_literal_violation": 0,
+          "mode_format_violation": 11,
+          "uncertain": 0,
+          "material_flags_without_uncertainty": 3
+        }
+      }
+    },
+    "selected-Q4": {
+      "overall": {
+        "cases": 256,
+        "material_error": 4,
+        "introduced_content": 0,
+        "unresolved_explicit_repair": 0,
+        "annotated_literal_violation": 1,
+        "mode_format_violation": 16,
+        "uncertain": 0,
+        "material_flags_without_uncertainty": 4
+      },
+      "by_written_variant": {
+        "Australian": {
+          "cases": 4,
+          "material_error": 1,
+          "introduced_content": 0,
+          "unresolved_explicit_repair": 0,
+          "annotated_literal_violation": 1,
+          "mode_format_violation": 0,
+          "uncertain": 0,
+          "material_flags_without_uncertainty": 1
+        },
+        "Canadian": {
+          "cases": 2,
+          "material_error": 0,
+          "introduced_content": 0,
+          "unresolved_explicit_repair": 0,
+          "annotated_literal_violation": 0,
+          "mode_format_violation": 0,
+          "uncertain": 0,
+          "material_flags_without_uncertainty": 0
+        },
+        "neutral/unspecified": {
+          "cases": 250,
+          "material_error": 3,
+          "introduced_content": 0,
+          "unresolved_explicit_repair": 0,
+          "annotated_literal_violation": 0,
+          "mode_format_violation": 16,
+          "uncertain": 0,
+          "material_flags_without_uncertainty": 3
+        }
+      }
+    },
+    "COPY": {
+      "overall": {
+        "cases": 256,
+        "material_error": 31,
+        "introduced_content": 0,
+        "unresolved_explicit_repair": 31,
+        "annotated_literal_violation": 0,
+        "mode_format_violation": 73,
+        "uncertain": 0,
+        "material_flags_without_uncertainty": 31
+      },
+      "by_written_variant": {
+        "Australian": {
+          "cases": 4,
+          "material_error": 1,
+          "introduced_content": 0,
+          "unresolved_explicit_repair": 1,
+          "annotated_literal_violation": 0,
+          "mode_format_violation": 0,
+          "uncertain": 0,
+          "material_flags_without_uncertainty": 1
+        },
+        "Canadian": {
+          "cases": 2,
+          "material_error": 0,
+          "introduced_content": 0,
+          "unresolved_explicit_repair": 0,
+          "annotated_literal_violation": 0,
+          "mode_format_violation": 0,
+          "uncertain": 0,
+          "material_flags_without_uncertainty": 0
+        },
+        "neutral/unspecified": {
+          "cases": 250,
+          "material_error": 30,
+          "introduced_content": 0,
+          "unresolved_explicit_repair": 30,
+          "annotated_literal_violation": 0,
+          "mode_format_violation": 73,
+          "uncertain": 0,
+          "material_flags_without_uncertainty": 30
+        }
+      }
+    },
+    "base": {
+      "overall": {
+        "cases": 256,
+        "material_error": 103,
+        "introduced_content": 100,
+        "unresolved_explicit_repair": 26,
+        "annotated_literal_violation": 1,
+        "mode_format_violation": 117,
+        "uncertain": 1,
+        "material_flags_without_uncertainty": 102
+      },
+      "by_written_variant": {
+        "Australian": {
+          "cases": 4,
+          "material_error": 1,
+          "introduced_content": 0,
+          "unresolved_explicit_repair": 1,
+          "annotated_literal_violation": 0,
+          "mode_format_violation": 0,
+          "uncertain": 0,
+          "material_flags_without_uncertainty": 1
+        },
+        "Canadian": {
+          "cases": 2,
+          "material_error": 0,
+          "introduced_content": 0,
+          "unresolved_explicit_repair": 0,
+          "annotated_literal_violation": 0,
+          "mode_format_violation": 0,
+          "uncertain": 0,
+          "material_flags_without_uncertainty": 0
+        },
+        "neutral/unspecified": {
+          "cases": 250,
+          "material_error": 102,
+          "introduced_content": 100,
+          "unresolved_explicit_repair": 25,
+          "annotated_literal_violation": 1,
+          "mode_format_violation": 117,
+          "uncertain": 1,
+          "material_flags_without_uncertainty": 101
+        }
+      }
+    },
+    "E-MLX": {
+      "overall": {
+        "cases": 256,
+        "material_error": 9,
+        "introduced_content": 2,
+        "unresolved_explicit_repair": 0,
+        "annotated_literal_violation": 3,
+        "mode_format_violation": 14,
+        "uncertain": 2,
+        "material_flags_without_uncertainty": 7
+      },
+      "by_written_variant": {
+        "Australian": {
+          "cases": 4,
+          "material_error": 1,
+          "introduced_content": 0,
+          "unresolved_explicit_repair": 0,
+          "annotated_literal_violation": 1,
+          "mode_format_violation": 0,
+          "uncertain": 0,
+          "material_flags_without_uncertainty": 1
+        },
+        "Canadian": {
+          "cases": 2,
+          "material_error": 0,
+          "introduced_content": 0,
+          "unresolved_explicit_repair": 0,
+          "annotated_literal_violation": 0,
+          "mode_format_violation": 0,
+          "uncertain": 0,
+          "material_flags_without_uncertainty": 0
+        },
+        "neutral/unspecified": {
+          "cases": 250,
+          "material_error": 8,
+          "introduced_content": 2,
+          "unresolved_explicit_repair": 0,
+          "annotated_literal_violation": 2,
+          "mode_format_violation": 14,
+          "uncertain": 2,
+          "material_flags_without_uncertainty": 6
+        }
+      }
+    },
+    "4B-common": {
+      "overall": {
+        "cases": 256,
+        "material_error": 54,
+        "introduced_content": 50,
+        "unresolved_explicit_repair": 20,
+        "annotated_literal_violation": 3,
+        "mode_format_violation": 69,
+        "uncertain": 1,
+        "material_flags_without_uncertainty": 53
+      },
+      "by_written_variant": {
+        "Australian": {
+          "cases": 4,
+          "material_error": 1,
+          "introduced_content": 0,
+          "unresolved_explicit_repair": 1,
+          "annotated_literal_violation": 0,
+          "mode_format_violation": 0,
+          "uncertain": 0,
+          "material_flags_without_uncertainty": 1
+        },
+        "Canadian": {
+          "cases": 2,
+          "material_error": 0,
+          "introduced_content": 0,
+          "unresolved_explicit_repair": 0,
+          "annotated_literal_violation": 0,
+          "mode_format_violation": 0,
+          "uncertain": 0,
+          "material_flags_without_uncertainty": 0
+        },
+        "neutral/unspecified": {
+          "cases": 250,
+          "material_error": 53,
+          "introduced_content": 50,
+          "unresolved_explicit_repair": 19,
+          "annotated_literal_violation": 3,
+          "mode_format_violation": 69,
+          "uncertain": 1,
+          "material_flags_without_uncertainty": 52
+        }
+      }
+    },
+    "C": {
+      "overall": {
+        "cases": 256,
+        "material_error": 46,
+        "introduced_content": 40,
+        "unresolved_explicit_repair": 0,
+        "annotated_literal_violation": 5,
+        "mode_format_violation": 100,
+        "uncertain": 2,
+        "material_flags_without_uncertainty": 44
+      },
+      "by_written_variant": {
+        "Australian": {
+          "cases": 4,
+          "material_error": 1,
+          "introduced_content": 0,
+          "unresolved_explicit_repair": 0,
+          "annotated_literal_violation": 1,
+          "mode_format_violation": 1,
+          "uncertain": 0,
+          "material_flags_without_uncertainty": 1
+        },
+        "Canadian": {
+          "cases": 2,
+          "material_error": 0,
+          "introduced_content": 0,
+          "unresolved_explicit_repair": 0,
+          "annotated_literal_violation": 0,
+          "mode_format_violation": 1,
+          "uncertain": 0,
+          "material_flags_without_uncertainty": 0
+        },
+        "neutral/unspecified": {
+          "cases": 250,
+          "material_error": 45,
+          "introduced_content": 40,
+          "unresolved_explicit_repair": 0,
+          "annotated_literal_violation": 4,
+          "mode_format_violation": 98,
+          "uncertain": 2,
+          "material_flags_without_uncertainty": 43
+        }
+      }
+    }
+  },
+  "paired_material_flags": {
+    "selected-MLX vs C": {
+      "cases": 256,
+      "both_material": 4,
+      "candidate_only_material": 0,
+      "reference_only_material": 42,
+      "neither_material": 210
+    },
+    "selected-Q4 vs C": {
+      "cases": 256,
+      "both_material": 4,
+      "candidate_only_material": 0,
+      "reference_only_material": 42,
+      "neither_material": 210
+    },
+    "selected-Q4 vs selected-MLX": {
+      "cases": 256,
+      "both_material": 4,
+      "candidate_only_material": 0,
+      "reference_only_material": 0,
+      "neither_material": 252
+    },
+    "selected-MLX vs 4B-common": {
+      "cases": 256,
+      "both_material": 2,
+      "candidate_only_material": 2,
+      "reference_only_material": 52,
+      "neither_material": 200
+    },
+    "E-MLX vs C": {
+      "cases": 256,
+      "both_material": 8,
+      "candidate_only_material": 1,
+      "reference_only_material": 38,
+      "neither_material": 209
+    }
+  },
+  "shared_anchors": {
+    "cases": 12,
+    "comparisons": 84,
+    "judgments_sha256": "f23d613cc34123ae68a5d585f1d3e02959218bac821aa1a0e58a2249390c4b89",
+    "agreement": {
+      "material_error": {
+        "agreed": 82,
+        "comparisons": 84,
+        "both_true": 9
+      },
+      "introduced_content": {
+        "agreed": 83,
+        "comparisons": 84,
+        "both_true": 6
+      },
+      "unresolved_explicit_repair": {
+        "agreed": 84,
+        "comparisons": 84,
+        "both_true": 3
+      },
+      "annotated_literal_violation": {
+        "agreed": 84,
+        "comparisons": 84,
+        "both_true": 2
+      },
+      "mode_format_violation": {
+        "agreed": 81,
+        "comparisons": 84,
+        "both_true": 16
+      },
+      "uncertain": {
+        "agreed": 84,
+        "comparisons": 84,
+        "both_true": 0
+      }
+    }
+  },
+  "review_receipts": {
+    "review-b": {
+      "cases": 128,
+      "judgments": 896,
+      "judgments_sha256": "9e5998453f29cdf1c002b870543c7a65a8ff5594ef1ef5ad06a785acc622200f",
+      "manifest_sha256": "1610275cd719fe66df2edc487db08bea4cbb0ebdb37d6f12f6eef91701ff788c",
+      "packet_sha256": {
+        "packet-01.jsonl": "ebd16d6ce36a256375b84e5233b136b33fc302d7df8ac3f445fe73f36df471b1",
+        "packet-02.jsonl": "98954698e12c28f616bbc8e0f5825027cbb17a050323278f46c9ef826bd86fb3"
+      }
+    },
+    "review-terra": {
+      "cases": 128,
+      "judgments": 896,
+      "judgments_sha256": "d789468b8b9b36794b1692e1d0ae2c03fad3f361aae48d7df6c90d0fefdbce64",
+      "manifest_sha256": "b94369df6b8130a2f6bf1e27aa2d3e99ccda0189730ae28fea9c2ec978091401",
+      "packet_sha256": {
+        "packet-03.jsonl": "544439a578a1ea0f00afbb7a545b99537a438d47a737f2708d66777667ae4e76",
+        "packet-04.jsonl": "ea2fcc4dbe0dd4623b2cf04b9c77c6d5461eb3d62e271b63f3d2bc51914566fb"
+      }
+    }
+  },
+  "limits": [
+    "4B-common uses student prompt; it is not the production4B renderer.",
+    "COPY canpreservewords butleavesrequiredrepairs; no-edit ratealone doesnotmeasurequality.",
+    "Writtenregionalstrata areauthoredsynthetics; nopolulationdialectaccuracyclaim.",
+    "Singleprimaryjudgmentpercase/arm; reviewerssplitcases andmaydiffer. Sharedanchorsare12cases, notfullindependentreplication."
+  ]
+}

@@ -1,0 +1,463 @@
+{
+  "plan_sha256": "f99d90dabf72d8c0c1d806dab6c9c007795bf311d86cad63063cecb1def6ee09",
+  "manifest_sha256": "a09515adda49d5d116731bfd89b6291d4792ff526300be703d21d18fcbf21cab",
+  "runs": [
+    {
+      "name": "accent-01-whisper",
+      "backend": "whisper",
+      "snapshot_revision": "a4aaeec0636e6fef84abdcbe3544cb2bf7e9f6fb",
+      "report_sha256": "85ecc704a04f0e5bc981ffc194c3521e085d75175ffd7e0d21517f16f9f5d9e2",
+      "cases": 24,
+      "errors": 0,
+      "reference_words": 159,
+      "wer": 0.0,
+      "by_accent": {
+        "Scottish": {
+          "errors": 0,
+          "reference_words": 27,
+          "cases": 4,
+          "wer": 0.0
+        },
+        "NorthernIrish": {
+          "errors": 0,
+          "reference_words": 22,
+          "cases": 4,
+          "wer": 0.0
+        },
+        "Indian": {
+          "errors": 0,
+          "reference_words": 31,
+          "cases": 4,
+          "wer": 0.0
+        },
+        "American": {
+          "errors": 0,
+          "reference_words": 24,
+          "cases": 4,
+          "wer": 0.0
+        },
+        "SouthAfrican": {
+          "errors": 0,
+          "reference_words": 28,
+          "cases": 4,
+          "wer": 0.0
+        },
+        "Australian": {
+          "errors": 0,
+          "reference_words": 27,
+          "cases": 4,
+          "wer": 0.0
+        }
+      },
+      "audio_s": 79.26875,
+      "transcribe_s": 3.6190045825205743,
+      "preprocess_s": 0.781750664813444,
+      "preprocess_plus_transcribe_s": 4.400755247334018,
+      "audio_s_per_transcribe_s": 21.903467705694553,
+      "model_load_s": 1.3241379158571362,
+      "warmup_preprocess_s": 0.12575645907782018,
+      "warmup_transcribe_s": 0.31971874996088445,
+      "memory_after_load": {
+        "peak_rss_native": 1794179072,
+        "mlx_active_bytes": 1613931632,
+        "mlx_peak_bytes": 1613931632,
+        "mlx_cache_bytes": 8116,
+        "vmmap_physical_footprint_lines": [
+          "Physical footprint:         1.6G",
+          "Physical footprint (peak):  1.6G"
+        ]
+      },
+      "memory_after_decode": {
+        "peak_rss_native": 1842479104,
+        "mlx_active_bytes": 1618307758,
+        "mlx_peak_bytes": 2555383698,
+        "mlx_cache_bytes": 0,
+        "vmmap_physical_footprint_lines": [
+          "Physical footprint:         2.5G",
+          "Physical footprint (peak):  2.7G"
+        ]
+      }
+    },
+    {
+      "name": "accent-02-v3",
+      "backend": "parakeet",
+      "snapshot_revision": "ed2b7e8c15f9aaa0b5772e2efb986255eaef7e15",
+      "report_sha256": "54664fe0b4fed8d4534b9c763cf15e4eff473477e6b1359ad704406495f8901f",
+      "cases": 24,
+      "errors": 0,
+      "reference_words": 159,
+      "wer": 0.0,
+      "by_accent": {
+        "Scottish": {
+          "errors": 0,
+          "reference_words": 27,
+          "cases": 4,
+          "wer": 0.0
+        },
+        "NorthernIrish": {
+          "errors": 0,
+          "reference_words": 22,
+          "cases": 4,
+          "wer": 0.0
+        },
+        "Indian": {
+          "errors": 0,
+          "reference_words": 31,
+          "cases": 4,
+          "wer": 0.0
+        },
+        "American": {
+          "errors": 0,
+          "reference_words": 24,
+          "cases": 4,
+          "wer": 0.0
+        },
+        "SouthAfrican": {
+          "errors": 0,
+          "reference_words": 28,
+          "cases": 4,
+          "wer": 0.0
+        },
+        "Australian": {
+          "errors": 0,
+          "reference_words": 27,
+          "cases": 4,
+          "wer": 0.0
+        }
+      },
+      "audio_s": 79.26875,
+      "transcribe_s": 1.535962582565844,
+      "preprocess_s": 0.6387522527948022,
+      "preprocess_plus_transcribe_s": 2.1747148353606462,
+      "audio_s_per_transcribe_s": 51.608516313972046,
+      "model_load_s": 1.291131499921903,
+      "warmup_preprocess_s": 0.03074854100123048,
+      "warmup_transcribe_s": 1.8953936249017715,
+      "memory_after_load": {
+        "peak_rss_native": 1844740096,
+        "mlx_active_bytes": 1295679944,
+        "mlx_peak_bytes": 2786859464,
+        "mlx_cache_bytes": 1604595868,
+        "vmmap_physical_footprint_lines": [
+          "Physical footprint:         2.9G",
+          "Physical footprint (peak):  2.9G"
+        ]
+      },
+      "memory_after_decode": {
+        "peak_rss_native": 1844740096,
+        "mlx_active_bytes": 1295681548,
+        "mlx_peak_bytes": 2786859464,
+        "mlx_cache_bytes": 0,
+        "vmmap_physical_footprint_lines": [
+          "Physical footprint:         1.9G",
+          "Physical footprint (peak):  3.1G"
+        ]
+      }
+    },
+    {
+      "name": "accent-03-v2",
+      "backend": "parakeet",
+      "snapshot_revision": "8ae155301e23d820d82aa60d24817c900e69e487",
+      "report_sha256": "dcaacff5d937e9d3529ae463781242adcb207e96765823df025d627560a1fd43",
+      "cases": 24,
+      "errors": 0,
+      "reference_words": 159,
+      "wer": 0.0,
+      "by_accent": {
+        "Scottish": {
+          "errors": 0,
+          "reference_words": 27,
+          "cases": 4,
+          "wer": 0.0
+        },
+        "NorthernIrish": {
+          "errors": 0,
+          "reference_words": 22,
+          "cases": 4,
+          "wer": 0.0
+        },
+        "Indian": {
+          "errors": 0,
+          "reference_words": 31,
+          "cases": 4,
+          "wer": 0.0
+        },
+        "American": {
+          "errors": 0,
+          "reference_words": 24,
+          "cases": 4,
+          "wer": 0.0
+        },
+        "SouthAfrican": {
+          "errors": 0,
+          "reference_words": 28,
+          "cases": 4,
+          "wer": 0.0
+        },
+        "Australian": {
+          "errors": 0,
+          "reference_words": 27,
+          "cases": 4,
+          "wer": 0.0
+        }
+      },
+      "audio_s": 79.26875,
+      "transcribe_s": 1.2744540816638619,
+      "preprocess_s": 0.5978012522682548,
+      "preprocess_plus_transcribe_s": 1.8722553339321166,
+      "audio_s_per_transcribe_s": 62.19820010816771,
+      "model_load_s": 0.9132274580188096,
+      "warmup_preprocess_s": 0.02986620902083814,
+      "warmup_transcribe_s": 0.10448333295062184,
+      "memory_after_load": {
+        "peak_rss_native": 1601224704,
+        "mlx_active_bytes": 1277282772,
+        "mlx_peak_bytes": 2558226924,
+        "mlx_cache_bytes": 1357938868,
+        "vmmap_physical_footprint_lines": [
+          "Physical footprint:         2.7G",
+          "Physical footprint (peak):  2.7G"
+        ]
+      },
+      "memory_after_decode": {
+        "peak_rss_native": 1601224704,
+        "mlx_active_bytes": 1277284376,
+        "mlx_peak_bytes": 2558226924,
+        "mlx_cache_bytes": 0,
+        "vmmap_physical_footprint_lines": [
+          "Physical footprint:         1.9G",
+          "Physical footprint (peak):  2.8G"
+        ]
+      }
+    },
+    {
+      "name": "accent-04-v2",
+      "backend": "parakeet",
+      "snapshot_revision": "8ae155301e23d820d82aa60d24817c900e69e487",
+      "report_sha256": "a68e64fce98996ed13a546719b1f46c776922589d797c115369555a3e639c492",
+      "cases": 24,
+      "errors": 0,
+      "reference_words": 159,
+      "wer": 0.0,
+      "by_accent": {
+        "Scottish": {
+          "errors": 0,
+          "reference_words": 27,
+          "cases": 4,
+          "wer": 0.0
+        },
+        "NorthernIrish": {
+          "errors": 0,
+          "reference_words": 22,
+          "cases": 4,
+          "wer": 0.0
+        },
+        "Indian": {
+          "errors": 0,
+          "reference_words": 31,
+          "cases": 4,
+          "wer": 0.0
+        },
+        "American": {
+          "errors": 0,
+          "reference_words": 24,
+          "cases": 4,
+          "wer": 0.0
+        },
+        "SouthAfrican": {
+          "errors": 0,
+          "reference_words": 28,
+          "cases": 4,
+          "wer": 0.0
+        },
+        "Australian": {
+          "errors": 0,
+          "reference_words": 27,
+          "cases": 4,
+          "wer": 0.0
+        }
+      },
+      "audio_s": 79.26875,
+      "transcribe_s": 1.3221345443744212,
+      "preprocess_s": 0.6863150808494538,
+      "preprocess_plus_transcribe_s": 2.008449625223875,
+      "audio_s_per_transcribe_s": 59.95513114552699,
+      "model_load_s": 0.6226467918604612,
+      "warmup_preprocess_s": 0.031054208986461163,
+      "warmup_transcribe_s": 0.06489379098638892,
+      "memory_after_load": {
+        "peak_rss_native": 957497344,
+        "mlx_active_bytes": 1277381076,
+        "mlx_peak_bytes": 1760780756,
+        "mlx_cache_bytes": 631505076,
+        "vmmap_physical_footprint_lines": [
+          "Physical footprint:         2.0G",
+          "Physical footprint (peak):  2.0G"
+        ]
+      },
+      "memory_after_decode": {
+        "peak_rss_native": 964673536,
+        "mlx_active_bytes": 1277382680,
+        "mlx_peak_bytes": 2143058214,
+        "mlx_cache_bytes": 0,
+        "vmmap_physical_footprint_lines": [
+          "Physical footprint:         1.9G",
+          "Physical footprint (peak):  2.4G"
+        ]
+      }
+    },
+    {
+      "name": "accent-05-v3",
+      "backend": "parakeet",
+      "snapshot_revision": "ed2b7e8c15f9aaa0b5772e2efb986255eaef7e15",
+      "report_sha256": "69ca354d0732893350fab0b8cebbbb19e5656d682045567de454a55881110a9e",
+      "cases": 24,
+      "errors": 0,
+      "reference_words": 159,
+      "wer": 0.0,
+      "by_accent": {
+        "Scottish": {
+          "errors": 0,
+          "reference_words": 27,
+          "cases": 4,
+          "wer": 0.0
+        },
+        "NorthernIrish": {
+          "errors": 0,
+          "reference_words": 22,
+          "cases": 4,
+          "wer": 0.0
+        },
+        "Indian": {
+          "errors": 0,
+          "reference_words": 31,
+          "cases": 4,
+          "wer": 0.0
+        },
+        "American": {
+          "errors": 0,
+          "reference_words": 24,
+          "cases": 4,
+          "wer": 0.0
+        },
+        "SouthAfrican": {
+          "errors": 0,
+          "reference_words": 28,
+          "cases": 4,
+          "wer": 0.0
+        },
+        "Australian": {
+          "errors": 0,
+          "reference_words": 27,
+          "cases": 4,
+          "wer": 0.0
+        }
+      },
+      "audio_s": 79.26875,
+      "transcribe_s": 1.3174222926609218,
+      "preprocess_s": 0.6256772903725505,
+      "preprocess_plus_transcribe_s": 1.9430995830334723,
+      "audio_s_per_transcribe_s": 60.16958301190839,
+      "model_load_s": 0.6250073749106377,
+      "warmup_preprocess_s": 0.03265604190528393,
+      "warmup_transcribe_s": 0.09552416717633605,
+      "memory_after_load": {
+        "peak_rss_native": 1026097152,
+        "mlx_active_bytes": 1295811016,
+        "mlx_peak_bytes": 1779210696,
+        "mlx_cache_bytes": 684974236,
+        "vmmap_physical_footprint_lines": [
+          "Physical footprint:         2.1G",
+          "Physical footprint (peak):  2.1G"
+        ]
+      },
+      "memory_after_decode": {
+        "peak_rss_native": 1033240576,
+        "mlx_active_bytes": 1295812620,
+        "mlx_peak_bytes": 2161488154,
+        "mlx_cache_bytes": 0,
+        "vmmap_physical_footprint_lines": [
+          "Physical footprint:         1.9G",
+          "Physical footprint (peak):  2.4G"
+        ]
+      }
+    },
+    {
+      "name": "accent-06-whisper",
+      "backend": "whisper",
+      "snapshot_revision": "a4aaeec0636e6fef84abdcbe3544cb2bf7e9f6fb",
+      "report_sha256": "ba4d33507b2554ccc4aa1d9186b89ec0f656e6e8aaec38a7f8ae440f41696382",
+      "cases": 24,
+      "errors": 0,
+      "reference_words": 159,
+      "wer": 0.0,
+      "by_accent": {
+        "Scottish": {
+          "errors": 0,
+          "reference_words": 27,
+          "cases": 4,
+          "wer": 0.0
+        },
+        "NorthernIrish": {
+          "errors": 0,
+          "reference_words": 22,
+          "cases": 4,
+          "wer": 0.0
+        },
+        "Indian": {
+          "errors": 0,
+          "reference_words": 31,
+          "cases": 4,
+          "wer": 0.0
+        },
+        "American": {
+          "errors": 0,
+          "reference_words": 24,
+          "cases": 4,
+          "wer": 0.0
+        },
+        "SouthAfrican": {
+          "errors": 0,
+          "reference_words": 28,
+          "cases": 4,
+          "wer": 0.0
+        },
+        "Australian": {
+          "errors": 0,
+          "reference_words": 27,
+          "cases": 4,
+          "wer": 0.0
+        }
+      },
+      "audio_s": 79.26875,
+      "transcribe_s": 3.1089532522019,
+      "preprocess_s": 0.6263632066547871,
+      "preprocess_plus_transcribe_s": 3.735316458856687,
+      "audio_s_per_transcribe_s": 25.496925675501334,
+      "model_load_s": 0.7322848341427743,
+      "warmup_preprocess_s": 0.03309162496589124,
+      "warmup_transcribe_s": 0.37511933292262256,
+      "memory_after_load": {
+        "peak_rss_native": 1794588672,
+        "mlx_active_bytes": 1613931632,
+        "mlx_peak_bytes": 1613931632,
+        "mlx_cache_bytes": 8116,
+        "vmmap_physical_footprint_lines": [
+          "Physical footprint:         1.6G",
+          "Physical footprint (peak):  1.6G"
+        ]
+      },
+      "memory_after_decode": {
+        "peak_rss_native": 1838186496,
+        "mlx_active_bytes": 1618307758,
+        "mlx_peak_bytes": 2555383698,
+        "mlx_cache_bytes": 0,
+        "vmmap_physical_footprint_lines": [
+          "Physical footprint:         2.5G",
+          "Physical footprint (peak):  2.7G"
+        ]
+      }
+    }
+  ],
+  "limitations": "Micro WER uses punctuation/case-normalized token alignment and publisher text; it is not semantic truth or general accent quality. Timings are measured per-case and exclude warmup, model load and memory sampling; load and warmup are reported separately. No end-to-end wall time was measured. Memory reports include native-unit peak RSS and vmmap lines if available."
+}

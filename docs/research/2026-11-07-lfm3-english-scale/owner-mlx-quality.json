@@ -1,0 +1,278 @@
+{
+  "arms": {
+    "candidate": {
+      "acceptable": 231,
+      "ambiguous": 63,
+      "cases": 300,
+      "cleanup_introduced_error": 42,
+      "inherited_asr_error": 44,
+      "material_error": 45,
+      "statuses": {
+        "ok": 300
+      }
+    },
+    "mlx_candidate": {
+      "acceptable": 239,
+      "ambiguous": 58,
+      "cases": 300,
+      "cleanup_introduced_error": 33,
+      "inherited_asr_error": 41,
+      "material_error": 41,
+      "statuses": {
+        "cleanup_fallback": 1,
+        "ok": 299
+      }
+    },
+    "reference_mlx": {
+      "acceptable": 241,
+      "ambiguous": 57,
+      "cases": 300,
+      "cleanup_introduced_error": 30,
+      "inherited_asr_error": 41,
+      "material_error": 43,
+      "statuses": {
+        "cleanup_fallback": 1,
+        "ok": 299
+      }
+    }
+  },
+  "cases": 300,
+  "limitations": [
+    "One reviewer per original or novel output; no inter-rater estimate.",
+    "All statuses and ambiguous judgments retained.",
+    "Selected and reference models were frozen before owner evaluation; these results did not select weights.",
+    "No audio adjudication or population-wide accuracy claim.",
+    "Reuse and five-arm packet digests were computed at aggregation; no precommitted digest manifest exists. Validation reconstructs matches from trusted local original reviewed data and frozen-run packets, rather than providing prior cryptographic attestation."
+  ],
+  "mlx_pairs": 600,
+  "paired": {
+    "mlx_candidate_vs_reference_mlx": {
+      "cases": 300,
+      "flag_comparisons": {
+        "acceptable": {
+          "first_only_true": 5,
+          "same": 288,
+          "second_only_true": 7
+        },
+        "ambiguous": {
+          "first_only_true": 3,
+          "same": 295,
+          "second_only_true": 2
+        },
+        "cleanup_introduced_error": {
+          "first_only_true": 7,
+          "same": 289,
+          "second_only_true": 4
+        },
+        "inherited_asr_error": {
+          "first_only_true": 0,
+          "same": 300,
+          "second_only_true": 0
+        },
+        "material_error": {
+          "first_only_true": 2,
+          "same": 294,
+          "second_only_true": 4
+        }
+      }
+    },
+    "mlx_candidate_vs_selected_native": {
+      "cases": 300,
+      "flag_comparisons": {
+        "acceptable": {
+          "first_only_true": 11,
+          "same": 286,
+          "second_only_true": 3
+        },
+        "ambiguous": {
+          "first_only_true": 1,
+          "same": 293,
+          "second_only_true": 6
+        },
+        "cleanup_introduced_error": {
+          "first_only_true": 2,
+          "same": 287,
+          "second_only_true": 11
+        },
+        "inherited_asr_error": {
+          "first_only_true": 0,
+          "same": 297,
+          "second_only_true": 3
+        },
+        "material_error": {
+          "first_only_true": 0,
+          "same": 296,
+          "second_only_true": 4
+        }
+      }
+    },
+    "reference_mlx_vs_selected_native": {
+      "cases": 300,
+      "flag_comparisons": {
+        "acceptable": {
+          "first_only_true": 16,
+          "same": 278,
+          "second_only_true": 6
+        },
+        "ambiguous": {
+          "first_only_true": 3,
+          "same": 288,
+          "second_only_true": 9
+        },
+        "cleanup_introduced_error": {
+          "first_only_true": 4,
+          "same": 280,
+          "second_only_true": 16
+        },
+        "inherited_asr_error": {
+          "first_only_true": 0,
+          "same": 297,
+          "second_only_true": 3
+        },
+        "material_error": {
+          "first_only_true": 3,
+          "same": 292,
+          "second_only_true": 5
+        }
+      }
+    }
+  },
+  "per_mode": {
+    "code": {
+      "candidate": {
+        "acceptable": 5,
+        "ambiguous": 0,
+        "cases": 6,
+        "cleanup_introduced_error": 2,
+        "inherited_asr_error": 0,
+        "material_error": 1
+      },
+      "mlx_candidate": {
+        "acceptable": 5,
+        "ambiguous": 0,
+        "cases": 6,
+        "cleanup_introduced_error": 2,
+        "inherited_asr_error": 0,
+        "material_error": 1
+      },
+      "reference_mlx": {
+        "acceptable": 5,
+        "ambiguous": 0,
+        "cases": 6,
+        "cleanup_introduced_error": 2,
+        "inherited_asr_error": 0,
+        "material_error": 1
+      }
+    },
+    "default": {
+      "candidate": {
+        "acceptable": 161,
+        "ambiguous": 35,
+        "cases": 189,
+        "cleanup_introduced_error": 2,
+        "inherited_asr_error": 25,
+        "material_error": 27
+      },
+      "mlx_candidate": {
+        "acceptable": 163,
+        "ambiguous": 32,
+        "cases": 189,
+        "cleanup_introduced_error": 3,
+        "inherited_asr_error": 23,
+        "material_error": 24
+      },
+      "reference_mlx": {
+        "acceptable": 164,
+        "ambiguous": 32,
+        "cases": 189,
+        "cleanup_introduced_error": 4,
+        "inherited_asr_error": 23,
+        "material_error": 24
+      }
+    },
+    "message": {
+      "candidate": {
+        "acceptable": 8,
+        "ambiguous": 5,
+        "cases": 11,
+        "cleanup_introduced_error": 0,
+        "inherited_asr_error": 3,
+        "material_error": 3
+      },
+      "mlx_candidate": {
+        "acceptable": 8,
+        "ambiguous": 4,
+        "cases": 11,
+        "cleanup_introduced_error": 0,
+        "inherited_asr_error": 3,
+        "material_error": 3
+      },
+      "reference_mlx": {
+        "acceptable": 8,
+        "ambiguous": 4,
+        "cases": 11,
+        "cleanup_introduced_error": 0,
+        "inherited_asr_error": 3,
+        "material_error": 3
+      }
+    },
+    "terminal": {
+      "candidate": {
+        "acceptable": 57,
+        "ambiguous": 23,
+        "cases": 94,
+        "cleanup_introduced_error": 38,
+        "inherited_asr_error": 16,
+        "material_error": 14
+      },
+      "mlx_candidate": {
+        "acceptable": 63,
+        "ambiguous": 22,
+        "cases": 94,
+        "cleanup_introduced_error": 28,
+        "inherited_asr_error": 15,
+        "material_error": 13
+      },
+      "reference_mlx": {
+        "acceptable": 64,
+        "ambiguous": 21,
+        "cases": 94,
+        "cleanup_introduced_error": 24,
+        "inherited_asr_error": 15,
+        "material_error": 15
+      }
+    }
+  },
+  "provenance": {
+    "input_sha256": {
+      "differential_mapping": "dc141d92f8fdf80f21601f3a8827be2588fb4194dd8a0e2ad3568e413e98d42a",
+      "five_arm_mapping": "c409b41285316fa17c0f59127e20a48c0c4dd4ef4671e0886a3d28a18cdfa103",
+      "five_arm_packet_01": "e14dee94883a11d2e91ac563bee91aab7183372610c48085b8ed802d4363a8ed",
+      "five_arm_packet_02": "ff9d84e96844a548329bcb66f86bfe1a4a84ba40ce8fb8f493e5ee9e8d725a46",
+      "five_arm_packet_03": "07af514bf6d5f9923baf14dc33929b4b85d13a9d0d8439041ec9ccecdca2f4b3",
+      "five_arm_packet_04": "82a721cad2518080cc28c01a28c7ce5bd0bcab9ec32353c95f55e1419da3f27b",
+      "five_arm_packet_05": "cf61a4a50c3f5da19b3b20ee89e76c8450a58348f4a95ff29809a46d1ae92a2f",
+      "five_arm_packet_06": "b76908f829753bb4b0188296011a4a84f5fdd890f833fafb11c27621761f9d6b",
+      "primary_mapping": "9bf2a2029091d7689ff46e8f5ee13f5d45660c517cdd92cefb5f1bc2afc75f87",
+      "primary_packet_01": "f26d20008e35f8baed10d8552be8c77609bef4526d9883289e8023cd060d4310",
+      "primary_packet_02": "c569474bbab2bf19f9c5d9440202ba9f8b54a621a27fad86b69454db788bba9e",
+      "primary_packet_03": "718f0f1dd6061cb06af9732c4f3c764dc676430ddeb7727b5a1b69c30b5b414f",
+      "primary_packet_04": "d6c99fd11a2789016a1270c9d3b1a581d5214fae5443c3205dcbcb988a209a69",
+      "primary_packet_05": "68be140b3b4e96a9ca0b19ffc3a751d2b7a79b37d4e66cd08ec33924e239c6ce",
+      "primary_packet_06": "841869e2965247a07c10c86b3ccdbbe69015cf5bd2097529f92d1be75e910090",
+      "reuse": "e0fb0e857ffe729fcb0a1a71d58c7ca23998e47feed6ab27319b7a87568ee125",
+      "review-a_judgments": "9a3b095308373923e0bc1619136a2e566e9280471ab67f9cfd1177f53559138b",
+      "review-a_manifest": "97a70acc7e496cb73a15f27d6c760a3f2ce35f46fee1c00ddbbd237cd6cab92f",
+      "review-b_judgments": "1a0d543ddeb16e9444432b06650154321e75458faf609306f1ea6166149839b0",
+      "review-b_manifest": "bbeb321495f061d8a507031f1eab685ae2a6f77face2f402529130a5f23ba651",
+      "review-b_packet": "dbc5a19b1774e21ed398a8e32c82050b0ae3adc7e2d6326d0064ea4940bac470",
+      "review-terra_judgments": "61019d0a0174384fbc3f551c78f4fe1dcd2d6879c72eede820a99780ae60e4f1",
+      "review-terra_manifest": "134a33b3f04f23e44bb79c2ee603fd14e8f1bfa568b80488590bd79404422e72",
+      "review-terra_packet": "364e406fca0457383b195d5a58ea524b8dfdbe824cdeb6b52ed038b4970b5222"
+    },
+    "interpretation": "525 judgments were derived from identical displayed outputs and matching context, not independently re-reviewed; 75 novel outputs received new blind judgments. Reference text is fallible; no audio adjudication.",
+    "new_blind_output_judgments": 75,
+    "reused_exact_matching_outputs": 525
+  },
+  "schema": 1
+}

@@ -1,0 +1,811 @@
+{
+  "data_sha256": "6d964e6b22c80729aa80bff04d499080699193b55d558a55160b13ec4504a1a6",
+  "method": "fixed gold exact and strict lexical target diagnostics with case-sensitive protected spans. Alternate valid outputs may fail; not semantic quality, native-speaker or accent accuracy. All missing/failed outputs fail, no exclusions.",
+  "arms": {
+    "C": {
+      "source_sha256": "312143dfa692dd8f16178d5ca60de9fd7a9e5ad1aa20715dde84b2bddf30ad2d",
+      "overall": {
+        "cases": 256,
+        "complete": 256,
+        "exact_target": 115,
+        "strict_lexical_target": 190,
+        "repair_cases": 32,
+        "repair_strict_success": 29,
+        "no_edit_cases": 61,
+        "no_edit_exact": 34,
+        "protected_cases": 126,
+        "protected_violation_cases": 6
+      },
+      "by_mode": {
+        "code": {
+          "cases": 52,
+          "complete": 52,
+          "exact_target": 28,
+          "strict_lexical_target": 48,
+          "repair_cases": 0,
+          "repair_strict_success": 0,
+          "no_edit_cases": 52,
+          "no_edit_exact": 28,
+          "protected_cases": 24,
+          "protected_violation_cases": 1
+        },
+        "default": {
+          "cases": 52,
+          "complete": 52,
+          "exact_target": 40,
+          "strict_lexical_target": 47,
+          "repair_cases": 12,
+          "repair_strict_success": 10,
+          "no_edit_cases": 2,
+          "no_edit_exact": 2,
+          "protected_cases": 28,
+          "protected_violation_cases": 1
+        },
+        "email": {
+          "cases": 51,
+          "complete": 51,
+          "exact_target": 3,
+          "strict_lexical_target": 10,
+          "repair_cases": 5,
+          "repair_strict_success": 4,
+          "no_edit_cases": 0,
+          "no_edit_exact": 0,
+          "protected_cases": 24,
+          "protected_violation_cases": 0
+        },
+        "message": {
+          "cases": 51,
+          "complete": 51,
+          "exact_target": 9,
+          "strict_lexical_target": 39,
+          "repair_cases": 9,
+          "repair_strict_success": 9,
+          "no_edit_cases": 7,
+          "no_edit_exact": 4,
+          "protected_cases": 31,
+          "protected_violation_cases": 4
+        },
+        "note": {
+          "cases": 50,
+          "complete": 50,
+          "exact_target": 35,
+          "strict_lexical_target": 46,
+          "repair_cases": 6,
+          "repair_strict_success": 6,
+          "no_edit_cases": 0,
+          "no_edit_exact": 0,
+          "protected_cases": 19,
+          "protected_violation_cases": 0
+        }
+      },
+      "by_written_variant": {
+        "Australian": {
+          "cases": 4,
+          "complete": 4,
+          "exact_target": 0,
+          "strict_lexical_target": 3,
+          "repair_cases": 1,
+          "repair_strict_success": 1,
+          "no_edit_cases": 0,
+          "no_edit_exact": 0,
+          "protected_cases": 4,
+          "protected_violation_cases": 1
+        },
+        "Canadian": {
+          "cases": 2,
+          "complete": 2,
+          "exact_target": 1,
+          "strict_lexical_target": 2,
+          "repair_cases": 0,
+          "repair_strict_success": 0,
+          "no_edit_cases": 0,
+          "no_edit_exact": 0,
+          "protected_cases": 2,
+          "protected_violation_cases": 0
+        },
+        "neutral/unspecified": {
+          "cases": 250,
+          "complete": 250,
+          "exact_target": 114,
+          "strict_lexical_target": 185,
+          "repair_cases": 31,
+          "repair_strict_success": 28,
+          "no_edit_cases": 61,
+          "no_edit_exact": 34,
+          "protected_cases": 120,
+          "protected_violation_cases": 5
+        }
+      }
+    },
+    "base": {
+      "source_sha256": "232eee473ed68dae5aecccaa7bc04f6a052819b3155386ff363a61db2feb0807",
+      "overall": {
+        "cases": 256,
+        "complete": 255,
+        "exact_target": 78,
+        "strict_lexical_target": 121,
+        "repair_cases": 32,
+        "repair_strict_success": 3,
+        "no_edit_cases": 61,
+        "no_edit_exact": 50,
+        "protected_cases": 126,
+        "protected_violation_cases": 2
+      },
+      "by_mode": {
+        "code": {
+          "cases": 52,
+          "complete": 52,
+          "exact_target": 43,
+          "strict_lexical_target": 44,
+          "repair_cases": 0,
+          "repair_strict_success": 0,
+          "no_edit_cases": 52,
+          "no_edit_exact": 43,
+          "protected_cases": 24,
+          "protected_violation_cases": 0
+        },
+        "default": {
+          "cases": 52,
+          "complete": 52,
+          "exact_target": 28,
+          "strict_lexical_target": 40,
+          "repair_cases": 12,
+          "repair_strict_success": 1,
+          "no_edit_cases": 2,
+          "no_edit_exact": 2,
+          "protected_cases": 28,
+          "protected_violation_cases": 0
+        },
+        "email": {
+          "cases": 51,
+          "complete": 50,
+          "exact_target": 0,
+          "strict_lexical_target": 1,
+          "repair_cases": 5,
+          "repair_strict_success": 0,
+          "no_edit_cases": 0,
+          "no_edit_exact": 0,
+          "protected_cases": 24,
+          "protected_violation_cases": 1
+        },
+        "message": {
+          "cases": 51,
+          "complete": 51,
+          "exact_target": 7,
+          "strict_lexical_target": 36,
+          "repair_cases": 9,
+          "repair_strict_success": 2,
+          "no_edit_cases": 7,
+          "no_edit_exact": 5,
+          "protected_cases": 31,
+          "protected_violation_cases": 1
+        },
+        "note": {
+          "cases": 50,
+          "complete": 50,
+          "exact_target": 0,
+          "strict_lexical_target": 0,
+          "repair_cases": 6,
+          "repair_strict_success": 0,
+          "no_edit_cases": 0,
+          "no_edit_exact": 0,
+          "protected_cases": 19,
+          "protected_violation_cases": 0
+        }
+      },
+      "by_written_variant": {
+        "Australian": {
+          "cases": 4,
+          "complete": 4,
+          "exact_target": 0,
+          "strict_lexical_target": 3,
+          "repair_cases": 1,
+          "repair_strict_success": 0,
+          "no_edit_cases": 0,
+          "no_edit_exact": 0,
+          "protected_cases": 4,
+          "protected_violation_cases": 0
+        },
+        "Canadian": {
+          "cases": 2,
+          "complete": 2,
+          "exact_target": 1,
+          "strict_lexical_target": 2,
+          "repair_cases": 0,
+          "repair_strict_success": 0,
+          "no_edit_cases": 0,
+          "no_edit_exact": 0,
+          "protected_cases": 2,
+          "protected_violation_cases": 0
+        },
+        "neutral/unspecified": {
+          "cases": 250,
+          "complete": 249,
+          "exact_target": 77,
+          "strict_lexical_target": 116,
+          "repair_cases": 31,
+          "repair_strict_success": 3,
+          "no_edit_cases": 61,
+          "no_edit_exact": 50,
+          "protected_cases": 120,
+          "protected_violation_cases": 2
+        }
+      }
+    },
+    "4B-common": {
+      "source_sha256": "c1589fe41b0b646eb8fa65f310e68e0123b42973d7d53a204da9fba12c608b75",
+      "overall": {
+        "cases": 256,
+        "complete": 256,
+        "exact_target": 101,
+        "strict_lexical_target": 165,
+        "repair_cases": 32,
+        "repair_strict_success": 5,
+        "no_edit_cases": 61,
+        "no_edit_exact": 49,
+        "protected_cases": 126,
+        "protected_violation_cases": 3
+      },
+      "by_mode": {
+        "code": {
+          "cases": 52,
+          "complete": 52,
+          "exact_target": 41,
+          "strict_lexical_target": 42,
+          "repair_cases": 0,
+          "repair_strict_success": 0,
+          "no_edit_cases": 52,
+          "no_edit_exact": 41,
+          "protected_cases": 24,
+          "protected_violation_cases": 1
+        },
+        "default": {
+          "cases": 52,
+          "complete": 52,
+          "exact_target": 29,
+          "strict_lexical_target": 41,
+          "repair_cases": 12,
+          "repair_strict_success": 3,
+          "no_edit_cases": 2,
+          "no_edit_exact": 2,
+          "protected_cases": 28,
+          "protected_violation_cases": 1
+        },
+        "email": {
+          "cases": 51,
+          "complete": 51,
+          "exact_target": 2,
+          "strict_lexical_target": 5,
+          "repair_cases": 5,
+          "repair_strict_success": 0,
+          "no_edit_cases": 0,
+          "no_edit_exact": 0,
+          "protected_cases": 24,
+          "protected_violation_cases": 1
+        },
+        "message": {
+          "cases": 51,
+          "complete": 51,
+          "exact_target": 6,
+          "strict_lexical_target": 36,
+          "repair_cases": 9,
+          "repair_strict_success": 0,
+          "no_edit_cases": 7,
+          "no_edit_exact": 6,
+          "protected_cases": 31,
+          "protected_violation_cases": 0
+        },
+        "note": {
+          "cases": 50,
+          "complete": 50,
+          "exact_target": 23,
+          "strict_lexical_target": 41,
+          "repair_cases": 6,
+          "repair_strict_success": 2,
+          "no_edit_cases": 0,
+          "no_edit_exact": 0,
+          "protected_cases": 19,
+          "protected_violation_cases": 0
+        }
+      },
+      "by_written_variant": {
+        "Australian": {
+          "cases": 4,
+          "complete": 4,
+          "exact_target": 0,
+          "strict_lexical_target": 3,
+          "repair_cases": 1,
+          "repair_strict_success": 0,
+          "no_edit_cases": 0,
+          "no_edit_exact": 0,
+          "protected_cases": 4,
+          "protected_violation_cases": 0
+        },
+        "Canadian": {
+          "cases": 2,
+          "complete": 2,
+          "exact_target": 1,
+          "strict_lexical_target": 2,
+          "repair_cases": 0,
+          "repair_strict_success": 0,
+          "no_edit_cases": 0,
+          "no_edit_exact": 0,
+          "protected_cases": 2,
+          "protected_violation_cases": 0
+        },
+        "neutral/unspecified": {
+          "cases": 250,
+          "complete": 250,
+          "exact_target": 100,
+          "strict_lexical_target": 160,
+          "repair_cases": 31,
+          "repair_strict_success": 5,
+          "no_edit_cases": 61,
+          "no_edit_exact": 49,
+          "protected_cases": 120,
+          "protected_violation_cases": 3
+        }
+      }
+    },
+    "selected-MLX": {
+      "source_sha256": "d146d46e37b463b0b7cd74cb94d182120ae72c5da10b8d97ae51042322c6c5c5",
+      "overall": {
+        "cases": 256,
+        "complete": 256,
+        "exact_target": 177,
+        "strict_lexical_target": 245,
+        "repair_cases": 32,
+        "repair_strict_success": 32,
+        "no_edit_cases": 61,
+        "no_edit_exact": 57,
+        "protected_cases": 126,
+        "protected_violation_cases": 1
+      },
+      "by_mode": {
+        "code": {
+          "cases": 52,
+          "complete": 52,
+          "exact_target": 48,
+          "strict_lexical_target": 49,
+          "repair_cases": 0,
+          "repair_strict_success": 0,
+          "no_edit_cases": 52,
+          "no_edit_exact": 48,
+          "protected_cases": 24,
+          "protected_violation_cases": 0
+        },
+        "default": {
+          "cases": 52,
+          "complete": 52,
+          "exact_target": 43,
+          "strict_lexical_target": 51,
+          "repair_cases": 12,
+          "repair_strict_success": 12,
+          "no_edit_cases": 2,
+          "no_edit_exact": 2,
+          "protected_cases": 28,
+          "protected_violation_cases": 0
+        },
+        "email": {
+          "cases": 51,
+          "complete": 51,
+          "exact_target": 33,
+          "strict_lexical_target": 50,
+          "repair_cases": 5,
+          "repair_strict_success": 5,
+          "no_edit_cases": 0,
+          "no_edit_exact": 0,
+          "protected_cases": 24,
+          "protected_violation_cases": 0
+        },
+        "message": {
+          "cases": 51,
+          "complete": 51,
+          "exact_target": 16,
+          "strict_lexical_target": 46,
+          "repair_cases": 9,
+          "repair_strict_success": 9,
+          "no_edit_cases": 7,
+          "no_edit_exact": 7,
+          "protected_cases": 31,
+          "protected_violation_cases": 1
+        },
+        "note": {
+          "cases": 50,
+          "complete": 50,
+          "exact_target": 37,
+          "strict_lexical_target": 49,
+          "repair_cases": 6,
+          "repair_strict_success": 6,
+          "no_edit_cases": 0,
+          "no_edit_exact": 0,
+          "protected_cases": 19,
+          "protected_violation_cases": 0
+        }
+      },
+      "by_written_variant": {
+        "Australian": {
+          "cases": 4,
+          "complete": 4,
+          "exact_target": 1,
+          "strict_lexical_target": 3,
+          "repair_cases": 1,
+          "repair_strict_success": 1,
+          "no_edit_cases": 0,
+          "no_edit_exact": 0,
+          "protected_cases": 4,
+          "protected_violation_cases": 1
+        },
+        "Canadian": {
+          "cases": 2,
+          "complete": 2,
+          "exact_target": 1,
+          "strict_lexical_target": 2,
+          "repair_cases": 0,
+          "repair_strict_success": 0,
+          "no_edit_cases": 0,
+          "no_edit_exact": 0,
+          "protected_cases": 2,
+          "protected_violation_cases": 0
+        },
+        "neutral/unspecified": {
+          "cases": 250,
+          "complete": 250,
+          "exact_target": 175,
+          "strict_lexical_target": 240,
+          "repair_cases": 31,
+          "repair_strict_success": 31,
+          "no_edit_cases": 61,
+          "no_edit_exact": 57,
+          "protected_cases": 120,
+          "protected_violation_cases": 0
+        }
+      }
+    },
+    "E-MLX": {
+      "source_sha256": "4e457b2fa7be7da455d04cadce3f7da8c31a0420d200e0819ef1e322ebb7c8c1",
+      "overall": {
+        "cases": 256,
+        "complete": 256,
+        "exact_target": 171,
+        "strict_lexical_target": 239,
+        "repair_cases": 32,
+        "repair_strict_success": 32,
+        "no_edit_cases": 61,
+        "no_edit_exact": 56,
+        "protected_cases": 126,
+        "protected_violation_cases": 3
+      },
+      "by_mode": {
+        "code": {
+          "cases": 52,
+          "complete": 52,
+          "exact_target": 47,
+          "strict_lexical_target": 48,
+          "repair_cases": 0,
+          "repair_strict_success": 0,
+          "no_edit_cases": 52,
+          "no_edit_exact": 47,
+          "protected_cases": 24,
+          "protected_violation_cases": 1
+        },
+        "default": {
+          "cases": 52,
+          "complete": 52,
+          "exact_target": 41,
+          "strict_lexical_target": 49,
+          "repair_cases": 12,
+          "repair_strict_success": 12,
+          "no_edit_cases": 2,
+          "no_edit_exact": 2,
+          "protected_cases": 28,
+          "protected_violation_cases": 1
+        },
+        "email": {
+          "cases": 51,
+          "complete": 51,
+          "exact_target": 32,
+          "strict_lexical_target": 49,
+          "repair_cases": 5,
+          "repair_strict_success": 5,
+          "no_edit_cases": 0,
+          "no_edit_exact": 0,
+          "protected_cases": 24,
+          "protected_violation_cases": 0
+        },
+        "message": {
+          "cases": 51,
+          "complete": 51,
+          "exact_target": 16,
+          "strict_lexical_target": 46,
+          "repair_cases": 9,
+          "repair_strict_success": 9,
+          "no_edit_cases": 7,
+          "no_edit_exact": 7,
+          "protected_cases": 31,
+          "protected_violation_cases": 1
+        },
+        "note": {
+          "cases": 50,
+          "complete": 50,
+          "exact_target": 35,
+          "strict_lexical_target": 47,
+          "repair_cases": 6,
+          "repair_strict_success": 6,
+          "no_edit_cases": 0,
+          "no_edit_exact": 0,
+          "protected_cases": 19,
+          "protected_violation_cases": 0
+        }
+      },
+      "by_written_variant": {
+        "Australian": {
+          "cases": 4,
+          "complete": 4,
+          "exact_target": 1,
+          "strict_lexical_target": 3,
+          "repair_cases": 1,
+          "repair_strict_success": 1,
+          "no_edit_cases": 0,
+          "no_edit_exact": 0,
+          "protected_cases": 4,
+          "protected_violation_cases": 1
+        },
+        "Canadian": {
+          "cases": 2,
+          "complete": 2,
+          "exact_target": 1,
+          "strict_lexical_target": 2,
+          "repair_cases": 0,
+          "repair_strict_success": 0,
+          "no_edit_cases": 0,
+          "no_edit_exact": 0,
+          "protected_cases": 2,
+          "protected_violation_cases": 0
+        },
+        "neutral/unspecified": {
+          "cases": 250,
+          "complete": 250,
+          "exact_target": 169,
+          "strict_lexical_target": 234,
+          "repair_cases": 31,
+          "repair_strict_success": 31,
+          "no_edit_cases": 61,
+          "no_edit_exact": 56,
+          "protected_cases": 120,
+          "protected_violation_cases": 2
+        }
+      }
+    },
+    "selected-Q4": {
+      "source_sha256": "4bf07239c178c6277c9d2634430f55e9b794b81e578658c48334eb93f171bceb",
+      "overall": {
+        "cases": 256,
+        "complete": 256,
+        "exact_target": 170,
+        "strict_lexical_target": 245,
+        "repair_cases": 32,
+        "repair_strict_success": 32,
+        "no_edit_cases": 61,
+        "no_edit_exact": 55,
+        "protected_cases": 126,
+        "protected_violation_cases": 1
+      },
+      "by_mode": {
+        "code": {
+          "cases": 52,
+          "complete": 52,
+          "exact_target": 46,
+          "strict_lexical_target": 49,
+          "repair_cases": 0,
+          "repair_strict_success": 0,
+          "no_edit_cases": 52,
+          "no_edit_exact": 46,
+          "protected_cases": 24,
+          "protected_violation_cases": 0
+        },
+        "default": {
+          "cases": 52,
+          "complete": 52,
+          "exact_target": 43,
+          "strict_lexical_target": 51,
+          "repair_cases": 12,
+          "repair_strict_success": 12,
+          "no_edit_cases": 2,
+          "no_edit_exact": 2,
+          "protected_cases": 28,
+          "protected_violation_cases": 0
+        },
+        "email": {
+          "cases": 51,
+          "complete": 51,
+          "exact_target": 30,
+          "strict_lexical_target": 50,
+          "repair_cases": 5,
+          "repair_strict_success": 5,
+          "no_edit_cases": 0,
+          "no_edit_exact": 0,
+          "protected_cases": 24,
+          "protected_violation_cases": 0
+        },
+        "message": {
+          "cases": 51,
+          "complete": 51,
+          "exact_target": 16,
+          "strict_lexical_target": 45,
+          "repair_cases": 9,
+          "repair_strict_success": 9,
+          "no_edit_cases": 7,
+          "no_edit_exact": 7,
+          "protected_cases": 31,
+          "protected_violation_cases": 1
+        },
+        "note": {
+          "cases": 50,
+          "complete": 50,
+          "exact_target": 35,
+          "strict_lexical_target": 50,
+          "repair_cases": 6,
+          "repair_strict_success": 6,
+          "no_edit_cases": 0,
+          "no_edit_exact": 0,
+          "protected_cases": 19,
+          "protected_violation_cases": 0
+        }
+      },
+      "by_written_variant": {
+        "Australian": {
+          "cases": 4,
+          "complete": 4,
+          "exact_target": 1,
+          "strict_lexical_target": 3,
+          "repair_cases": 1,
+          "repair_strict_success": 1,
+          "no_edit_cases": 0,
+          "no_edit_exact": 0,
+          "protected_cases": 4,
+          "protected_violation_cases": 1
+        },
+        "Canadian": {
+          "cases": 2,
+          "complete": 2,
+          "exact_target": 1,
+          "strict_lexical_target": 2,
+          "repair_cases": 0,
+          "repair_strict_success": 0,
+          "no_edit_cases": 0,
+          "no_edit_exact": 0,
+          "protected_cases": 2,
+          "protected_violation_cases": 0
+        },
+        "neutral/unspecified": {
+          "cases": 250,
+          "complete": 250,
+          "exact_target": 168,
+          "strict_lexical_target": 240,
+          "repair_cases": 31,
+          "repair_strict_success": 31,
+          "no_edit_cases": 61,
+          "no_edit_exact": 55,
+          "protected_cases": 120,
+          "protected_violation_cases": 0
+        }
+      }
+    },
+    "COPY": {
+      "source_sha256": null,
+      "overall": {
+        "cases": 256,
+        "complete": 256,
+        "exact_target": 61,
+        "strict_lexical_target": 219,
+        "repair_cases": 32,
+        "repair_strict_success": 0,
+        "no_edit_cases": 61,
+        "no_edit_exact": 61,
+        "protected_cases": 126,
+        "protected_violation_cases": 0
+      },
+      "by_mode": {
+        "code": {
+          "cases": 52,
+          "complete": 52,
+          "exact_target": 52,
+          "strict_lexical_target": 52,
+          "repair_cases": 0,
+          "repair_strict_success": 0,
+          "no_edit_cases": 52,
+          "no_edit_exact": 52,
+          "protected_cases": 24,
+          "protected_violation_cases": 0
+        },
+        "default": {
+          "cases": 52,
+          "complete": 52,
+          "exact_target": 2,
+          "strict_lexical_target": 40,
+          "repair_cases": 12,
+          "repair_strict_success": 0,
+          "no_edit_cases": 2,
+          "no_edit_exact": 2,
+          "protected_cases": 28,
+          "protected_violation_cases": 0
+        },
+        "email": {
+          "cases": 51,
+          "complete": 51,
+          "exact_target": 0,
+          "strict_lexical_target": 46,
+          "repair_cases": 5,
+          "repair_strict_success": 0,
+          "no_edit_cases": 0,
+          "no_edit_exact": 0,
+          "protected_cases": 24,
+          "protected_violation_cases": 0
+        },
+        "message": {
+          "cases": 51,
+          "complete": 51,
+          "exact_target": 7,
+          "strict_lexical_target": 37,
+          "repair_cases": 9,
+          "repair_strict_success": 0,
+          "no_edit_cases": 7,
+          "no_edit_exact": 7,
+          "protected_cases": 31,
+          "protected_violation_cases": 0
+        },
+        "note": {
+          "cases": 50,
+          "complete": 50,
+          "exact_target": 0,
+          "strict_lexical_target": 44,
+          "repair_cases": 6,
+          "repair_strict_success": 0,
+          "no_edit_cases": 0,
+          "no_edit_exact": 0,
+          "protected_cases": 19,
+          "protected_violation_cases": 0
+        }
+      },
+      "by_written_variant": {
+        "Australian": {
+          "cases": 4,
+          "complete": 4,
+          "exact_target": 0,
+          "strict_lexical_target": 3,
+          "repair_cases": 1,
+          "repair_strict_success": 0,
+          "no_edit_cases": 0,
+          "no_edit_exact": 0,
+          "protected_cases": 4,
+          "protected_violation_cases": 0
+        },
+        "Canadian": {
+          "cases": 2,
+          "complete": 2,
+          "exact_target": 0,
+          "strict_lexical_target": 2,
+          "repair_cases": 0,
+          "repair_strict_success": 0,
+          "no_edit_cases": 0,
+          "no_edit_exact": 0,
+          "protected_cases": 2,
+          "protected_violation_cases": 0
+        },
+        "neutral/unspecified": {
+          "cases": 250,
+          "complete": 250,
+          "exact_target": 61,
+          "strict_lexical_target": 214,
+          "repair_cases": 31,
+          "repair_strict_success": 0,
+          "no_edit_cases": 61,
+          "no_edit_exact": 61,
+          "protected_cases": 120,
+          "protected_violation_cases": 0
+        }
+      }
+    }
+  }
+}

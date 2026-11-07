@@ -1,0 +1,326 @@
+{
+  "data_sha256": "994855d6f401c8842a71cfb1705a8d5976b8364e0e5c280999981501675f8d4b",
+  "cases": 52,
+  "smart_terminal": true,
+  "gate_reasons": {
+    "smart_terminal": 5,
+    "formatting_off": 47
+  },
+  "no_model_cases": 47,
+  "exact_literal_target_without_model": 47,
+  "decision": "Original52 bypass annotations are inaccurate under actual Smart Terminal default. Keep frozen data and quarantine these cases from primary256 quality scoring; do not claim52 verified exact bypass passes. This is a fixture-contract problem, not an engine regression.",
+  "records": [
+    {
+      "id": "fresh-public-part01-041",
+      "use_llm": true,
+      "reason": "smart_terminal",
+      "literal_target_preserved": true
+    },
+    {
+      "id": "fresh-public-part01-042",
+      "use_llm": false,
+      "reason": "formatting_off",
+      "literal_target_preserved": true
+    },
+    {
+      "id": "fresh-public-part01-043",
+      "use_llm": false,
+      "reason": "formatting_off",
+      "literal_target_preserved": true
+    },
+    {
+      "id": "fresh-public-part01-044",
+      "use_llm": false,
+      "reason": "formatting_off",
+      "literal_target_preserved": true
+    },
+    {
+      "id": "fresh-public-part01-045",
+      "use_llm": false,
+      "reason": "formatting_off",
+      "literal_target_preserved": true
+    },
+    {
+      "id": "fresh-public-part01-046",
+      "use_llm": false,
+      "reason": "formatting_off",
+      "literal_target_preserved": true
+    },
+    {
+      "id": "fresh-public-part01-047",
+      "use_llm": false,
+      "reason": "formatting_off",
+      "literal_target_preserved": true
+    },
+    {
+      "id": "fresh-public-part01-048",
+      "use_llm": false,
+      "reason": "formatting_off",
+      "literal_target_preserved": true
+    },
+    {
+      "id": "fresh-public-part02-041",
+      "use_llm": true,
+      "reason": "smart_terminal",
+      "literal_target_preserved": true
+    },
+    {
+      "id": "fresh-public-part02-042",
+      "use_llm": false,
+      "reason": "formatting_off",
+      "literal_target_preserved": true
+    },
+    {
+      "id": "fresh-public-part02-043",
+      "use_llm": false,
+      "reason": "formatting_off",
+      "literal_target_preserved": true
+    },
+    {
+      "id": "fresh-public-part02-044",
+      "use_llm": false,
+      "reason": "formatting_off",
+      "literal_target_preserved": true
+    },
+    {
+      "id": "fresh-public-part02-045",
+      "use_llm": false,
+      "reason": "formatting_off",
+      "literal_target_preserved": true
+    },
+    {
+      "id": "fresh-public-part02-046",
+      "use_llm": false,
+      "reason": "formatting_off",
+      "literal_target_preserved": true
+    },
+    {
+      "id": "fresh-public-part02-047",
+      "use_llm": false,
+      "reason": "formatting_off",
+      "literal_target_preserved": true
+    },
+    {
+      "id": "fresh-public-part02-048",
+      "use_llm": false,
+      "reason": "formatting_off",
+      "literal_target_preserved": true
+    },
+    {
+      "id": "fresh-public-part03-041",
+      "use_llm": true,
+      "reason": "smart_terminal",
+      "literal_target_preserved": true
+    },
+    {
+      "id": "fresh-public-part03-042",
+      "use_llm": false,
+      "reason": "formatting_off",
+      "literal_target_preserved": true
+    },
+    {
+      "id": "fresh-public-part03-043",
+      "use_llm": false,
+      "reason": "formatting_off",
+      "literal_target_preserved": true
+    },
+    {
+      "id": "fresh-public-part03-044",
+      "use_llm": false,
+      "reason": "formatting_off",
+      "literal_target_preserved": true
+    },
+    {
+      "id": "fresh-public-part03-045",
+      "use_llm": false,
+      "reason": "formatting_off",
+      "literal_target_preserved": true
+    },
+    {
+      "id": "fresh-public-part03-046",
+      "use_llm": false,
+      "reason": "formatting_off",
+      "literal_target_preserved": true
+    },
+    {
+      "id": "fresh-public-part03-047",
+      "use_llm": false,
+      "reason": "formatting_off",
+      "literal_target_preserved": true
+    },
+    {
+      "id": "fresh-public-part03-048",
+      "use_llm": false,
+      "reason": "formatting_off",
+      "literal_target_preserved": true
+    },
+    {
+      "id": "fresh-public-part04-041",
+      "use_llm": true,
+      "reason": "smart_terminal",
+      "literal_target_preserved": true
+    },
+    {
+      "id": "fresh-public-part04-042",
+      "use_llm": false,
+      "reason": "formatting_off",
+      "literal_target_preserved": true
+    },
+    {
+      "id": "fresh-public-part04-043",
+      "use_llm": false,
+      "reason": "formatting_off",
+      "literal_target_preserved": true
+    },
+    {
+      "id": "fresh-public-part04-044",
+      "use_llm": false,
+      "reason": "formatting_off",
+      "literal_target_preserved": true
+    },
+    {
+      "id": "fresh-public-part04-045",
+      "use_llm": false,
+      "reason": "formatting_off",
+      "literal_target_preserved": true
+    },
+    {
+      "id": "fresh-public-part04-046",
+      "use_llm": false,
+      "reason": "formatting_off",
+      "literal_target_preserved": true
+    },
+    {
+      "id": "fresh-public-part04-047",
+      "use_llm": false,
+      "reason": "formatting_off",
+      "literal_target_preserved": true
+    },
+    {
+      "id": "fresh-public-part04-048",
+      "use_llm": false,
+      "reason": "formatting_off",
+      "literal_target_preserved": true
+    },
+    {
+      "id": "fresh-public-part05-041",
+      "use_llm": true,
+      "reason": "smart_terminal",
+      "literal_target_preserved": true
+    },
+    {
+      "id": "fresh-public-part05-042",
+      "use_llm": false,
+      "reason": "formatting_off",
+      "literal_target_preserved": true
+    },
+    {
+      "id": "fresh-public-part05-043",
+      "use_llm": false,
+      "reason": "formatting_off",
+      "literal_target_preserved": true
+    },
+    {
+      "id": "fresh-public-part05-044",
+      "use_llm": false,
+      "reason": "formatting_off",
+      "literal_target_preserved": true
+    },
+    {
+      "id": "fresh-public-part05-045",
+      "use_llm": false,
+      "reason": "formatting_off",
+      "literal_target_preserved": true
+    },
+    {
+      "id": "fresh-public-part05-046",
+      "use_llm": false,
+      "reason": "formatting_off",
+      "literal_target_preserved": true
+    },
+    {
+      "id": "fresh-public-part05-047",
+      "use_llm": false,
+      "reason": "formatting_off",
+      "literal_target_preserved": true
+    },
+    {
+      "id": "fresh-public-part05-048",
+      "use_llm": false,
+      "reason": "formatting_off",
+      "literal_target_preserved": true
+    },
+    {
+      "id": "fresh-regional72-011",
+      "use_llm": false,
+      "reason": "formatting_off",
+      "literal_target_preserved": true
+    },
+    {
+      "id": "fresh-regional72-012",
+      "use_llm": false,
+      "reason": "formatting_off",
+      "literal_target_preserved": true
+    },
+    {
+      "id": "fresh-regional72-023",
+      "use_llm": false,
+      "reason": "formatting_off",
+      "literal_target_preserved": true
+    },
+    {
+      "id": "fresh-regional72-024",
+      "use_llm": false,
+      "reason": "formatting_off",
+      "literal_target_preserved": true
+    },
+    {
+      "id": "fresh-regional72-035",
+      "use_llm": false,
+      "reason": "formatting_off",
+      "literal_target_preserved": true
+    },
+    {
+      "id": "fresh-regional72-036",
+      "use_llm": false,
+      "reason": "formatting_off",
+      "literal_target_preserved": true
+    },
+    {
+      "id": "fresh-regional72-047",
+      "use_llm": false,
+      "reason": "formatting_off",
+      "literal_target_preserved": true
+    },
+    {
+      "id": "fresh-regional72-048",
+      "use_llm": false,
+      "reason": "formatting_off",
+      "literal_target_preserved": true
+    },
+    {
+      "id": "fresh-regional72-059",
+      "use_llm": false,
+      "reason": "formatting_off",
+      "literal_target_preserved": true
+    },
+    {
+      "id": "fresh-regional72-060",
+      "use_llm": false,
+      "reason": "formatting_off",
+      "literal_target_preserved": true
+    },
+    {
+      "id": "fresh-regional72-071",
+      "use_llm": false,
+      "reason": "formatting_off",
+      "literal_target_preserved": true
+    },
+    {
+      "id": "fresh-regional72-072",
+      "use_llm": false,
+      "reason": "formatting_off",
+      "literal_target_preserved": true
+    }
+  ]
+}

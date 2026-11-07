@@ -1,0 +1,2 @@
+# Preserve the required blank context marker in the archived unified diff.
+experiments/single-anchor.patch -whitespace

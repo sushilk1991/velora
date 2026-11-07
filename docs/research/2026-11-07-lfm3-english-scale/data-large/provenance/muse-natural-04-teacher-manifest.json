@@ -1,0 +1,66 @@
+{
+  "teacher": "Muse Code powered by muse-wonder-1.0",
+  "teacher_identity_note": "Actual Muse identity as available in session; labels are teacher proposals, not independent review approvals.",
+  "source": {
+    "file": "raw-inputs.jsonl",
+    "count": 768,
+    "sha256": "9bbf0d590bcd95f93443d633f001522cb55e08a51c1a1774607c0199abae3636",
+    "source_name": "sotto-transcript-cleanup",
+    "revision": "183cc8fd58532f13fa192980185214de1bcd5acc",
+    "license": "MIT"
+  },
+  "output": {
+    "file": "teacher-labels.jsonl",
+    "count": 768,
+    "sha256": "da90cd30bb492c872a3d4661a16677231f1e3b946f01de1d3338ab46db6924b1"
+  },
+  "counts": {
+    "total": 768,
+    "unique_ids": 768,
+    "nonempty_targets": 768
+  },
+  "distributions": {
+    "mode": {
+      "default": 768
+    },
+    "language": {
+      "en": 768
+    },
+    "english_variant": {
+      "unspecified": 768
+    },
+    "edit_policy": {
+      "minimal": 521,
+      "repair": 247
+    },
+    "confidence": {
+      "supported": 754,
+      "uncertain": 14
+    }
+  },
+  "mode_note": "All default: no input was clearly a message/email/note/code/terminal under TEACHER.md/stock-modes.json; non-default was not guessed from imperatives.",
+  "checks_run": [
+    "Read TEACHER.md and stock-modes.json in full.",
+    "Read every raw input in pages (768 rows, printed in chunks).",
+    "Verified 768 labels, exact ID order/set match to raw-inputs.jsonl, unique IDs, nonempty targets, exact output keys.",
+    "Word-overlap alignment check: 0 low-overlap flags at 0.4 threshold.",
+    "Checked short repair targets (<0.35 raw length) and corrected truncated cases.",
+    "sha256 computed for input and output files."
+  ],
+  "uncertain_ids": [
+    "sotto-train-001816",
+    "sotto-train-109609",
+    "sotto-train-055960",
+    "sotto-train-067466",
+    "sotto-train-064136",
+    "sotto-train-118201",
+    "sotto-train-096271",
+    "sotto-train-086801",
+    "sotto-train-004398",
+    "sotto-train-016054",
+    "sotto-train-049934",
+    "sotto-train-035748",
+    "sotto-train-087722",
+    "sotto-train-014424"
+  ]
+}

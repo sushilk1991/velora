@@ -1,0 +1,17 @@
+{
+  "frozen_at_utc": "2026-11-07T03:18:51.974309+00:00",
+  "before_new_training": true,
+  "audio_cases": 24,
+  "stt_ok": 24,
+  "accent_groups": 6,
+  "speakers": 12,
+  "collision_count_with_prior_finetune": 0,
+  "diagnostic_collision_ids": [],
+  "manifest_sha256": "a09515adda49d5d116731bfd89b6291d4792ff526300be703d21d18fcbf21cab",
+  "recognition_sha256": "1219e702643e3e32294b957d182a0ed8955505a68fff2d0c0cc3f5fd34a93c9a",
+  "input_sha256": "28c8f726b25cd8c2a5d37a90e6969629a66899bd9ec3e1b539453500baaa5dd3",
+  "guards_sha256": "a943833d03f55749935c63682295944b8512ec23b34f560ff0f81a5faa31c2e8",
+  "guard_cases": 779,
+  "reference_type": "Publishertext notmanuallyverified; tokenWER/damage diagnostic notsemanticgeneralaccentaccuracy",
+  "training_use": false
+}

@@ -1,0 +1,42 @@
+{
+  "scope": "Targeted second-reviewer audit of7candidate-only material-regression cases versus either comparator plus12hashselectedcontrols. Each case assigned to a different reviewer from its primary judgment; not full independent300-case accuracy.",
+  "cases": 19,
+  "judgments": 57,
+  "arms": {
+    "native_c": {
+      "cases": 19,
+      "material_error": 5,
+      "ambiguous": 5,
+      "cleanup_introduced_error": 5
+    },
+    "candidate": {
+      "cases": 19,
+      "material_error": 7,
+      "ambiguous": 5,
+      "cleanup_introduced_error": 4
+    },
+    "production_4b3": {
+      "cases": 19,
+      "material_error": 3,
+      "ambiguous": 4,
+      "cleanup_introduced_error": 3
+    }
+  },
+  "material_agreement": {
+    "agreed": 55,
+    "comparisons": 57
+  },
+  "receipts": {
+    "review-b": {
+      "packet_sha256": "0d3d3db56959cdaf11d6bdb82d30ca1f48bbc19d8cc817438053e825c13b81df",
+      "judgments_sha256": "0e5a5d0ee916ee5a65f6c07a91a471906234438c0e2db51841c3d73b34d170e5",
+      "manifest_sha256": "db877ca035ff0421bff0ffe5907b7ae89660863078be93e9b666f47bac7cc740"
+    },
+    "review-terra": {
+      "packet_sha256": "846a65f5ca2c4373d5cf4cf2534d8eac78aecc516a24d070d9361ac1782437a5",
+      "judgments_sha256": "497c9a80e4af712f51be0d19da09493bef7b1cbdeeb36633d03750e8ab20f527",
+      "manifest_sha256": "2b2c37a31abc4cea4979a33cc4a3f9431002faf2d574a8f93bd98f1aaa8bd280"
+    }
+  },
+  "privacy": "All examples and judgments remain private; only aggregate counts and artifact hashes published."
+}

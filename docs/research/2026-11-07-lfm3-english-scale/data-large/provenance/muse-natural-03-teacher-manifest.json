@@ -1,0 +1,66 @@
+{
+  "teacher": "Muse Code powered by muse-wonder-1.0",
+  "teacher_identity": "Muse Code powered by muse-wonder-1.0 (actual identity from session system prompt; no other model identity available)",
+  "labels_status": "teacher proposals, not independent review approvals",
+  "source": {
+    "name": "sotto-transcript-cleanup",
+    "revision": "183cc8fd58532f13fa192980185214de1bcd5acc",
+    "license": "MIT",
+    "note": "Pinned MIT Sotto raw inputs only; upstream outputs never supplied or retrieved."
+  },
+  "input_file": "raw-inputs.jsonl",
+  "output_file": "teacher-labels.jsonl",
+  "input_sha256": "f0dd8def29bbbd64417f3ab38516c71187d00a945919c798822bab2a84eee409",
+  "output_sha256": "8fd796a12f29ed47a2a631c55688d58a3c557ae1ed85cacabc122b182cc82895",
+  "total_input": 768,
+  "total_labels": 768,
+  "unique_ids": 768,
+  "counts": {
+    "total": 768
+  },
+  "confidence_distribution": {
+    "supported": 753,
+    "uncertain": 15
+  },
+  "edit_policy_distribution": {
+    "minimal": 484,
+    "repair": 284
+  },
+  "mode_distribution": {
+    "default": 768
+  },
+  "language_distribution": {
+    "en": 768
+  },
+  "english_variant_distribution": {
+    "unspecified": 768
+  },
+  "mode_note": "All default: no input alone clearly established message/email/note/code/terminal without app context; non-default was not guessed from imperatives and no mode balance was forced. Stock instructions applied: default general-purpose clean punctuated prose preserving wording/order; code/terminal/message special rules would have applied only for clear cases, of which none were identified.",
+  "stock_modes_file": "stock-modes.json",
+  "checks_run": [
+    "Read task.txt, TEACHER.md, stock-modes.json and all 768 raws in pages of 64/128 (indices 0-767 printed and inspected).",
+    "python3 build_labels.py (authored-target serializer) -> wrote 768 missing 0.",
+    "Verified 768 input rows = 768 output rows, no missing IDs, no extra IDs, no duplicate IDs, no empty targets, no PLACEHOLDER targets.",
+    "Verified every output object has exactly keys id,target,mode,language,english_variant,edit_policy,confidence,reason.",
+    "Verified edit_policy values are only minimal/repair in final file, confidence only supported/uncertain, mode only default, language only en, variant only unspecified.",
+    "Spot-checked fillers: no ' um ' / ' uh ' substrings remain in targets.",
+    "Computed SHA-256 of raw-inputs.jsonl and teacher-labels.jsonl for this manifest (output sha computed before manifest write)."
+  ],
+  "uncertain_ids": [
+    "sotto-train-085697",
+    "sotto-train-130604",
+    "sotto-train-126569",
+    "sotto-train-003285",
+    "sotto-train-065117",
+    "sotto-validation-005546",
+    "sotto-train-106079",
+    "sotto-train-047319",
+    "sotto-train-079237",
+    "sotto-train-033226",
+    "sotto-train-120927",
+    "sotto-train-064445",
+    "sotto-train-071268",
+    "sotto-train-008415",
+    "sotto-train-038945"
+  ]
+}

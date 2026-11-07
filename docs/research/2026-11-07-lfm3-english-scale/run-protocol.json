@@ -1,0 +1,186 @@
+{
+  "schema": 1,
+  "scope": "English-only continuation/cold SFT plus on-device inference and speech comparisons; no production activation",
+  "start_commit": "88731db",
+  "tooling_commit": "09e870d",
+  "large_data_sha256": "06f5640572c6f21f29db16acbbae34a605f2d70171cc9cd103f183dab5d52fb2",
+  "small_data_sha256": "16615f19039352148883a634dae65581c612e9e65dcb184c65e39b1bbfe08a79",
+  "fresh_freeze": {
+    "frozen_at_utc": "2026-11-07T02:59:33.869843+00:00",
+    "frozen_before_new_training_and_all_model_predictions": true,
+    "active": 256,
+    "bypass": 52,
+    "rejected": 4,
+    "repair_required": 32,
+    "no_edit_expected": 61,
+    "protected_literals": 126,
+    "active_modes": {
+      "default": 52,
+      "message": 51,
+      "email": 51,
+      "note": 50,
+      "code": 52
+    },
+    "author": "Terra",
+    "reviewers": [
+      "Muse",
+      "Astra contract adjudication"
+    ],
+    "review_scope": "Modelassistedwrittenfidelity, nothuman/audio/accentcertification",
+    "sourcebase_contamination": "all2216priortrainingrows passed exactand8wordguards; olderweightsseen none ofnewchallenge",
+    "guard_cases": 755,
+    "files_sha256": {
+      "fresh-active.jsonl": "6d964e6b22c80729aa80bff04d499080699193b55d558a55160b13ec4504a1a6",
+      "fresh-bypass.jsonl": "994855d6f401c8842a71cfb1705a8d5976b8364e0e5c280999981501675f8d4b",
+      "fresh-guards.jsonl": "239f2a58f4cf1861ec0cc1fc9302162572afc33fb6fff4f9bf5ca9557c38c8e8",
+      "training-exclusions.jsonl": "d5bbaa12932cc868bdeed52cc64491598f901a31bde71cb437fd0070a4c89dfe"
+    },
+    "stock_mode_sha256": {
+      "code": "d3d2a6e652f92676a3f853c0c384a2c0d45858de6ac82a1d1cde05a42c0705dd",
+      "raw": "3b565aebe638170a8c0f259545362cbd096090ba61fb335dcc5d12b6da505976",
+      "note": "4b0e314222b2ce6f87d41af7dfb0f4623daf500cf234f49f83dbe75fa18a498e",
+      "email": "f2f71e1de7c136595d0b743355ef9434910aa95f3807a517a8d5f395123f1c90",
+      "terminal": "762b41c0642d941d9b013c14ccedc980a96f3553eca57065a386f90b2b3e4876",
+      "default": "f723583c05b1d4b95ddc2c283f6ff3136ed8707f90d539cc46a91ef91f894714",
+      "message": "dd8d35a77ea4e4ccc194f38fec95246ca149a98820131e18e648413a0a799df9"
+    },
+    "quality_metrics": "materialdamage+introducedfacts+requiredrepairrecall+noeditaccuracy+protectedliterals+controls, alwayscopycounterbaseline",
+    "checkpoint_selection": "Devonly; neverthischallenge orowner recordings"
+  },
+  "training_recipes": {
+    "D_small": {
+      "dataset": "pilot-d",
+      "initial": "prior selected C",
+      "samples": 8192,
+      "rank": 16,
+      "scale": 8,
+      "lr": 3e-06,
+      "warmup_updates": 20,
+      "schedule": "cosine",
+      "grad_accum": 4,
+      "clip": 1,
+      "max_seq": 2048,
+      "seed": 42,
+      "eval_save_every": 2048,
+      "checkpoint_selection": "retainall; later score initialC andeachsavedD onFINALlargerdev, neverchallenge/owner"
+    },
+    "E_large": {
+      "initial": "same prior selected C, notD",
+      "samples": 8192,
+      "parameters": "sameasD",
+      "dataset": "D exactprefix Englishrows+additionalreviewedfamilies; preserve allDtrain/devassignments; cannotintroduceDseencontenttofuturedev"
+    },
+    "F_optional": "lowLR1e-6conservativecalibration<=2000samples, selectedusingdevrepair/noeditconstraints; rejectrequiredrepairrecallloss>2pp",
+    "G_optional": {
+      "initial": "unadapted pinned LiquidAI base",
+      "data": "same frozen E7631",
+      "samples": 8192,
+      "lr": 1e-05,
+      "other_parameters": "same D/E",
+      "checkpoint_selection": "same full1427dev including initial C/D; no fresh or owner selection"
+    },
+    "budget": "max4trainingrecipes total/6hours/zeropaid/singleGPU",
+    "F_optional_frozen_data": {
+      "train_rows": 2000,
+      "dev_rows": 1427,
+      "identity_rows": 1500,
+      "changed_cue_rows": 500,
+      "selection": "deterministic SHA rank; no outputs used; source labels unchanged. Cue selection is not independently verified repair annotation.",
+      "parent": "best full-dev eligible D/E/G selected before fresh results",
+      "recipe": {
+        "samples": 2000,
+        "lr": 1e-06,
+        "rank": 16,
+        "scale": 8,
+        "grad_accum": 4,
+        "warmup_updates": 20,
+        "max_seq": 2048,
+        "seed": 42,
+        "schedule": "cosine",
+        "eval_save_every": 1000
+      },
+      "data_sha256": "dae9a137ba13d081794ccdf4c3fff785e782d7c9b57875f97bff68488511b3ac",
+      "acceptance": "full1427dev loss with preregistered43repaircase guard; nofresh/ownerselection"
+    },
+    "F_selection_rule": {
+      "frozen_at_utc": "2026-11-07T04:41:08.358789+00:00",
+      "before_E_dev_predictions_and_any_fresh_quality_inspection": true,
+      "parent": "Minimum full1427dev loss across D/E/G retained checkpoints and original C; no challenge/owner selection.",
+      "F_eligibility": [
+        "All185supporteddevprobeoutputscompleteEOS",
+        "On43requiredrepairs, no net successful-case loss versus BOTH initialC and parent: the2pp threshold permitszero case loss.",
+        "Protected-literal violation cases must not increase versus parent.",
+        "No-edit exact preservation on86supportedcases must strictly improve versus parent."
+      ],
+      "F_selection": "Among eligible F1000/F2000 candidates choose highest devprobe no-edit exact preservation; tie lower full1427dev answer-tokenloss. If noneeligible retainparent. All full-dev lossesreported, but calibration is explicitly a preservation objective subject torepair/literal constraints, not forcedminimumloss.",
+      "no_semantic_equivalence_overrides": "Strictlexicalproxy+exactprotectedspans determinesguard. Independent blinddevjudge reports materialerrors separately; no posthocpassing oflexicalmisses.",
+      "always_copy_counterbaseline": "Report fresh copybaseline; requiredrepair guard prevents identitycollapse.",
+      "uncertainty": "Devprobe small and used forselection, notuntouchedgeneralization. Pairednewfailuresreported evenifoffset."
+    }
+  },
+  "candidate_accounting": {
+    "max_allowed_new_candidates": 8192,
+    "new_target_pair_candidates": 7185,
+    "raw_teacher_proposals": 3072,
+    "genuine_synthetic_proposals": 512,
+    "derived_identity_candidates": 2833,
+    "rejected_bad_generation": 768,
+    "unused_public_raw_pool_rows": 3072,
+    "unused_raw_rows_have_no_new_target": "not counted as training-pair candidates",
+    "generation_jobs": 9,
+    "generation_job_detail": "4raw + 3 genuine synthetic +1badsynthetic +1 freshgoldreview (notteacherdata); readonlysourcereviews separate",
+    "paid_spend_usd": 0,
+    "teacher_generation_jobs": 8,
+    "label_review_jobs": 1,
+    "readonly_code_review_jobs": 5,
+    "secondary_dev_output_review_jobs": 1,
+    "secondary_fresh_output_review_jobs": 1
+  },
+  "baseline": {
+    "live_config_verified": "2026-11-07",
+    "speech": "mlx-community/whisper-large-v3-turbo",
+    "cleanup": "mlx-community/Qwen3.5-4B-MLX-8bit",
+    "language": "auto"
+  },
+  "interpretation": {
+    "fresh_common_4b": "Same student prompt and stock mode instructions, not the production4Bprompt. Owner replay uses actual production config.",
+    "text_variants": "Authored written-language strata, not native-speaker or acoustic certification.",
+    "owner": "614total,605English,300supportedEnglishreferences,305uncertainEnglishreferences. Fixed original successful-transcript classification.",
+    "runtime": "Original/fused/native and quantized artifact differences assessed separately. No exact numerical parity presumed acrossprecision changes.",
+    "cost": "Localtraining/inference; no new cloudGPU/APIbilling path or dependency purchases. Existing configured MuseCLI usage cost not metered by this harness."
+  },
+  "closure": {
+    "exploratory_deadline_utc": "2026-11-07T08:35:59Z",
+    "distinct_recipes_completed": 4,
+    "further_training_or_new_hypotheses": false,
+    "verification_overrun": "Six-hour total wall-clock ceiling was missed: existing-model export, heldout/owner replay and final verification continued beyond it. All four training recipes finished before deadline; additional exploratory runtime variants deferred.",
+    "model_default_changed": false,
+    "asr_default_changed": false,
+    "wall_clock_budget_met": false,
+    "experiment_results_complete": true,
+    "final_test_gate": {
+      "swift_checks": 3935,
+      "pytest_passed": 2151,
+      "pytest_skipped": 3,
+      "site_signing_publish_bootstrap_passed": true,
+      "update_lifecycle_tests": 14
+    }
+  },
+  "continuation": {
+    "authorization": "User continue at2026-11-07T09:39UTC",
+    "additional_training": false,
+    "completed": [
+      "Frozen primary and English owner comparisons",
+      "Phonon counterbalanced44",
+      "Long-notes and3correctedpromptprobes",
+      "TRAIN-only imatrixquantization(unselected devties)",
+      "Later-position copyanchor(unselected4.26%vs5%threshold)",
+      "Development emailpromptcausalstudy",
+      "Posthoc51emailcohortpromptcounterfactual"
+    ],
+    "model_or_asr_default_changed": false,
+    "app_version_or_release_changed": false,
+    "email_builtin_revision": 3,
+    "original_six_hour_overrun_preserved": true
+  }
+}

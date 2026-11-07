@@ -1,0 +1,48 @@
+{
+  "schema": 1,
+  "cases": 44,
+  "repeats_per_engine": 2,
+  "order": [
+    "phonon",
+    "native",
+    "native",
+    "phonon"
+  ],
+  "scope": "Warm model-level one-shot public mixed-mode diagnostic; no audio/streaming/paste. Different weights, quantization, prompts and warmups, not backend-only. Terminal requests force the model rather than application bypass.",
+  "percentiles": "Linear interpolation of per-case two-repeat medians.",
+  "rounds_exact_output_status_parity": true,
+  "quality_scope": "One blind model judge, all44cases and88outputs; fallible text references, not human/audio truth.",
+  "decision": "Phonon remains faster on this workload; no Phonon win claimed.",
+  "initial_wrapper_error": "The preserved v1 comparison had all44nativeEOS but an obsolete headerON assertion rejected the headerOFF policy. Fresh v2 repeats all four runs with corrected invariant; no failed model row was discarded.",
+  "native": {
+    "p50_case_median_wall_ms": 63.326833478640765,
+    "p95_case_median_wall_ms": 221.44023617729545,
+    "guard_failed_cases": 0,
+    "material_flags": 4,
+    "introduced_content_flags": 0,
+    "uncertain": 0,
+    "thinking": false,
+    "output_records_sha256": [
+      "f8a6308310c2f0309de98cc5d0a378447463747c9ddbe0145e5a7fcde6b16cfa",
+      "470bd31130926eadd59651d116e8ecce5554efc77f7ef1be0161482f655d6106"
+    ],
+    "eos_per_round": [
+      44,
+      44
+    ]
+  },
+  "phonon": {
+    "p50_case_median_wall_ms": 32.95959410024807,
+    "p95_case_median_wall_ms": 205.16241244040432,
+    "guard_failed_cases": 1,
+    "material_flags": 4,
+    "introduced_content_flags": 0,
+    "uncertain": 0,
+    "thinking": false,
+    "output_records_sha256": [
+      "ad65a123798b430509b703d5f8deda78ec54240827733b0843d1b20f7a14c838",
+      "f5e650fb1e747736152f7222878a12fa193c3926f9c9bcf56ababa305e6269bc"
+    ]
+  },
+  "review_sha256": "33a40dcf9a0de89d842fe7d5f6c7e65047047a11eee6816c96bc826edddc5979"
+}

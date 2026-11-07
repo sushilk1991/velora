@@ -1,0 +1,131 @@
+{
+  "scope": "Offline owner-recording STT replay; frozen English cohort and supported, model-assisted verbatim references. Not live end-to-end latency or human/audio-adjudicated accuracy.",
+  "cohort": {
+    "frozen_recordings": 614,
+    "baseline_classified_english": 605,
+    "supported_reviewed_verbatim_references": 300,
+    "supported_reference_words": 12105,
+    "timing_common_successful_recordings": 613
+  },
+  "arms": {
+    "whisper_turbo_auto": {
+      "all_status": {
+        "ok_nonempty": 610,
+        "empty": 3,
+        "failed": 1
+      },
+      "supported_status": {
+        "ok_nonempty": 300
+      },
+      "errors": 422,
+      "wer": 0.03486162742668319,
+      "error_components": {
+        "substitutions": 169,
+        "deletions": 200,
+        "insertions": 53
+      },
+      "timing": {
+        "stt_sum_seconds": 221.389,
+        "stt_median_seconds": 0.2317,
+        "stt_p95_seconds": 1.0776,
+        "stt_seconds_per_audio_second": 0.0134,
+        "process_lifetime_peak_rss_bytes": 2002075648
+      }
+    },
+    "whisper_turbo_en": {
+      "all_status": {
+        "ok_nonempty": 610,
+        "empty": 3,
+        "failed": 1
+      },
+      "supported_status": {
+        "ok_nonempty": 300
+      },
+      "errors": 422,
+      "wer": 0.03486162742668319,
+      "error_components": {
+        "substitutions": 169,
+        "deletions": 200,
+        "insertions": 53
+      },
+      "paired_supported_vs_auto": {
+        "fewer_errors": 0,
+        "same_errors": 300,
+        "more_errors": 0,
+        "exactly_same_raw_text": 300
+      },
+      "timing": {
+        "stt_sum_seconds": 202.282,
+        "stt_median_seconds": 0.1948,
+        "stt_p95_seconds": 1.0292,
+        "stt_seconds_per_audio_second": 0.0123,
+        "process_lifetime_peak_rss_bytes": 1883701248
+      }
+    },
+    "parakeet_v2": {
+      "all_status": {
+        "ok_nonempty": 613,
+        "failed": 1
+      },
+      "supported_status": {
+        "ok_nonempty": 300
+      },
+      "errors": 1179,
+      "wer": 0.09739776951672863,
+      "error_components": {
+        "substitutions": 314,
+        "deletions": 47,
+        "insertions": 818
+      },
+      "paired_supported_vs_auto": {
+        "fewer_errors": 27,
+        "same_errors": 80,
+        "more_errors": 193
+      },
+      "timing": {
+        "stt_sum_seconds": 115.249,
+        "stt_median_seconds": 0.1193,
+        "stt_p95_seconds": 0.6017,
+        "stt_seconds_per_audio_second": 0.007,
+        "process_lifetime_peak_rss_bytes": 1793703936
+      }
+    },
+    "parakeet_v3": {
+      "all_status": {
+        "ok_nonempty": 613,
+        "failed": 1
+      },
+      "supported_status": {
+        "ok_nonempty": 300
+      },
+      "errors": 1150,
+      "wer": 0.09500206526228831,
+      "error_components": {
+        "substitutions": 331,
+        "deletions": 77,
+        "insertions": 742
+      },
+      "paired_supported_vs_auto": {
+        "fewer_errors": 23,
+        "same_errors": 84,
+        "more_errors": 193
+      },
+      "timing": {
+        "stt_sum_seconds": 131.446,
+        "stt_median_seconds": 0.1295,
+        "stt_p95_seconds": 0.7236,
+        "stt_seconds_per_audio_second": 0.008,
+        "process_lifetime_peak_rss_bytes": 1220476928
+      }
+    }
+  },
+  "integrity": "All three new replay receipts report verified full-precision 614-case completion; STT and metadata file hashes match their receipts. Baseline is the frozen production turbo replay.",
+  "measurement_notes": [
+    "WER uses NFKC/case and punctuation normalization followed by word-level edit distance; numbers are not normalized. References are model-assisted, not human-verified, and WER is not a semantic quality judgment.",
+    "605 English cases are classified once from the frozen baseline STT, not independently by each system. The 300 supported references are a subset; failures and empty text are retained and represented as empty hypotheses in alignment.",
+    "Timing uses the same 613 cases with successful, nonzero timing across all arms. STT time measures the transcription call and chunk processing after audio loading; it excludes model load and live capture, cleanup and insertion. Separate runs were not a randomized thermal or concurrency-controlled benchmark.",
+    "RSS is the maximum process-lifetime peak reported by ru_maxrss on macOS, in bytes. It includes process and model lifetime; it is not per-case memory, incremental model allocation, or a separate GPU peak.",
+    "Parakeet replay does not use the Whisper recognition glossary. These are offline full-precision Parakeet replays, not a comparison under identical recognition prompting.",
+    "No model default or production routing decision follows from these results."
+  ]
+}
