@@ -554,7 +554,9 @@ struct ModelSettingsView: View {
                         Text(error).font(.caption).foregroundStyle(.secondary)
                     }
                 }
-                Text(model.cleanupLoaded ? "Writing model is loaded." : "Writing model is not loaded. Dictation needs only speech.")
+                Text(model.nativeCleanupEnabled
+                     ? "Experimental cleanup is enabled. The standard model loads when needed."
+                     : model.cleanupLoaded ? "Writing model is loaded." : "Writing model is not loaded. Dictation needs only speech.")
                     .font(.caption).foregroundStyle(.secondary)
             }
             Section {

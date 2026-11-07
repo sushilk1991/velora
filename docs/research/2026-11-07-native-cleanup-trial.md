@@ -53,6 +53,13 @@ return to native. Both directions verified the previous worker PID had exited
 before the next backend became active. Standard handoff plus one cleanup took
 7.50 s, including a 5.97 s cold load. Model file size is not a RAM measurement.
 
+The signed app's actual Models switch was also exercised on and off. Separate
+macOS `footprint` snapshots after loading measured 5,241,115,376 bytes for the
+standard cleanup worker and 1,752,090,568 bytes for native, a 66.6% reduction.
+These are loaded-worker snapshots before dictation, excluding the app, STT and
+supervisor; they are not total app memory or a peak-memory guarantee. The
+previous worker exited on both switches. The trial was left off.
+
 ## Remaining gaps and next experiments
 
 - **Meaning preservation:** known correction and omission failures remain under
