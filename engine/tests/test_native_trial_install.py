@@ -9,6 +9,16 @@ from pathlib import Path
 import pytest
 
 
+def test_installer_and_runtime_pins_match_real_supervisor_source():
+    from velora_engine.native_runtime import SUPERVISOR_SHA256
+    root = Path(__file__).resolve().parents[2]
+    spec = importlib.util.spec_from_file_location("real_trial_installer", root / "scripts/install-native-cleanup-trial.py")
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    actual = hashlib.sha256((root / "native/cleanup/supervise.py").read_bytes()).hexdigest()
+    assert actual == SUPERVISOR_SHA256 == module.PINS["supervise.py"]
+
+
 @pytest.fixture
 def installer(monkeypatch, tmp_path):
     path = Path(__file__).resolve().parents[2] / "scripts/install-native-cleanup-trial.py"

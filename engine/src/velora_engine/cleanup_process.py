@@ -968,6 +968,49 @@ class CleanupProcess:
         finally:
             self._operation_lock.release()
 
+    async def park_for_backend_switch(self) -> bool:
+        """Retire all owned weights before an experimental backend loads.
+
+        Unlike idle memory hygiene, switching must also handle an empty or
+        deferred-recovery proxy. Foreground operations/loads are never stolen.
+        Success proves that even workers previously retired after SIGKILL have
+        exited; the same standard model can be explicitly loaded later.
+        """
+        if self._closed or self._operation_lock.locked():
+            return False
+        await self.defer_recovery()
+        if self._loading_until is not None or self._load_lock.locked():
+            return False
+        await self._operation_lock.acquire()
+        try:
+            async with self._load_lock:
+                if self._closed or self._loading_until is not None:
+                    return False
+                self._hibernated = True
+                self.loaded = False
+
+                async def retire() -> None:
+                    await self._stop_worker()
+                    await self._await_retired_exit()
+
+                task = asyncio.create_task(retire())
+                cancelled = False
+                while not task.done():
+                    try:
+                        await asyncio.shield(task)
+                    except asyncio.CancelledError:
+                        cancelled = True
+                task.result()
+                self.recovering = False
+                self.unhealthy = False
+                self._loading_until = None
+                self._deferred_recovery_reason = None
+                if cancelled:
+                    raise asyncio.CancelledError
+                return True
+        finally:
+            self._operation_lock.release()
+
     async def hibernate(self) -> bool:
         """Reap the weight-owning child without disabling future cleanup.
 

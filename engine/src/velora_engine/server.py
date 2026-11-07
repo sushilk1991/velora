@@ -51,6 +51,10 @@ from .cleanup import (
     adaptive_timeout_ms,
 )
 from .cleanup_process import CleanupProcess, respawn_backoff_s
+from .native_cleanup import NativeCleanupRouter
+from .native_contract import build_native_context
+from .native_runtime import discover_package
+from .trial_diagnostics import record_trial_run
 from .downloads import DownloadCoordinator, DownloadError, DownloadResult
 from .config import Config, velora_home
 from .formatting import STATIC_SYSTEM_PROMPT
@@ -681,6 +685,7 @@ class Session:
         # a later session can neither replace nor orphan them.
         self.cleanup_warmup: asyncio.Task[Any] | None = None
         self.cleanup_warmup_cancel = threading.Event()
+        self.cleanup_trial_usage: dict[str, str] | None = None
         # ONE system prompt for every chunk of this session, computed from the
         # first segment's gate. Per-chunk run_gate applied end-of-utterance
         # transforms (short-utterance period, per-chunk replacements/tag/strip)
@@ -805,6 +810,9 @@ class Engine:
         self._model_notifications: dict[tuple[str, int], _ModelReplies] = {}
         self._adoption_lock = asyncio.Lock()
         self._adopting = False
+        self._native_cleanup_switching = False
+        self._native_cleanup_request_id: str | None = None
+        self._native_cleanup_error: str | None = None
         self._stt_pending: set[asyncio.Future] = set()
         self._stt_quarantined = False
         self._download_sequence: int | None = None
@@ -816,10 +824,10 @@ class Engine:
         # deliberately stricter than stt_ready, which unlocks raw dictation as
         # soon as the speech model is usable.
         self.setup_complete = False
-        self.cleanup: CleanupProcess | None = None
+        self.cleanup: CleanupProcess | NativeCleanupRouter | None = None
         # Publish the writing worker only after acquisition verifies its local
         # source. Notes can wait on this proxy while its offline load runs.
-        self._cleanup_loading: CleanupProcess | None = None
+        self._cleanup_loading: CleanupProcess | NativeCleanupRouter | None = None
         # Background retry of a startup cleanup load that failed or timed out.
         self._cleanup_retry_task: asyncio.Task[None] | None = None
         # One writing-model load at a time: the startup load, the retry and
@@ -974,14 +982,20 @@ class Engine:
             resume()
 
     def _new_cleanup_process(self, model_id: str, *,
-                             local_model_path: str | None = None) -> CleanupProcess:
+                             local_model_path: str | None = None) -> CleanupProcess | NativeCleanupRouter:
         # Keep logical identity public; every real load/respawn uses the
         # coordinator's verified source rather than acquiring inside a child.
-        return CleanupProcess(
+        standard = CleanupProcess(
             model_id,
             local_model_path=local_model_path,
             on_unhealthy=self._queue_cleanup_unhealthy_restart,
         )
+        if self.config.experimental_native_cleanup:
+            package = discover_package(self.config.home)
+            if package is not None:
+                return NativeCleanupRouter(standard, package)
+            self._native_cleanup_error = "The native trial package is unavailable. Using standard cleanup."
+        return standard
 
     def _queue_cleanup_unhealthy_restart(self) -> None:
         """Restart only after any user-facing fallback/result is delivered."""
@@ -1324,6 +1338,11 @@ class Engine:
                         self._cleanup_loading = candidate
                         loading_candidate = candidate
                         async with self._cleanup_load_lock:
+                            if (self.cleanup is not None and self.cleanup is not candidate
+                                    and (isinstance(candidate, NativeCleanupRouter)
+                                         or isinstance(self.cleanup, NativeCleanupRouter))):
+                                if not await self.cleanup.park_for_backend_switch():
+                                    raise RuntimeError("the previous cleanup model is still busy")
                             if not fake_stt_enabled():
                                 await candidate.load_async(STATIC_SYSTEM_PROMPT)
                     # A newer request or shutdown can arrive during a load.
@@ -2153,6 +2172,10 @@ class Engine:
                 task.add_done_callback(self._model_job_done)
             elif cmd == "set_model":
                 await self._cmd_set_model(msg, wait=False)
+            elif cmd == "set_native_cleanup":
+                task = asyncio.create_task(self._cmd_set_native_cleanup(msg))
+                self._adoption_jobs.add(task)
+                task.add_done_callback(self._model_job_done)
             elif cmd == "reprocess":
                 await self._cmd_reprocess(msg)
             elif cmd == "transcribe_file":
@@ -3184,7 +3207,10 @@ class Engine:
             final_evt["audio"] = audio_name
         if auto_stopped:
             final_evt["auto_stopped"] = True
+        trial_recorded_at = time.time()
         await self._send(final_evt)
+        self._record_trial_bg(session, raw, text, cleanup_applied, reason,
+                              cleanup_ms, cleanup_wall_ms, trial_recorded_at)
         log.info(
             "session %s done: stt_ms=%d mode=%s reason=%s cleanup_ms=%d "
             "cleanup_wall_ms=%d cleanup_applied=%s recovery_pending=%s "
@@ -3984,16 +4010,33 @@ class Engine:
         )
         if not raw.strip():
             return "", gate.mode.name, 0, False, "empty_transcript"
+        native_context = None
+        router = self.cleanup if isinstance(self.cleanup, NativeCleanupRouter) else None
+        if (router is not None and router.native_enabled and not router.native_error
+                and _cleanup_units(gate.text) <= CLEANUP_SINGLE_CALL_UNITS
+                and not (session is not None and session.chunk_tasks)):
+            native_context = build_native_context(
+                gate, self.config, raw, app_name=app_name, entities=entities)
+        desired_loaded = (
+            router.native_loaded if router is not None and native_context is not None
+            else router.standard.loaded if router is not None
+            else bool(self.cleanup and self.cleanup.loaded))
         load_needed = (session is not None and gate.use_llm
-                       and self.cleanup is not None and not self.cleanup.loaded)
+                       and self.cleanup is not None and not desired_loaded)
         if load_needed:
             await self._send({
                 "event": "finalize_progress", "session": session.id,
                 "stage": "cleanup_load", "completed": 0, "total": 1,
                 "stall_after_s": self._cleanup_load_stall_s(),
             })
-        cleanup_ready = (
-            await self._ensure_cleanup_loaded(cancel_event) if gate.use_llm else False)
+        cleanup_ready = False
+        if gate.use_llm:
+            if native_context is not None:
+                cleanup_ready = await router.ensure_native_loaded(cancel_event)
+                if not cleanup_ready:
+                    native_context = None
+            if native_context is None:
+                cleanup_ready = await self._ensure_cleanup_loaded(cancel_event)
         if load_needed and cleanup_ready:
             await self._send({
                 "event": "finalize_progress", "session": session.id,
@@ -4060,17 +4103,23 @@ class Engine:
                     queue_timeout_s=queue_timeout_s,
                 )
             else:
-                result = await self.cleanup.cleanup(
-                    formatting.encode_breaks(gate.text),
-                    gate.system_prompt or STATIC_SYSTEM_PROMPT,
-                    timeout_ms=timeout_ms,
-                    cancel_event=cancel_event,
-                    allowed_terms=self._allowed_terms(gate.mode),
-                    prefix_candidates=prefix_candidates,
-                    copy_draft=True,
-                    queue_timeout_s=queue_timeout_s,
-                )
+                kwargs = dict(timeout_ms=timeout_ms, cancel_event=cancel_event,
+                    allowed_terms=self._allowed_terms(gate.mode), prefix_candidates=prefix_candidates,
+                    copy_draft=True, queue_timeout_s=queue_timeout_s)
+                if native_context is not None:
+                    result = await router.cleanup_dictation(
+                        formatting.encode_breaks(gate.text), gate.system_prompt or STATIC_SYSTEM_PROMPT,
+                        native_context, **kwargs)
+                else:
+                    result = await self.cleanup.cleanup(
+                        formatting.encode_breaks(gate.text), gate.system_prompt or STATIC_SYSTEM_PROMPT,
+                        **kwargs)
             if session is not None:
+                session.cleanup_trial_usage = {
+                    "backend": getattr(result, "backend", "standard" if result.applied else "raw"),
+                    "attempted_backend": getattr(result, "attempted_backend", "standard"),
+                    "model_identity": getattr(result, "model_identity", self.config.cleanup_model),
+                }
                 # A one-piece dictation uses the unchanged model call above;
                 # its completion still advances the same app stall detector.
                 await self._send({
@@ -4233,6 +4282,10 @@ class Engine:
         yields within one token — a dictation's cleanup never waits multiple
         seconds behind background mining (review finding)."""
         engine = self.cleanup
+        if (getattr(engine, "native_enabled", False)
+                and not getattr(engine, "native_error", None)):
+            # Background extraction must not wake a second cleanup model.
+            return ""
         if engine is None or not engine.loaded:
             return ""
         self._mine_cancel.clear()
@@ -4242,6 +4295,32 @@ class Engine:
         )
         self._restart_if_cleanup_unhealthy()
         return result.text if result.applied else ""
+
+    def _record_trial_bg(self, session: Session, raw: str, final: str,
+                         applied: bool, reason: str, cleanup_ms: int,
+                         cleanup_wall_ms: int, recorded_at: float) -> None:
+        """Persist text-free provenance after delivery, outside stop-to-paste."""
+        if not self.config.experimental_native_cleanup:
+            return
+        usage = session.cleanup_trial_usage or {
+            "backend": "standard" if applied else "raw",
+            "attempted_backend": "standard" if cleanup_ms or applied else "bypass",
+            "model_identity": self.config.cleanup_model if cleanup_ms or applied else "",
+        }
+
+        async def write() -> None:
+            try:
+                await asyncio.to_thread(
+                    record_trial_run, self.config.home, session.id, raw, final,
+                    **usage, applied=applied, reason=reason,
+                    cleanup_ms=cleanup_ms, cleanup_wall_ms=cleanup_wall_ms,
+                    recorded_at=recorded_at)
+            except Exception:
+                log.warning("could not save local trial details", exc_info=True)
+
+        task = asyncio.create_task(write())
+        self._archive_tasks.add(task)
+        task.add_done_callback(self._archive_tasks.discard)
 
     def _archive_audio_bg(self, session: Session) -> str | None:
         """Kick off archiving the session's PCM without blocking the caller.
@@ -4279,7 +4358,76 @@ class Engine:
 
     # ---------------- misc commands ----------------
 
-    async def _cmd_status(self) -> None:
+    async def _cmd_set_native_cleanup(self, msg: dict[str, Any]) -> None:
+        enabled, request_id = msg.get("enabled"), msg.get("request_id")
+        valid_id = isinstance(request_id, str) and 1 <= len(request_id) <= 128
+
+        async def reject(message: str) -> None:
+            self._native_cleanup_error = message
+            await self._cmd_status(native_request_id=request_id if valid_id else None)
+
+        if type(enabled) is not bool or not valid_id:
+            await reject("Invalid experimental cleanup selection.")
+            return
+        if (not self._model_idle("cleanup") or self._native_cleanup_switching
+                or self._adopting or self._cleanup_load_lock.locked()
+                or self._adoption_lock.locked() or self._cleanup_loading is not None
+                or any(not job.done() for job in self._model_jobs.values())):
+            await reject("Velora is busy. Change cleanup after the current work finishes.")
+            return
+        package = discover_package(self.config.home) if enabled else None
+        if enabled and package is None:
+            await reject("The native trial package is not installed or valid.")
+            return
+        if enabled and (not self.config.cleanup_enabled or self.cleanup is None):
+            await reject("Enable standard cleanup and wait for its model before starting the trial.")
+            return
+        previous = self.config.experimental_native_cleanup
+        original = self.cleanup
+        candidate = original
+        self._native_cleanup_switching = True
+        self._native_cleanup_request_id = request_id
+        self._native_cleanup_error = None
+        self._adopting = True
+        await self._cmd_status(native_request_id=request_id)
+        try:
+            async with self._adoption_lock:
+                async with self._cleanup_load_lock:
+                    await self._cancel_idle_mining()
+                    self._cancel_action_cleanup()
+                    if enabled and not isinstance(candidate, NativeCleanupRouter):
+                        candidate = NativeCleanupRouter(original, package, enabled=False)
+                    if isinstance(candidate, NativeCleanupRouter):
+                        await candidate.set_enabled(enabled)
+                    if self.shutdown.is_set():
+                        raise RuntimeError("engine is shutting down")
+                    self.config.data["experimental_native_cleanup"] = enabled
+                    self.config.save(keys={"experimental_native_cleanup"})
+                    self.cleanup = candidate
+                    if not enabled and candidate is None:
+                        self._queue_model_job(self.config.cleanup_model, "cleanup",
+                                              client_generation=self._client_gen)
+        except (Exception, asyncio.CancelledError) as exc:
+            self.config.data["experimental_native_cleanup"] = previous
+            if isinstance(candidate, NativeCleanupRouter):
+                try:
+                    await candidate.set_enabled(previous)
+                except BaseException:
+                    # Retain the exclusive owner even if a failed reap prevents
+                    # rollback. A bare standard proxy must not load beside it.
+                    log.warning("native cleanup rollback did not settle", exc_info=True)
+                self.cleanup = candidate if candidate.native_active else original
+            self._native_cleanup_error = (
+                "The cleanup change was cancelled." if isinstance(exc, asyncio.CancelledError)
+                else "The cleanup change failed. The previous choice is retained; retry or restart Velora.")
+            log.warning("experimental cleanup selection failed: %s", type(exc).__name__)
+        finally:
+            self._adopting = False
+            self._native_cleanup_switching = False
+            self._native_cleanup_request_id = request_id
+            await self._cmd_status(native_request_id=request_id)
+
+    async def _cmd_status(self, *, native_request_id: str | None = None) -> None:
         await self._send(
             {
                 "event": "status",
@@ -4293,6 +4441,11 @@ class Engine:
                     self.config.language_scope),
                 "cleanup_enabled": self.config.cleanup_enabled,
                 "cleanup_loaded": bool(self.cleanup and self.cleanup.loaded),
+                "native_cleanup_available": discover_package(self.config.home) is not None,
+                "native_cleanup_enabled": self.config.experimental_native_cleanup,
+                "native_cleanup_switching": self._native_cleanup_switching,
+                "native_cleanup_request_id": native_request_id or self._native_cleanup_request_id,
+                "native_cleanup_error": self._native_cleanup_error or getattr(self.cleanup, "native_error", None),
                 "save_audio": self.config.save_audio,
                 "audio_retention_days": self.config.audio_retention_days,
                 "language": self.config.language,
@@ -4696,6 +4849,12 @@ class Engine:
         cleanup = self.cleanup
         if cleanup is None:
             return False
+        if isinstance(cleanup, NativeCleanupRouter):
+            try:
+                return bool(await cleanup.ensure_standard_loaded(cancel_event=cancel_event))
+            except Exception:
+                log.exception("standard cleanup could not be restored from the native trial")
+                return False
         if getattr(cleanup, "loaded", True):
             return True
         ensure = getattr(cleanup, "ensure_loaded", None)

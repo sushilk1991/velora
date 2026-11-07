@@ -13,6 +13,7 @@ import hashlib
 import json
 import os
 from pathlib import Path
+from .config import velora_home
 import signal
 import stat
 import subprocess
@@ -143,7 +144,7 @@ class NativePackage:
 
 
 def discover_package(home: Path | str | None = None) -> NativePackage | None:
-    base = Path(home) if home is not None else Path(os.environ.get("VELORA_HOME", Path.home() / ".velora"))
+    base = Path(home) if home is not None else velora_home()
     package = NativePackage(base / "experimental" / "lfm3-native-v1")
     try:
         package._validate()

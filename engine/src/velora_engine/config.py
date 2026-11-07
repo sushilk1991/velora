@@ -33,6 +33,7 @@ DEFAULT_CONFIG: dict[str, Any] = {
     "language_scope": "multilingual",
     "cleanup_model": DEFAULT_CLEANUP_MODEL,
     "cleanup_enabled": True,
+    "experimental_native_cleanup": False,
     "default_mode": "Default",
     "vocabulary": [],
     "replacements": {},
@@ -360,6 +361,10 @@ class Config:
     @property
     def cleanup_enabled(self) -> bool:
         return bool(self.data.get("cleanup_enabled", True))
+
+    @property
+    def experimental_native_cleanup(self) -> bool:
+        return self.data.get("experimental_native_cleanup") is True
 
     @property
     def default_mode_name(self) -> str:
