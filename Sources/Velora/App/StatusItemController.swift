@@ -179,11 +179,11 @@ final class StatusItemController: NSObject, NSMenuDelegate {
 
         // The one window. ⌘O is display-only: the menubar menu has no key
         // equivalent routing of its own, the main menu carries the real one.
-        let open = NSMenuItem(title: "Open Velora", action: #selector(openMain), keyEquivalent: "o")
+        let open = NSMenuItem(title: L10n.text("Open Velora"), action: #selector(openMain), keyEquivalent: "o")
         open.target = self
         menu.addItem(open)
 
-        let transforms = NSMenuItem(title: "Edit selected text", action: nil, keyEquivalent: "")
+        let transforms = NSMenuItem(title: L10n.text("Edit selected text"), action: nil, keyEquivalent: "")
         let transformMenu = NSMenu()
         for preset in EditingPreset.allCases {
             let item = NSMenuItem(title: preset.title, action: #selector(transformSelection(_:)), keyEquivalent: "")
@@ -208,11 +208,11 @@ final class StatusItemController: NSObject, NSMenuDelegate {
             .flatMap(AppConfig.archivedAudioURL(name:))
             .map { FileManager.default.fileExists(atPath: $0.path) } ?? false
         if !lastRaw.isEmpty || clipExists {
-            let reformat = NSMenuItem(title: "Reformat Last as", action: nil, keyEquivalent: "")
+            let reformat = NSMenuItem(title: L10n.text("Reformat Last as"), action: nil, keyEquivalent: "")
             let submenu = NSMenu()
             if !lastRaw.isEmpty {
                 let rawItem = NSMenuItem(
-                    title: "Copy As Heard (Original)", action: #selector(pasteLastRaw),
+                    title: L10n.text("Copy As Heard (Original)"), action: #selector(pasteLastRaw),
                     keyEquivalent: "")
                 rawItem.target = self
                 rawItem.toolTip = "Copy the original words without replacing text in another app"
@@ -239,13 +239,13 @@ final class StatusItemController: NSObject, NSMenuDelegate {
             status.isEnabled = false
             menu.addItem(status)
             let item = NSMenuItem(
-                title: "Cancel Transcription", action: #selector(cancelTranscription),
+                title: L10n.text("Cancel Transcription"), action: #selector(cancelTranscription),
                 keyEquivalent: "")
             item.target = self
             menu.addItem(item)
         } else {
             let item = NSMenuItem(
-                title: "Transcribe Audio File…", action: #selector(transcribeFile),
+                title: L10n.text("Transcribe Audio File…"), action: #selector(transcribeFile),
                 keyEquivalent: "")
             item.target = self
             menu.addItem(item)
@@ -262,19 +262,19 @@ final class StatusItemController: NSObject, NSMenuDelegate {
         // "Show Pill" mirrors General › Pill and the pill's own "Hide Pill";
         // the prefs notification is what actually shows/hides the panel.
         let showPill = NSMenuItem(
-            title: "Show Pill", action: #selector(toggleHUDVisible), keyEquivalent: "")
+            title: L10n.text("Show Pill"), action: #selector(toggleHUDVisible), keyEquivalent: "")
         showPill.target = self
         showPill.state = AppConfig.shared.hudVisible ? .on : .off
         menu.addItem(showPill)
 
-        let settings = NSMenuItem(title: "Settings…", action: #selector(openSettings), keyEquivalent: ",")
+        let settings = NSMenuItem(title: L10n.text("Settings…"), action: #selector(openSettings), keyEquivalent: ",")
         settings.target = self
         menu.addItem(settings)
 
         addUpdateItems(to: menu)
 
         let checkForUpdates = NSMenuItem(
-            title: "Check for Updates…",
+            title: L10n.text("Check for Updates…"),
             action: #selector(checkForUpdates),
             keyEquivalent: "")
         checkForUpdates.target = self
@@ -282,7 +282,7 @@ final class StatusItemController: NSObject, NSMenuDelegate {
 
         if degradedReason != nil || permissionsMissing {
             let check = NSMenuItem(
-                title: "Check Permissions…", action: #selector(checkPermissions), keyEquivalent: "")
+                title: L10n.text("Check Permissions…"), action: #selector(checkPermissions), keyEquivalent: "")
             check.target = self
             if let reason = degradedReason { check.toolTip = reason }
             menu.addItem(check)
@@ -290,14 +290,14 @@ final class StatusItemController: NSObject, NSMenuDelegate {
 
         menu.addItem(.separator())
         menu.addItem(NSMenuItem(
-            title: "Quit Velora", action: #selector(NSApplication.terminate(_:)), keyEquivalent: "q"))
+            title: L10n.text("Quit Velora"), action: #selector(NSApplication.terminate(_:)), keyEquivalent: "q"))
     }
 
     /// Stop / Discard while a meeting records, else Start Meeting Notes….
     private func addMeetingItems(to menu: NSMenu) {
         if let meeting = meetingRecordingTitle {
             let stop = NSMenuItem(
-                title: "Stop \(Self.truncate(meeting, to: 34)) & Create Notes",
+                title: L10n.format("Stop %@ & Create Notes", Self.truncate(meeting, to: 34)),
                 action: #selector(stopMeeting), keyEquivalent: "")
             stop.target = self
             // Semibold only: an explicit red failed contrast in light and
@@ -307,13 +307,13 @@ final class StatusItemController: NSObject, NSMenuDelegate {
                 attributes: [.font: NSFont.menuFont(ofSize: 0).withWeight(.semibold)])
             menu.addItem(stop)
             let discard = NSMenuItem(
-                title: "Discard Meeting Recording…",
+                title: L10n.text("Discard Meeting Recording…"),
                 action: #selector(discardMeeting), keyEquivalent: "")
             discard.target = self
             menu.addItem(discard)
         } else {
             let record = NSMenuItem(
-                title: meetingPreparingTitle ?? "Start Meeting Notes…",
+                title: meetingPreparingTitle ?? L10n.text("Start Meeting Notes…"),
                 action: #selector(startMeeting), keyEquivalent: "")
             record.target = self
             record.isEnabled = meetingPreparingTitle == nil
@@ -325,7 +325,7 @@ final class StatusItemController: NSObject, NSMenuDelegate {
 
     /// Start / Stop Dictation, plus the first-run setup line under it.
     private func addDictationItems(to menu: NSMenu) {
-        let startTitle = iconState == .recording ? "Stop Dictation" : "Start Dictation"
+        let startTitle = iconState == .recording ? L10n.text("Stop Dictation") : L10n.text("Start Dictation")
         let start = NSMenuItem(title: startTitle, action: #selector(toggleDictation), keyEquivalent: "")
         start.target = self
         // Consent/preparation does not use the microphone. Only an actual
@@ -417,7 +417,7 @@ final class StatusItemController: NSObject, NSMenuDelegate {
     private func addUpdateItems(to menu: NSMenu) {
         func add(_ title: String, action: Selector?, represented: Any? = nil,
                  toolTip: String? = nil) {
-            let item = NSMenuItem(title: title, action: action, keyEquivalent: "")
+            let item = NSMenuItem(title: L10n.text(title), action: action, keyEquivalent: "")
             item.isEnabled = action != nil
             item.target = action == nil ? nil : self
             item.representedObject = represented

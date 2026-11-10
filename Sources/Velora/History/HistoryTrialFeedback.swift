@@ -140,10 +140,13 @@ private struct HistoryTrialMetadataHeader: Decodable {
     let schema: Int
     let sessionID: String
     let invalidated: Bool?
+    let deleted: Bool?
+    let deletionToken: String?
+    let cancelledDeletion: String?
     let recordedAt: TimeInterval
 
     enum CodingKeys: String, CodingKey {
-        case schema, invalidated
+        case schema, invalidated, deleted, deletionToken, cancelledDeletion
         case sessionID = "session_id"
         case recordedAt = "recorded_at"
     }
@@ -210,6 +213,7 @@ final class HistoryTrialFeedbackStore {
     let feedbackURL: URL
     private let maxMetadataBytes: Int
     private let lock = NSLock()
+    private var forgottenSessions: Set<String> = []
 
     init(metadataURL: URL? = nil, feedbackURL: URL? = nil,
          maxMetadataBytes: Int = HistoryTrialFeedbackStore.metadataByteLimit) {
@@ -236,6 +240,7 @@ final class HistoryTrialFeedbackStore {
         else { return nil }
         lock.lock()
         defer { lock.unlock() }
+        guard !forgottenSessions.contains(session) else { return nil }
         let fd = Darwin.open(metadataURL.path, O_RDONLY | O_NOFOLLOW | O_NONBLOCK | O_CLOEXEC)
         guard fd >= 0 else {
             if errno == ENOENT { return nil }
@@ -260,6 +265,7 @@ final class HistoryTrialFeedbackStore {
         let decoder = JSONDecoder()
         var newestStamp = -Double.infinity
         var newestMatch: HistoryTrialRun?
+        var cancelledDeletions: Set<String> = []
         // Walk backwards without allocating an array for every line. Even a
         // file of millions of empty lines keeps the same bounded read buffer.
         while end > data.startIndex {
@@ -272,6 +278,11 @@ final class HistoryTrialFeedbackStore {
             let entry = data.subdata(in: lineStart..<lineEnd)
             guard let header = try? decoder.decode(HistoryTrialMetadataHeader.self, from: entry),
                   header.sessionID == session else { continue }
+            if let token = header.cancelledDeletion { cancelledDeletions.insert(token); continue }
+            if header.deleted == true {
+                if let token = header.deletionToken, cancelledDeletions.contains(token) { continue }
+                return nil
+            }
             guard header.recordedAt.isFinite else { return nil }
             guard header.recordedAt > newestStamp else { continue }
             newestStamp = header.recordedAt
@@ -299,6 +310,96 @@ final class HistoryTrialFeedbackStore {
         lock.lock()
         defer { lock.unlock() }
         try append(data, to: metadataURL, sidecarLock: true)
+    }
+
+    /// Retention removes text-bearing trial feedback as well as the History
+    /// row. Keep the same file inode/lock as appenders; no rename can strand a
+    /// waiting writer on an old feedback file.
+    func forget(sessionIDs: Set<String>) throws {
+        _ = try beginForget(sessionIDs: sessionIDs)
+    }
+
+    /// The History transaction retains the returned recovery until SQLite
+    /// commits. Recovery appends removed entries and cancellation markers,
+    /// preserving unrelated concurrent feedback and engine diagnostics.
+    func beginForget(sessionIDs: Set<String>) throws -> (() throws -> Void) {
+        guard !sessionIDs.isEmpty else { return {} }
+        lock.lock()
+        defer { lock.unlock() }
+        let token = UUID().uuidString
+        var erased = Data()
+        let fd = Darwin.open(feedbackURL.path, O_RDWR | O_NOFOLLOW | O_NONBLOCK | O_CLOEXEC)
+        if fd >= 0 {
+            defer { Darwin.close(fd) }
+            try Self.validateWritableFile(fd)
+            try Self.lockFeedback(fd)
+            defer { _ = flock(fd, LOCK_UN) }
+            var info = stat()
+            guard fstat(fd, &info) == 0, info.st_size >= 0,
+                  info.st_size <= 64 * 1_024 * 1_024 else { throw HistoryTrialFeedbackError.feedbackUnavailable }
+            let previous = try Self.read(fd: fd, from: 0, count: Int(info.st_size))
+            var kept = Data()
+            for line in previous.split(separator: 0x0a) where !line.isEmpty {
+                guard let value = try? JSONSerialization.jsonObject(with: Data(line)) as? [String: Any],
+                      let session = value["session_id"] as? String else {
+                    throw HistoryTrialFeedbackError.incompleteFeedback
+                }
+                if !sessionIDs.contains(session) { kept.append(contentsOf: line); kept.append(0x0a) }
+                else { erased.append(contentsOf: line); erased.append(0x0a) }
+            }
+            if kept != previous {
+                do { try Self.replaceContents(fd: fd, data: kept) }
+                catch {
+                    try? Self.replaceContents(fd: fd, data: previous)
+                    throw error
+                }
+            }
+        } else if errno != ENOENT { throw HistoryTrialFeedbackError.feedbackUnavailable }
+        var markers = Data()
+        for session in sessionIDs.sorted() {
+            guard !session.isEmpty, session.utf8.count <= 256 else { continue }
+            markers.append(try JSONSerialization.data(withJSONObject: [
+                "schema": 1, "session_id": session, "invalidated": true,
+                "deleted": true, "deletionToken": token, "recorded_at": Date().timeIntervalSince1970,
+            ]))
+            markers.append(0x0a)
+        }
+        do { if !markers.isEmpty { try append(markers, to: metadataURL, sidecarLock: true) } }
+        catch {
+            if !erased.isEmpty { try? append(erased, to: feedbackURL) }
+            throw error
+        }
+        forgottenSessions.formUnion(sessionIDs)
+        return { [self] in
+            lock.lock()
+            defer { lock.unlock() }
+            if !erased.isEmpty { try append(erased, to: feedbackURL) }
+            var cancellation = Data()
+            for session in sessionIDs.sorted() {
+                cancellation.append(try JSONSerialization.data(withJSONObject: [
+                    "schema": 1, "session_id": session, "cancelledDeletion": token,
+                    "recorded_at": Date().timeIntervalSince1970,
+                ]))
+                cancellation.append(0x0a)
+            }
+            try append(cancellation, to: metadataURL, sidecarLock: true)
+            forgottenSessions.subtract(sessionIDs)
+        }
+    }
+
+    private static func replaceContents(fd: Int32, data: Data) throws {
+        try data.withUnsafeBytes { bytes in
+            var written = 0
+            while written < bytes.count {
+                let count = pwrite(fd, bytes.baseAddress!.advanced(by: written), bytes.count - written, off_t(written))
+                if count < 0 && errno == EINTR { continue }
+                guard count > 0 else { throw HistoryTrialFeedbackError.feedbackUnavailable }
+                written += count
+            }
+        }
+        guard ftruncate(fd, off_t(data.count)) == 0, fsync(fd) == 0 else {
+            throw HistoryTrialFeedbackError.feedbackUnavailable
+        }
     }
 
     /// Pure validation/encoding seam for selftests. Whitespace is only used
@@ -339,6 +440,7 @@ final class HistoryTrialFeedbackStore {
         data.append(0x0a)
         lock.lock()
         defer { lock.unlock() }
+        guard !forgottenSessions.contains(feedback.sessionID) else { throw HistoryTrialFeedbackError.recordChanged }
         try append(data, to: feedbackURL)
         return feedback
     }

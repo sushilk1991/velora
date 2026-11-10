@@ -38,11 +38,11 @@ final class SettingsWindowController: NSWindowController, NSWindowDelegate {
         openSetupAssistant: @escaping () -> Void
     ) {
         self.model = model
-        let root = SettingsRootView(
-            model: model,
-            selection: selection,
-            meetingCoordinator: meetingCoordinator,
-            openSetupAssistant: openSetupAssistant)
+        let selection = self.selection
+        let root = LocalizedInterface {
+            SettingsRootView(model: model, selection: selection,
+                meetingCoordinator: meetingCoordinator, openSetupAssistant: openSetupAssistant)
+        }
 
         let window = MainWindowController.makeShellWindow(
             rootView: root, title: "Settings", size: Self.contentSize, minimumSize: Self.contentSize)

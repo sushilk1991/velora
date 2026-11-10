@@ -11,11 +11,11 @@ enum SettingsTab: String, CaseIterable, Identifiable {
 
     var title: String {
         switch self {
-        case .general: return "General"
-        case .dictation: return "Dictation"
-        case .shortcuts: return "Shortcuts"
-        case .models: return "Models"
-        case .advanced: return "Advanced"
+        case .general: return L10n.text("General")
+        case .dictation: return L10n.text("Dictation")
+        case .shortcuts: return L10n.text("Shortcuts")
+        case .models: return L10n.text("Models")
+        case .advanced: return L10n.text("Advanced")
         }
     }
 
@@ -70,12 +70,13 @@ enum VeloraAppInfo {
 /// Leading-aligned: a grouped Form trails its footers by default, which put
 /// the header on the left and the footer on the right of every card.
 struct SettingsFooter: View {
+    @ObservedObject private var interfaceLocale = InterfaceLocale.shared
     private let text: String
 
     init(_ text: String) { self.text = text }
 
     var body: some View {
-        Text(text)
+        Text(L10n.text(text))
             .font(.caption)
             .foregroundStyle(.secondary)
             .multilineTextAlignment(.leading)
@@ -86,8 +87,9 @@ struct SettingsFooter: View {
 /// Small capsule marking a feature that ships behind lowered expectations —
 /// it works, it is tested, and it is still earning trust.
 struct ExperimentalBadge: View {
+    @ObservedObject private var interfaceLocale = InterfaceLocale.shared
     var body: some View {
-        Text("EXPERIMENTAL")
+        Text(L10n.text("EXPERIMENTAL"))
             .font(.system(size: 9, weight: .semibold))
             .kerning(0.5)
             .padding(.horizontal, 5)
@@ -96,13 +98,14 @@ struct ExperimentalBadge: View {
             .background(
                 Capsule().fill(VeloraStatus.warning.opacity(0.15))
             )
-            .accessibilityLabel("Experimental feature")
+            .accessibilityLabel(L10n.text("Experimental feature"))
     }
 }
 
 /// The bordered search field used by list-style panes (History, Dictionary) —
 /// one look for in-pane search everywhere.
 struct SettingsSearchBox: View {
+    @ObservedObject private var interfaceLocale = InterfaceLocale.shared
     let prompt: String
     @Binding var query: String
     var accessibilityLabel: String?
@@ -112,9 +115,9 @@ struct SettingsSearchBox: View {
             Image(systemName: "magnifyingglass")
                 .foregroundStyle(.secondary)
                 .accessibilityHidden(true)
-            TextField(prompt, text: $query)
+            TextField(L10n.text(prompt), text: $query)
                 .textFieldStyle(.plain)
-                .accessibilityLabel(accessibilityLabel ?? prompt)
+                .accessibilityLabel(L10n.text(accessibilityLabel ?? prompt))
             if !query.isEmpty {
                 Button {
                     query = ""
@@ -122,7 +125,7 @@ struct SettingsSearchBox: View {
                     Image(systemName: "xmark.circle.fill").foregroundStyle(.secondary)
                 }
                 .buttonStyle(.plain)
-                .accessibilityLabel("Clear search")
+                .accessibilityLabel(L10n.text("Clear search"))
             }
         }
         .padding(.horizontal, VeloraSpacing.s)
@@ -140,60 +143,78 @@ struct SettingsSearchBox: View {
 /// General: appearance, the pill, and every update setting — the settings a
 /// first-day user reaches for. Everything operational moved to Advanced.
 struct GeneralSettingsView: View {
+    @ObservedObject private var interfaceLocale = InterfaceLocale.shared
     @ObservedObject var model: SettingsModel
-    private let previewSounds = SoundPlayer()
+    @State private var previewSounds = SoundPlayer()
 
     var body: some View {
         Form {
             // No header: "Appearance" would repeat the first row's label.
             Section {
-                Picker("Appearance", selection: $model.appearance) {
-                    Text("System").tag("system")
-                    Text("Light").tag("light")
-                    Text("Dark").tag("dark")
+                Picker(L10n.text("Appearance"), selection: $model.appearance) {
+                    Text(L10n.text("System")).tag("system")
+                    Text(L10n.text("Light")).tag("light")
+                    Text(L10n.text("Dark")).tag("dark")
                 }
                 .pickerStyle(.segmented)
-                Toggle("Launch Velora at login", isOn: $model.launchAtLogin)
-                DisclosureGroup("Preview the pill") { HUDPreviewView(model: model) }
-                Toggle("Play sounds", isOn: $model.soundsEnabled)
-                if model.soundsEnabled {
-                    LabeledContent("Sound volume") {
-                        Slider(value: $model.soundVolume, in: 0...100)
-                            .frame(maxWidth: 180).accessibilityLabel("Sound volume")
+                Picker(L10n.text("Interface language"), selection: $model.interfaceLanguage) {
+                    ForEach(InterfaceLanguage.allCases) { language in
+                        Text(language.title).tag(language)
                     }
-                    Button("Preview sound") { previewSounds.play(.start) }
+                }
+                Text(L10n.text("Changes menus and settings. Dictation language is set separately."))
+                    .font(.caption).foregroundStyle(.secondary)
+                    .fixedSize(horizontal: false, vertical: true)
+                Toggle(L10n.text("Launch Velora at login"), isOn: $model.launchAtLogin)
+                DisclosureGroup(L10n.text("Preview the pill")) { HUDPreviewView(model: model) }
+                Toggle(L10n.text("Play sounds"), isOn: $model.soundsEnabled)
+                if model.soundsEnabled {
+                    Picker(L10n.text("Sound set"), selection: $model.soundSet) {
+                        ForEach(SoundSet.allCases) { soundSet in
+                            Text(soundSet.title).tag(soundSet)
+                        }
+                    }
+                    LabeledContent(L10n.text("Sound volume")) {
+                        Slider(value: $model.soundVolume, in: 0...100)
+                            .frame(maxWidth: 180).accessibilityLabel(L10n.text("Sound volume"))
+                    }
+                    HStack {
+                        Button(L10n.text("Preview start")) { previewSounds.play(.start, preview: true) }
+                        Button(L10n.text("Preview stop")) { previewSounds.play(.stop, preview: true) }
+                        Button(L10n.text("Preview error")) { previewSounds.play(.error, preview: true) }
+                    }
                 }
             }
             Section {
-                Picker("Show pill", selection: pillVisibility) {
+                Picker(L10n.text("Show pill"), selection: pillVisibility) {
                     ForEach(PillVisibility.allCases) { choice in
-                        Text(choice.title).tag(choice)
+                        Text(L10n.text(choice.title)).tag(choice)
                     }
                 }
             } header: {
-                Text("Pill")
+                Text(L10n.text("Pill"))
             } footer: {
-                SettingsFooter("You can also hide it from its right-click menu.")
+                SettingsFooter(L10n.text("You can also hide it from its right-click menu."))
             }
             Section {
-                Toggle("Check for updates automatically", isOn: $model.updateChecks)
-                Toggle("Download and install updates automatically", isOn: $model.autoInstallUpdates)
+                Toggle(L10n.text("Check for updates automatically"), isOn: $model.updateChecks)
+                Toggle(L10n.text("Download and install updates automatically"), isOn: $model.autoInstallUpdates)
                     .disabled(!model.updateChecks)
                 // One row, one button: "Version 0.24.2" over the last check's
                 // result, with Check Now (or the update) on the right.
                 LabeledContent {
                     UpdateActionRow(model: model, checkStatusPlacement: .caller)
                 } label: {
-                    Text("Version \(VeloraAppInfo.shortVersion)")
+                    Text(L10n.format("Version %@", VeloraAppInfo.shortVersion))
                     if let status = model.updateCheckStatus {
                         Text(status)
                     }
                 }
-                Button("View Release History…") { model.openReleaseHistory() }
+                Button(L10n.text("View Release History…")) { model.openReleaseHistory() }
             } header: {
-                Text("Updates")
+                Text(L10n.text("Updates"))
             } footer: {
-                SettingsFooter("Checks GitHub once a day and sends nothing about you or what you dictate. Before installing an update, Velora checks Apple's signature and notarization.")
+                SettingsFooter(L10n.text("Checks GitHub once a day and sends nothing about you or what you dictate. Before installing an update, Velora checks Apple's signature and notarization."))
             }
         }
         .formStyle(.grouped)
@@ -218,6 +239,7 @@ struct GeneralSettingsView: View {
 /// Failures show the reason and keep both Try Again and Check Now within
 /// reach. Shared by Settings › General › Updates and the About window.
 struct UpdateActionRow: View {
+    @ObservedObject private var interfaceLocale = InterfaceLocale.shared
     /// Where the last check's result ("This is the latest version.") shows.
     enum CheckStatusPlacement {
         /// Beside the buttons (About).
@@ -241,7 +263,7 @@ struct UpdateActionRow: View {
                 ProgressView(value: progress)
                     .frame(maxWidth: Self.progressWidth)
                 caption(stateCaption)
-                Button("Cancel") { model.cancelUpdateDownload() }
+                Button(L10n.text("Cancel")) { model.cancelUpdateDownload() }
             case .verifying, .installing:
                 ProgressView().controlSize(.small)
                 caption(stateCaption)
@@ -252,7 +274,7 @@ struct UpdateActionRow: View {
                 }
                 .disabled(model.updateInstallsWhenReady)
                 if model.availableUpdate != nil {
-                    Button("Release Notes…") { model.showUpdateWindow() }
+                    Button(L10n.text("Release Notes…")) { model.showUpdateWindow() }
                 }
                 caption(stateCaption)
             case .failed:
@@ -295,7 +317,7 @@ struct UpdateActionRow: View {
     @ViewBuilder
     private func caption(_ text: String?) -> some View {
         if let text {
-            Text(text)
+            Text(L10n.text(text))
                 .font(.caption)
                 .foregroundStyle(.secondary)
         }
@@ -307,6 +329,7 @@ struct UpdateActionRow: View {
 /// Dictation: input (mic, language, how the shortcut behaves), writing
 /// behaviour, and recordings. Terminal cleanup moved to Advanced › Terminals.
 struct DictationSettingsView: View {
+    @ObservedObject private var interfaceLocale = InterfaceLocale.shared
     @ObservedObject var model: SettingsModel
     @State private var archiveSize: String = "…"
     @State private var inputDevices: [AudioInputDevices.Device] = []
@@ -322,8 +345,8 @@ struct DictationSettingsView: View {
     var body: some View {
         Form {
             Section {
-                Picker("Microphone", selection: $model.inputDeviceUID) {
-                    Text("System Default").tag(String?.none)
+                Picker(L10n.text("Microphone"), selection: $model.inputDeviceUID) {
+                    Text(L10n.text("System Default")).tag(String?.none)
                     ForEach(inputDevices, id: \.uid) { device in
                         Text(device.name).tag(String?.some(device.uid))
                     }
@@ -332,63 +355,63 @@ struct DictationSettingsView: View {
                     // it wins again automatically when it reconnects.
                     if let uid = model.inputDeviceUID,
                        !inputDevices.contains(where: { $0.uid == uid }) {
-                        Text("Chosen Microphone (Not Connected)").tag(String?.some(uid))
+                        Text(L10n.text("Chosen Microphone (Not Connected)")).tag(String?.some(uid))
                     }
                 }
-                Picker("Language", selection: $model.language) {
+                Picker(L10n.text("Language"), selection: $model.language) {
                     ForEach(Self.languages, id: \.0) { code, name in
-                        Text(name).tag(code)
+                        Text(L10n.text(name)).tag(code)
                     }
                 }
                 Toggle(isOn: $model.duckOtherAudio) {
                     VStack(alignment: .leading, spacing: 2) {
-                        Text("Quiet other audio while recording")
-                        Text("Lowers the system volume to a third, then restores it. Music and Spotify still pause.")
+                        Text(L10n.text("Quiet other audio while recording"))
+                        Text(L10n.text("Lowers the system volume to a third, then restores it. Music and Spotify still pause."))
                             .font(.caption)
                             .foregroundStyle(.secondary)
                     }
                 }
             } header: {
-                Text("Input")
+                Text(L10n.text("Input"))
             } footer: {
-                SettingsFooter("Velora keeps using this microphone when AirPods or another input connect.")
+                SettingsFooter(L10n.text("Velora keeps using this microphone when AirPods or another input connect."))
             }
             KeyboardRoutingSettingsView(model: model)
-            Section("Delivery") {
-                Picker("Result", selection: $model.dictationDelivery) {
-                    ForEach(DictationDelivery.allCases) { choice in Text(choice.title).tag(choice) }
+            Section(L10n.text("Delivery")) {
+                Picker(L10n.text("Result"), selection: $model.dictationDelivery) {
+                    ForEach(DictationDelivery.allCases) { choice in Text(L10n.text(choice.title)).tag(choice) }
                 }
-                Text("If insertion is blocked, your words stay on the clipboard. A copy you make during delivery always wins.")
+                Text(L10n.text("If insertion is blocked, your words stay on the clipboard. A copy you make during delivery always wins."))
                     .font(.caption).foregroundStyle(.secondary)
-                Toggle("Show provisional words while speaking", isOn: $model.showLiveWords)
+                Toggle(L10n.text("Show provisional words while speaking"), isOn: $model.showLiveWords)
             }
-            Section("Writing") {
+            Section(L10n.text("Writing")) {
                 Toggle(isOn: Binding(
                     get: { !model.cleanupEnabled },
                     set: { model.cleanupEnabled = !$0 })) {
                     VStack(alignment: .leading, spacing: 2) {
-                        Text("Fast dictation")
-                        Text("Skip AI rewriting and the writing-model download at startup. Voice Edit and Action Mode need a writing model.")
+                        Text(L10n.text("Fast dictation"))
+                        Text(L10n.text("Skip AI rewriting and the writing-model download at startup. Voice Edit and Action Mode need a writing model."))
                             .font(.caption)
                             .foregroundStyle(.secondary)
                     }
                 }
-                Toggle("Remove hesitation sounds without AI rewriting", isOn: $model.removeHesitations)
-                    .help("Removes standalone um and uh in Fast dictation. As Heard, quoted text, and technical modes keep their words.")
-                Toggle("Automatic punctuation", isOn: $model.autoPunctuation)
+                Toggle(L10n.text("Remove hesitation sounds without AI rewriting"), isOn: $model.removeHesitations)
+                    .help(L10n.text("Removes standalone um and uh in Fast dictation. As Heard, quoted text, and technical modes keep their words."))
+                Toggle(L10n.text("Automatic punctuation"), isOn: $model.autoPunctuation)
                     .disabled(!model.cleanupEnabled)
                 Toggle(isOn: $model.voiceCommands) {
                     VStack(alignment: .leading, spacing: 2) {
-                        Text("Voice commands")
-                        Text("\u{201C}Scratch that\u{201D} undoes, \u{201C}new line\u{201D} presses Return.")
+                        Text(L10n.text("Voice commands"))
+                        Text(L10n.text("\u{201C}Scratch that\u{201D} undoes, \u{201C}new line\u{201D} presses Return."))
                             .font(.caption)
                             .foregroundStyle(.secondary)
                     }
                 }
                 Toggle(isOn: $model.romanizeOutput) {
                     VStack(alignment: .leading, spacing: 2) {
-                        Text("Write other languages in English letters")
-                        Text("\u{0928}\u{092E}\u{0938}\u{094D}\u{0924}\u{0947} becomes \u{201C}namaste\u{201D}. The words stay yours.")
+                        Text(L10n.text("Write other languages in English letters"))
+                        Text(L10n.text("\u{0928}\u{092E}\u{0938}\u{094D}\u{0924}\u{0947} becomes \u{201C}namaste\u{201D}. The words stay yours."))
                             .font(.caption)
                             .foregroundStyle(.secondary)
                     }
@@ -397,18 +420,18 @@ struct DictationSettingsView: View {
             // Keep the screen access grant beside writing behavior, without
             // adding an onboarding gate or prompting for it while recording.
             Section {
-                Button("Allow Local Screen Text Recognition…") {
+                Button(L10n.text("Allow Local Screen Text Recognition…")) {
                     Permissions.requestScreenText()
                 }
             } header: {
-                Text("Screen context")
+                Text(L10n.text("Screen context"))
             } footer: {
-                SettingsFooter("While you dictate, Velora reads text near the cursor to spell names and terms right, and has no switch to turn this off. Nothing it reads is saved, password fields are skipped, and Screen Recording only adds on-device reading of text in images.")
+                SettingsFooter(L10n.text("While you dictate, Velora reads text near the cursor to spell names and terms right, and has no switch to turn this off. Nothing it reads is saved, password fields are skipped, and Screen Recording only adds on-device reading of text in images."))
             }
             Section {
-                Toggle("Keep audio recordings", isOn: $model.saveAudio)
+                Toggle(L10n.text("Keep audio recordings"), isOn: $model.saveAudio)
             } header: {
-                Text("Recordings")
+                Text(L10n.text("Recordings"))
             } footer: {
                 SettingsFooter(recordingsFooter)
             }
@@ -463,6 +486,7 @@ struct DictationSettingsView: View {
 ///     Cleanup                                          [Change…]
 ///       Quality · 5.2 GB
 struct ModelSettingsView: View {
+    @ObservedObject private var interfaceLocale = InterfaceLocale.shared
     @ObservedObject var model: SettingsModel
     @State private var storageUsed: String = Self.calculating
     @State private var cachedModels: [ModelStorage.CachedModel] = []
@@ -542,14 +566,14 @@ struct ModelSettingsView: View {
     var body: some View {
         Form {
             Section {
-                Picker("Languages you dictate", selection: $model.languageScope) {
-                    Text("English only").tag("english")
-                    Text("English and other languages").tag("multilingual")
+                Picker(L10n.text("Languages you dictate"), selection: $model.languageScope) {
+                    Text(L10n.text("English only")).tag("english")
+                    Text(L10n.text("English and other languages")).tag("multilingual")
                 }
                 slotRow(
                     title: "Speech to text", slot: .speech, choices: speechChoices,
                     selection: speechBinding)
-                Button("Use an Existing Whisper Model…") { chooseWhisperModel() }
+                Button(L10n.text("Use an Existing Whisper Model…")) { chooseWhisperModel() }
                 if !cleanupChoices.isEmpty {
                     slotRow(
                         title: model.nativeCleanupEnabled ? "Standard cleanup" : "Cleanup",
@@ -557,13 +581,13 @@ struct ModelSettingsView: View {
                         selection: cleanupBinding)
                 }
             } header: {
-                Text("On this Mac")
+                Text(L10n.text("On this Mac"))
             } footer: {
-                SettingsFooter("Changing the language choice re-selects the recommended speech model for it. Models download once, then run on this Mac. Your voice never leaves this Mac.")
+                SettingsFooter(L10n.text("Changing the language choice re-selects the recommended speech model for it. Models download once, then run on this Mac. Your voice never leaves this Mac."))
             }
             nativeCleanupSection
             Section {
-                Picker("Writing model readiness", selection: $model.cleanupMemoryPolicy) {
+                Picker(L10n.text("Writing model readiness"), selection: $model.cleanupMemoryPolicy) {
                     ForEach(CleanupMemoryPolicy.allCases) { policy in Text(policy.title).tag(policy) }
                 }
                 if model.cleanupMemoryPolicy == .saveMemory {
@@ -571,11 +595,11 @@ struct ModelSettingsView: View {
                             value: $model.cleanupIdleMinutes, in: 1...120, step: 1)
                 }
             } header: {
-                Text("Idle memory")
+                Text(L10n.text("Idle memory"))
             } footer: {
-                SettingsFooter("Automatic uses Velora's existing memory policy. Keep ready avoids idle unloading. Save memory releases the writing model while idle; the next writing task reloads it and may take longer. Speech models are unaffected.")
+                SettingsFooter(L10n.text("Automatic uses Velora's existing memory policy. Keep ready avoids idle unloading. Save memory releases the writing model while idle; the next writing task reloads it and may take longer. Speech models are unaffected."))
             }
-            Section("Download status") {
+            Section(L10n.text("Download status")) {
                 DownloadRecoveryView(state: model.downloads)
                 if let pending = model.downloads.pending[.stt] {
                     Text("Requested speech model: \(shortName(pending)); not adopted yet.")
@@ -596,11 +620,11 @@ struct ModelSettingsView: View {
                     .font(.caption).foregroundStyle(.secondary)
             }
             Section {
-                LabeledContent("On disk") {
+                LabeledContent(L10n.text("On disk")) {
                     HStack(spacing: VeloraSpacing.m) {
                         Text(storageUsed)
                             .foregroundStyle(.secondary)
-                        Button("Show in Finder") {
+                        Button(L10n.text("Show in Finder")) {
                             NSWorkspace.shared.activateFileViewerSelecting([ModelStorage.hubURL])
                         }
                     }
@@ -611,12 +635,12 @@ struct ModelSettingsView: View {
                             Text(ByteCountFormatter.string(fromByteCount: item.bytes, countStyle: .file))
                                 .foregroundStyle(.secondary)
                             if ModelStorage.canRemove(item, protected: activeModelIDs) {
-                                Button("Remove Velora Copies…") { removalCandidate = item.id }
+                                Button(L10n.text("Remove Velora Copies…")) { removalCandidate = item.id }
                                     .disabled(!model.downloads.isCurrent)
                             } else if activeModelIDs.contains(item.id) {
-                                Text("In use").font(.caption).foregroundStyle(.secondary)
+                                Text(L10n.text("In use")).font(.caption).foregroundStyle(.secondary)
                             } else {
-                                Text("Shared or included").font(.caption).foregroundStyle(.secondary)
+                                Text(L10n.text("Shared or included")).font(.caption).foregroundStyle(.secondary)
                             }
                         }
                     }
@@ -625,9 +649,9 @@ struct ModelSettingsView: View {
                     Text(error).font(.caption).foregroundStyle(.secondary)
                 }
             } header: {
-                Text("Storage")
+                Text(L10n.text("Storage"))
             } footer: {
-                SettingsFooter("Sizes include downloaded weights and prepared caches, but not the app bundle. macOS may share disk blocks between copies. Removal goes through the engine and never deletes shared Hub files, included resources, or your imported model files.")
+                SettingsFooter(L10n.text("Sizes include downloaded weights and prepared caches, but not the app bundle. macOS may share disk blocks between copies. Removal goes through the engine and never deletes shared Hub files, included resources, or your imported model files."))
             }
         }
         .formStyle(.grouped)
@@ -637,13 +661,13 @@ struct ModelSettingsView: View {
         .alert("Remove Velora model copies?", isPresented: Binding(
             get: { removalCandidate != nil },
             set: { if !$0 { removalCandidate = nil } })) {
-                Button("Cancel", role: .cancel) { removalCandidate = nil }
-                Button("Remove", role: .destructive) {
+                Button(L10n.text("Cancel"), role: .cancel) { removalCandidate = nil }
+                Button(L10n.text("Remove"), role: .destructive) {
                     if let id = removalCandidate { model.removeModelCopies(id) }
                     removalCandidate = nil
                 }
             } message: {
-                Text("Only inactive copies managed by Velora are removed. Shared Hub files and imported models stay on your Mac. You can download the model again later.")
+                Text(L10n.text("Only inactive copies managed by Velora are removed. Shared Hub files and imported models stay on your Mac. You can download the model again later."))
             }
     }
 
@@ -651,7 +675,7 @@ struct ModelSettingsView: View {
     private var nativeCleanupSection: some View {
         if model.nativeCleanupSelection.isVisible {
             Section {
-                Toggle("LFM3 Native — Experimental", isOn: nativeCleanupBinding)
+                Toggle(L10n.text("LFM3 Native — Experimental"), isOn: nativeCleanupBinding)
                     .disabled(!model.canChangeNativeCleanup)
                 if model.nativeCleanupSwitching {
                     HStack(spacing: VeloraSpacing.s) {
@@ -664,19 +688,19 @@ struct ModelSettingsView: View {
                     }
                 }
                 if !model.nativeCleanupConnected {
-                    Text("Reconnect to the engine to change this choice.")
+                    Text(L10n.text("Reconnect to the engine to change this choice."))
                         .font(.caption).foregroundStyle(.secondary)
                 } else if !model.nativeCleanupAvailable && model.nativeCleanupEnabled {
-                    Text("The local trial package is unavailable. Turn this off to use standard cleanup.")
+                    Text(L10n.text("The local trial package is unavailable. Turn this off to use standard cleanup."))
                         .font(.caption).foregroundStyle(.secondary)
                 }
                 if let error = model.nativeCleanupError {
                     Text(error).font(.caption).foregroundStyle(VeloraStatus.warningText)
                 }
             } header: {
-                Text("Experimental dictation")
+                Text(L10n.text("Experimental dictation"))
             } footer: {
-                SettingsFooter("Try native cleanup for short English paragraphs in built-in modes. It may miss corrections or omit words. For other languages, turn this off or choose a language in Dictation. Dictation with line breaks, longer notes and other workflows use standard cleanup; switching models can take several seconds.")
+                SettingsFooter(L10n.text("Try native cleanup for short English paragraphs in built-in modes. It may miss corrections or omit words. For other languages, turn this off or choose a language in Dictation. Dictation with line breaks, longer notes and other workflows use standard cleanup; switching models can take several seconds."))
             }
         }
     }
@@ -703,19 +727,19 @@ struct ModelSettingsView: View {
             }
         }
         if changing == slot {
-            TextField("Search models or languages", text: $modelSearch)
+            TextField(L10n.text("Search models or languages"), text: $modelSearch)
                 .textFieldStyle(.roundedBorder)
             HStack {
-                Toggle("Installed only", isOn: $installedOnly)
-                Picker("Sort", selection: $modelSort) {
-                    Text("Recommended").tag("recommended")
-                    Text("Name").tag("name")
-                    Text("Download size").tag("size")
+                Toggle(L10n.text("Installed only"), isOn: $installedOnly)
+                Picker(L10n.text("Sort"), selection: $modelSort) {
+                    Text(L10n.text("Recommended")).tag("recommended")
+                    Text(L10n.text("Name")).tag("name")
+                    Text(L10n.text("Download size")).tag("size")
                 }.frame(maxWidth: 220)
             }
             let visibleChoices = filteredChoices(choices, selection: selection.wrappedValue, slot: slot)
             if visibleChoices.isEmpty {
-                Text("No models match. Clear the search or show all models.").foregroundStyle(.secondary)
+                Text(L10n.text("No models match. Clear the search or show all models.")).foregroundStyle(.secondary)
             }
             ForEach(visibleChoices) { choice in
                 Button {
@@ -814,6 +838,7 @@ struct ModelSettingsView: View {
 /// user reaches for (settings file, CLI, logs, the Setup Assistant). Every
 /// row here used to live somewhere more prominent. Updates live in General.
 struct AdvancedSettingsView: View {
+    @ObservedObject private var interfaceLocale = InterfaceLocale.shared
     @ObservedObject var model: SettingsModel
     @ObservedObject var coordinator: MeetingCoordinator
     let openSetupAssistant: () -> Void
@@ -823,28 +848,31 @@ struct AdvancedSettingsView: View {
     var body: some View {
         Form {
             Section {
-                DisclosureGroup("Recent support events") { ActivityView() }
+                DisclosureGroup(L10n.text("Recent support events")) { ActivityView() }
             }
 
             Section {
                 MeetingPreferenceRows(model: model, coordinator: coordinator)
-                LabeledContent("Notes prompt") {
+                LabeledContent(L10n.text("Notes prompt")) {
                     HStack(spacing: VeloraSpacing.m) {
                         Text(model.meetingNotesPrompt.isEmpty ? "Default" : "Custom")
                             .foregroundStyle(.secondary)
-                        Button("Edit…") { editingNotesPrompt = true }
+                        Button(L10n.text("Edit…")) { editingNotesPrompt = true }
                     }
                 }
             } header: {
-                Text("Meetings")
+                Text(L10n.text("Meetings"))
             } footer: {
                 SettingsFooter(MeetingPreferenceRows.footer)
             }
-            Section("Terminals") {
+            Section {
+                RetentionSettingsView(model: model)
+            }
+            Section(L10n.text("Terminals")) {
                 Toggle(isOn: $model.smartTerminal) {
                     VStack(alignment: .leading, spacing: 2) {
-                        Text("Smart cleanup in terminals")
-                        Text("Prose is cleaned up. Short commands land exactly as heard.")
+                        Text(L10n.text("Smart cleanup in terminals"))
+                        Text(L10n.text("Prose is cleaned up. Short commands land exactly as heard."))
                             .font(.caption)
                             .foregroundStyle(.secondary)
                     }
@@ -852,7 +880,7 @@ struct AdvancedSettingsView: View {
             }
             Section {
                 settingsFileRow
-                Toggle("Allow local CLI and agents", isOn: $model.localAgentAccess)
+                Toggle(L10n.text("Allow local CLI and agents"), isOn: $model.localAgentAccess)
                 AgentCapabilitySettingsView(enabled: model.localAgentAccess)
                 if model.localAgentAccess {
                     agentIntegrationRow(
@@ -874,14 +902,14 @@ struct AdvancedSettingsView: View {
                             .foregroundStyle(VeloraStatus.warningText)
                     }
                 }
-                LabeledContent("Engine logs") {
-                    Button("Show in Finder") { Self.revealEngineLog() }
+                LabeledContent(L10n.text("Engine logs")) {
+                    Button(L10n.text("Show in Finder")) { Self.revealEngineLog() }
                 }
-                Button("Run Setup Assistant…", action: openSetupAssistant)
+                Button(L10n.text("Run Setup Assistant…"), action: openSetupAssistant)
             } header: {
-                Text("Tools")
+                Text(L10n.text("Tools"))
             } footer: {
-                SettingsFooter("Export copies your preferences, shortcuts and speech model. History, recordings, dictionary and permissions stay on this Mac, and local agents open no network port.")
+                SettingsFooter(L10n.text("Export copies your preferences, shortcuts and speech model. History, recordings, dictionary and permissions stay on this Mac, and local agents open no network port."))
             }
         }
         .formStyle(.grouped)
@@ -896,13 +924,13 @@ struct AdvancedSettingsView: View {
     private var settingsFileRow: some View {
         VStack(alignment: .leading, spacing: 2) {
             HStack {
-                Text("Settings file")
+                Text(L10n.text("Settings file"))
                 Spacer()
-                Button("Export…") { model.exportSettings() }
-                Button("Import…") { model.importSettings() }
+                Button(L10n.text("Export…")) { model.exportSettings() }
+                Button(L10n.text("Import…")) { model.importSettings() }
             }
             HStack(spacing: VeloraSpacing.s) {
-                Text("~/.velora/settings.json")
+                Text(L10n.text("~/.velora/settings.json"))
                     .font(.caption.monospaced())
                     .foregroundStyle(.secondary)
                     .textSelection(.enabled)
@@ -966,6 +994,7 @@ struct AdvancedSettingsView: View {
 ///     └──────────────────────────────────────────┘
 ///     Velora swaps in the polished text…          footer
 struct ShortcutsSettingsView: View {
+    @ObservedObject private var interfaceLocale = InterfaceLocale.shared
     @ObservedObject var model: SettingsModel
     @State private var musicPermission: NativeMediaPermission?
     @State private var requestingMusicPermission = false
@@ -1001,28 +1030,26 @@ struct ShortcutsSettingsView: View {
                     "Dictation",
                     caption: "Press your shortcut and speak, anywhere you can type. Esc cancels.")
             }
-            Toggle("Use a second dictation shortcut", isOn: $model.secondDictationEnabled)
+            Toggle(L10n.text("Use a second dictation shortcut"), isOn: $model.secondDictationEnabled)
             if model.secondDictationEnabled {
                 shortcutRow(for: "Second dictation shortcut", hotkey: $model.secondDictationHotkey)
                 if model.secondDictationConflict {
                     conflictLabel("Choose a shortcut that is not assigned to another feature.")
                 }
             }
-            Button("Restore dictation shortcut defaults") {
-                model.hotkey = .rightOption
-                model.secondDictationEnabled = false
-                model.secondDictationHotkey = .f19
-                model.hotkeyMode = .hold
+            Button(L10n.text("Restore dictation shortcut defaults")) {
+                model.restoreDictationShortcutDefaults()
             }
-            Picker("When pressed", selection: $model.hotkeyMode) {
+            if let error = model.dictationShortcutRestoreError { conflictLabel(error) }
+            Picker(L10n.text("When pressed"), selection: $model.hotkeyMode) {
                 ForEach(HotkeyMode.allCases) { mode in
-                    Text(mode.displayName).tag(mode)
+                    Text(L10n.text(mode.displayName)).tag(mode)
                 }
             }
             .pickerStyle(.segmented)
         } footer: {
             if model.hotkeyMode == .hold {
-                SettingsFooter("A quick tap locks recording on; tap again to finish.")
+                SettingsFooter(L10n.text("A quick tap locks recording on; tap again to finish."))
             }
         }
     }
@@ -1043,7 +1070,7 @@ struct ShortcutsSettingsView: View {
             }
             .disabled(!model.streamTypingEnabled)
         } footer: {
-            SettingsFooter("Velora swaps in the polished text when you finish. If you type or move the cursor, it stops and copies the final text instead.")
+            SettingsFooter(L10n.text("Velora swaps in the polished text when you finish. If you type or move the cursor, it stops and copies the final text instead."))
         }
     }
 
@@ -1092,10 +1119,10 @@ struct ShortcutsSettingsView: View {
             Toggle(isOn: $model.actionsEnabled) {
                 VStack(alignment: .leading, spacing: 2) {
                     HStack(spacing: VeloraSpacing.s) {
-                        Text("Action Mode")
+                        Text(L10n.text("Action Mode"))
                         ExperimentalBadge()
                     }
-                    Text("Hold the shortcut and say what to do: \u{201C}message Priya on Slack that I\u{2019}m running late\u{201D}. Say \u{201C}draft\u{201D} to stop before it sends.")
+                    Text(L10n.text("Hold the shortcut and say what to do: \u{201C}message Priya on Slack that I\u{2019}m running late\u{201D}. Say \u{201C}draft\u{201D} to stop before it sends."))
                         .font(.caption)
                         .foregroundStyle(.secondary)
                 }
@@ -1116,7 +1143,7 @@ struct ShortcutsSettingsView: View {
             }
             .disabled(!model.actionsEnabled)
         } footer: {
-            SettingsFooter("Action Mode needs Accessibility permission and runs entirely on this Mac.")
+            SettingsFooter(L10n.text("Action Mode needs Accessibility permission and runs entirely on this Mac."))
         }
     }
 
@@ -1139,11 +1166,11 @@ struct ShortcutsSettingsView: View {
                            action: requestMusicPermission)
                         .disabled(requestingMusicPermission)
                 case .denied:
-                    Button("Open Settings") {
+                    Button(L10n.text("Open Settings")) {
                         Permissions.openAutomationSettings()
                     }
                 default:
-                    Text("Open Music, then return here")
+                    Text(L10n.text("Open Music, then return here"))
                         .font(.caption)
                         .foregroundStyle(.secondary)
                 }
@@ -1157,7 +1184,7 @@ struct ShortcutsSettingsView: View {
     private func featureLabel(_ title: String, caption: String) -> some View {
         VStack(alignment: .leading, spacing: 2) {
             Text(title)
-            Text(caption)
+            Text(L10n.text(caption))
                 .font(.caption)
                 .foregroundStyle(.secondary)
         }
@@ -1170,8 +1197,8 @@ struct ShortcutsSettingsView: View {
         // An HStack, not LabeledContent: the Form top-aligns a LabeledContent
         // label, which left "Shortcut" riding above the taller keycap field.
         HStack {
-            Text("Shortcut")
-                .accessibilityLabel("\(feature) shortcut")
+            Text(L10n.text("Shortcut"))
+                .accessibilityLabel(L10n.format("%@ shortcut", L10n.text(feature)))
             Spacer()
             HotkeyRecorderView(hotkey: hotkey, showsQuickPicks: false, feature: feature)
         }
@@ -1201,6 +1228,7 @@ struct ShortcutsSettingsView: View {
 // MARK: - About
 
 struct AboutSettingsView: View {
+    @ObservedObject private var interfaceLocale = InterfaceLocale.shared
     @ObservedObject var model: SettingsModel
 
     private var version: String { VeloraAppInfo.shortVersion }
@@ -1219,13 +1247,13 @@ struct AboutSettingsView: View {
                 .interpolation(.high)
                 .frame(width: 108, height: 108)
                 .shadow(color: .black.opacity(0.2), radius: 10, y: 4)
-            Text("Velora")
+            Text(L10n.text("Velora"))
                 .font(.title2.weight(.semibold))
             Text(build.map { "Version \(version) (\($0))" } ?? "Version \(version)")
                 .font(.callout)
                 .foregroundStyle(.secondary)
                 .textSelection(.enabled)
-            Text("Open-source, local-first dictation.\nYour voice never leaves this Mac.")
+            Text(L10n.text("Open-source, local-first dictation.\nYour voice never leaves this Mac."))
                 .font(.callout)
                 .multilineTextAlignment(.center)
                 .foregroundStyle(.secondary)
@@ -1252,7 +1280,7 @@ struct AboutSettingsView: View {
 
             Spacer()
 
-            Text("Built with parakeet-mlx, mlx-whisper, and mlx-lm.")
+            Text(L10n.text("Built with parakeet-mlx, mlx-whisper, and mlx-lm."))
                 .font(.caption)
                 .foregroundStyle(.tertiary)
                 .padding(.bottom, VeloraSpacing.l)

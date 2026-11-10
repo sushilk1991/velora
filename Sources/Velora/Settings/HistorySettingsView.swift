@@ -155,6 +155,8 @@ final class HistoryViewModel: ObservableObject {
     /// Reloads the first page for the current search term. (Usage stats moved
     /// to the Stats tab — History is purely the transcript list now.)
     func reload() {
+        if let playing, let url = AppConfig.archivedAudioURL(name: playing),
+           !FileManager.default.fileExists(atPath: url.path) { stopPlayback() }
         let term = searchText
         records = history.page(limit: Self.pageSize, offset: 0, search: term)
         hasMore = records.count == Self.pageSize
@@ -346,8 +348,12 @@ final class HistoryViewModel: ObservableObject {
         reprocessGen[id] = gen
         failed.remove(id)
         inFlight.insert(id)
+        let requestID = UUID().uuidString
+        if StorageRetention.shared.isConfigured { StorageRetention.shared.protectClip(audio, owner: requestID) }
         reprocessSnapshots[id] = record
-        supervisor?.send(reprocessCommand(record: record, audio: audio, sttModel: sttModel, mode: mode))
+        var command = reprocessCommand(record: record, audio: audio, sttModel: sttModel, mode: mode)
+        command["request_id"] = requestID
+        supervisor?.send(command)
 
         // A stable failure normally clears this immediately; retain a timeout
         // for a process crash or dropped control connection.
@@ -703,6 +709,10 @@ struct HistorySettingsView: View {
             .frame(maxWidth: .infinity, maxHeight: .infinity)
             .onReceive(NotificationCenter.default.publisher(for: .veloraHistoryRevealRequested)) { _ in
                 vm.revealPending()
+            }
+            .onReceive(NotificationCenter.default.publisher(for: .veloraHistoryChanged)) { _ in
+                vm.reload()
+                vm.refreshSummary()
             }
             .onAppear {
                 model.requestStatus()
@@ -1228,7 +1238,11 @@ private struct JournalEntry: View {
                         Button("Undo last correction", action: onUndo)
                     }
                     Divider()
-                    Button("Adjust app style in Modes…", action: onEditStyle)
+                    Button("Adjust app style in Modes…") {
+                        ModesViewModel.prepareStyleExample(text: record.raw.isEmpty ? record.final : record.raw,
+                            modeName: record.mode, bundleID: record.targetBundleID)
+                        onEditStyle()
+                    }
                 } label: { Text("More") }
                 .menuStyle(.borderlessButton)
                 .fixedSize()

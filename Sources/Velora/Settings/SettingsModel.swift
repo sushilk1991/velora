@@ -248,7 +248,7 @@ final class SettingsModel: ObservableObject {
         let panel = NSSavePanel()
         panel.allowedContentTypes = [.json]
         panel.nameFieldStringValue = "velora-settings.json"
-        panel.title = "Export Velora Settings"
+        panel.title = L10n.text("Export Velora Settings")
         NSApp.activate(ignoringOtherApps: true)
         panel.begin { [weak self] response in
             guard let self, response == .OK, let url = panel.url else { return }
@@ -256,9 +256,9 @@ final class SettingsModel: ObservableObject {
                 try self.config.exportSettingsData().write(to: url, options: .atomic)
                 try? FileManager.default.setAttributes(
                     [.posixPermissions: 0o600], ofItemAtPath: url.path)
-                self.settingsTransferResult = "Settings exported"
+                self.settingsTransferResult = L10n.text("Settings exported")
             } catch {
-                self.settingsTransferResult = "Export failed: \(error.localizedDescription)"
+                self.settingsTransferResult = L10n.format("Export failed: %@", error.localizedDescription)
             }
         }
     }
@@ -268,14 +268,14 @@ final class SettingsModel: ObservableObject {
         let panel = NSOpenPanel()
         panel.allowedContentTypes = [.json]
         panel.allowsMultipleSelection = false
-        panel.title = "Import Velora Settings"
+        panel.title = L10n.text("Import Velora Settings")
         NSApp.activate(ignoringOtherApps: true)
         panel.begin { [weak self] response in
             guard let self, response == .OK, let url = panel.url else { return }
             do {
                 let imported = try AppConfig.portableSettings(from: Data(contentsOf: url))
                 let confirmation = NSAlert()
-                confirmation.messageText = "Replace your Velora settings?"
+                confirmation.messageText = L10n.text("Replace your Velora settings?")
                 var details =
                     "This changes preferences, shortcuts, and the selected speech model. "
                     + "History, dictionary, modes, permissions, microphone choice, "
@@ -296,13 +296,13 @@ final class SettingsModel: ObservableObject {
                     details += " Meeting audio older than \(imported.meetings.audioRetentionDays) days will be removed."
                 }
                 confirmation.informativeText = details
-                confirmation.addButton(withTitle: "Import")
-                confirmation.addButton(withTitle: "Cancel")
+                confirmation.addButton(withTitle: L10n.text("Import"))
+                confirmation.addButton(withTitle: L10n.text("Cancel"))
                 guard confirmation.runModal() == .alertFirstButtonReturn else { return }
 
                 try self.importSettings(imported)
             } catch {
-                self.settingsTransferResult = "Import failed: \(error.localizedDescription)"
+                self.settingsTransferResult = L10n.format("Import failed: %@", error.localizedDescription)
             }
         }
     }
@@ -318,7 +318,7 @@ final class SettingsModel: ObservableObject {
         durable.models.speech = sttModel
         try config.applyPortableSettings(durable)
         applyImportedSettings(imported)
-        settingsTransferResult = "Settings imported"
+        settingsTransferResult = L10n.text("Settings imported")
     }
 
     private enum ImportFailure: LocalizedError {
@@ -336,7 +336,7 @@ final class SettingsModel: ObservableObject {
         dictionaryTransferResult = nil
         let panel = NSSavePanel()
         panel.nameFieldStringValue = "velora-dictionary.json"
-        panel.title = "Export Dictionary"
+        panel.title = L10n.text("Export Dictionary")
         NSApp.activate(ignoringOtherApps: true)
         panel.begin { [weak self] response in
             guard let self, response == .OK, let url = panel.url else { return }
@@ -345,7 +345,7 @@ final class SettingsModel: ObservableObject {
                 try data.write(to: url)
                 self.dictionaryTransferResult = "Exported \(self.dictionary.rows.count) active entries"
             } catch {
-                self.dictionaryTransferResult = "Export failed: \(error.localizedDescription)"
+                self.dictionaryTransferResult = L10n.format("Export failed: %@", error.localizedDescription)
             }
         }
     }
@@ -356,7 +356,7 @@ final class SettingsModel: ObservableObject {
         dictionaryTransferResult = nil
         let panel = NSOpenPanel()
         panel.allowedContentTypes = [.json]
-        panel.title = "Import Dictionary"
+        panel.title = L10n.text("Import Dictionary")
         NSApp.activate(ignoringOtherApps: true)
         panel.begin { [weak self] response in
             guard let self, response == .OK, let url = panel.url else { return }
@@ -370,7 +370,7 @@ final class SettingsModel: ObservableObject {
                     self.dictionaryTransferResult = "Imported \(result.added), kept \(result.keptExisting) existing"
                 }
             } catch {
-                self.dictionaryTransferResult = "Import failed: \(error.localizedDescription)"
+                self.dictionaryTransferResult = L10n.format("Import failed: %@", error.localizedDescription)
             }
         }
     }
@@ -474,6 +474,8 @@ final class SettingsModel: ObservableObject {
         inputDeviceUID = config.inputDeviceUID
         soundsEnabled = config.soundsEnabled
         soundVolume = config.soundVolume
+        soundSet = config.soundSet
+        interfaceLanguage = config.interfaceLanguage
         hudPosition = config.hudPosition
         hudAlwaysVisible = config.hudAlwaysVisible
         hudVisible = config.hudVisible
@@ -654,6 +656,8 @@ final class SettingsModel: ObservableObject {
         appearance = imported.general.appearance
         soundsEnabled = imported.general.soundsEnabled
         soundVolume = imported.general.soundVolume
+        soundSet = imported.general.soundSet
+        interfaceLanguage = imported.general.interfaceLanguage
         hudPosition = imported.hud.position
         hudAlwaysVisible = imported.hud.alwaysVisible
         hudVisible = imported.hud.visible
@@ -705,6 +709,7 @@ final class SettingsModel: ObservableObject {
         // The custom HUD origin/edge and typing fallback list have no published
         // SettingsModel properties; AppConfig already owns their imported values.
         Self.applyAppearance(imported.general.appearance)
+        InterfaceLocale.shared.refresh()
         NotificationCenter.default.post(name: .veloraHUDPrefsChanged, object: nil)
         NotificationCenter.default.post(name: .veloraHotkeyChanged, object: nil)
         if imported.models.speech != previousSTTModel {
@@ -902,6 +907,24 @@ final class SettingsModel: ObservableObject {
     var secondDictationConflict: Bool {
         secondDictationEnabled && ([hotkey, editHotkey, proofreadHotkey, streamTypingHotkey, actionHotkey]
             .contains(secondDictationHotkey))
+    }
+
+    @Published var dictationShortcutRestoreError: String?
+
+    func restoreDictationShortcutDefaults() {
+        do {
+            let restored = try config.restoreDictationShortcutDefaults()
+            applyingImportedSettings = true
+            hotkey = restored.dictation
+            secondDictationEnabled = restored.secondDictationEnabled
+            secondDictationHotkey = restored.secondDictation
+            hotkeyMode = restored.behavior
+            applyingImportedSettings = false
+            dictationShortcutRestoreError = nil
+            NotificationCenter.default.post(name: .veloraHotkeyChanged, object: nil)
+        } catch {
+            dictationShortcutRestoreError = error.localizedDescription
+        }
     }
 
     @Published var dictationDelivery: DictationDelivery = .pasteAndKeep {
@@ -1193,6 +1216,21 @@ final class SettingsModel: ObservableObject {
         didSet {
             guard !applyingImportedSettings else { return }
             config.soundsEnabled = soundsEnabled
+        }
+    }
+
+    @Published var soundSet: SoundSet {
+        didSet {
+            guard !applyingImportedSettings else { return }
+            config.soundSet = soundSet
+        }
+    }
+
+    @Published var interfaceLanguage: InterfaceLanguage {
+        didSet {
+            guard !applyingImportedSettings else { return }
+            config.interfaceLanguage = interfaceLanguage
+            InterfaceLocale.shared.refresh()
         }
     }
 

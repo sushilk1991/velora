@@ -103,6 +103,65 @@ def _is_dictionary_word(word: str) -> bool:
     return word.lower() in _DICT_WORDS
 
 
+# These slugs mirror the browser host/title evidence in ScreenContext.swift.
+SITE_SLUGS = frozenset("gmail outlook proton fastmail superhuman hey zoho yahoo gdocs notion obsidian linear keep evernote onenote coda craft confluence slack discord whatsapp messenger telegram teams gchat instagram".split())
+PROCESSING_STEPS = ("spoken_commands", "fillers", "punctuation", "replacements")
+MAX_MODE_NAME_CHARS = 240
+
+
+def normalize_site_slug(value: Any) -> str | None:
+    """Accept only a recognized text slug from untrusted screen context."""
+    if not isinstance(value, str):
+        return None
+    slug = value.strip().casefold()
+    return slug if slug in SITE_SLUGS else None
+
+
+def _mode_text(value: Any, maximum: int, label: str, *, nonempty: bool = False) -> str:
+    # JSON Schema counts Unicode code points; Swift uses unicodeScalars.count.
+    if (not isinstance(value, str) or len(value) > maximum
+            or any(0xD800 <= ord(char) <= 0xDFFF for char in value)
+            or (nonempty and not value.strip())):
+        raise ValueError(f"{label} must be text{' with a nonempty value' if nonempty else ''}, at most {maximum} characters.")
+    return value
+
+
+def validate_mode_fields(value: Any) -> dict[str, Any]:
+    """One allowlist and Unicode limits for disk, preview, and shared recipes."""
+    if not isinstance(value, dict):
+        raise ValueError("The mode must be a JSON object.")
+    if set(value) - {"name", "prompt", "formatting", "apps", "sites", "steps", "vocabulary", "replacements"}:
+        raise ValueError("The mode contains unsupported fields.")
+    _mode_text(value.get("name"), MAX_MODE_NAME_CHARS, "Name", nonempty=True)
+    _mode_text(value.get("prompt", ""), 12_000, "Instructions")
+    if value.get("formatting", "full") not in VALID_FORMATTING:
+        raise ValueError("Formatting must be off, light, or full.")
+    for key, maximum in (("apps", 256), ("vocabulary", 200)):
+        items = value.get(key, [])
+        if not isinstance(items, list) or len(items) > 256:
+            raise ValueError(f"{key.capitalize()} must contain at most 256 text entries.")
+        for item in items:
+            _mode_text(item, maximum, key.capitalize())
+    replacements = value.get("replacements", {})
+    if not isinstance(replacements, dict) or len(replacements) > 256:
+        raise ValueError("Replacements must contain at most 256 text pairs.")
+    for key, item in replacements.items():
+        _mode_text(key, 200, "Replacement phrase", nonempty=True)
+        _mode_text(item, 4_000, "Replacement text")
+    sites = value.get("sites", [])
+    if (not isinstance(sites, list) or any(not isinstance(site, str) or site not in SITE_SLUGS for site in sites)
+            or len(sites) != len(set(sites))):
+        raise ValueError("Sites must be a unique list of recognized site names.")
+    if "steps" in value:
+        steps = value["steps"]
+        if (not isinstance(steps, list) or any(not isinstance(step, str) or step not in PROCESSING_STEPS for step in steps)
+                or len(steps) != len(set(steps))):
+            raise ValueError("Processing steps must be a unique ordered list of supported text rules.")
+        if value.get("formatting", "full") == "off" or value["name"].strip().casefold() in {"raw", "code", "terminal"}:
+            raise ValueError("Custom steps require light or full formatting in a prose mode. Raw, Code, and Terminal use their standard processing.")
+    return value
+
+
 @dataclass
 class Mode:
     name: str
@@ -111,31 +170,30 @@ class Mode:
     apps: list[str] = field(default_factory=list)
     vocabulary: list[str] = field(default_factory=list)
     replacements: dict[str, str] = field(default_factory=dict)
+    sites: list[str] = field(default_factory=list)
+    # None preserves the existing formatter. An explicit list is model-free;
+    # [] preserves recognizer text, apart from the established outer trim.
+    steps: list[str] | None = None
 
     @classmethod
     def from_dict(cls, d: dict[str, Any]) -> "Mode":
-        fmt = d.get("formatting", "full")
-        if fmt not in VALID_FORMATTING:
-            fmt = "full"
-        raw_apps = d.get("apps", []) or []
-        if not isinstance(raw_apps, list):
-            raw_apps = []
+        validate_mode_fields(d)
         apps: list[str] = []
         seen_apps: set[str] = set()
-        for value in raw_apps:
-            identifier = str(value).strip()
+        for value in d.get("apps", []):
+            identifier = value.strip()
             key = identifier.casefold()
             if not identifier or key in seen_apps:
                 continue
             seen_apps.add(key)
             apps.append(identifier)
         return cls(
-            name=str(d.get("name", "Unnamed")),
-            prompt=str(d.get("prompt", "") or ""),
-            formatting=fmt,
-            apps=apps,
-            vocabulary=[str(v) for v in d.get("vocabulary", []) or []],
-            replacements={str(k): str(v) for k, v in (d.get("replacements") or {}).items()},
+            name=d["name"].strip(), prompt=d.get("prompt", ""),
+            formatting=d.get("formatting", "full"), apps=apps,
+            vocabulary=list(d.get("vocabulary", [])),
+            replacements=dict(d.get("replacements", {})),
+            sites=list(d.get("sites", [])),
+            steps=list(d["steps"]) if "steps" in d else None,
         )
 
 
@@ -326,6 +384,7 @@ class Config:
         self.home = home or velora_home()
         self.data: dict[str, Any] = dict(DEFAULT_CONFIG)
         self.modes: dict[str, Mode] = {}
+        self._mode_files: dict[Path, Mode] = {}
         self._learned_vocab: list[str] = []
         self._learned_replacements: dict[str, str] = {}
         self._auto_vocab: list[str] = []
@@ -635,6 +694,7 @@ class Config:
                 on_disk = json.loads(self.config_path.read_text())
                 if not isinstance(on_disk, dict):
                     raise ValueError("config.json is not an object")
+                self._validate_config(on_disk)
                 self.data = {**DEFAULT_CONFIG, **on_disk}
                 # The app writes config.json (its own keys: stt_model, language,
                 # …) BEFORE the engine's first start, so "first run" almost always
@@ -651,8 +711,7 @@ class Config:
                     self.save(keys={"stt_model"})
                 return
             except Exception as exc:  # noqa: BLE001 — corrupt config must not kill the engine
-                log.warning("config.json unreadable (%s); using defaults in memory", exc)
-                self.data = dict(DEFAULT_CONFIG)
+                log.warning("config.json unreadable (%s); retaining last valid configuration", exc)
                 # Leave the on-disk file untouched so the user can recover it —
                 # flag so the mode migration below doesn't save over it.
                 self._config_corrupt = True
@@ -662,6 +721,33 @@ class Config:
         self.data["stt_model"] = self._auto_stt_model()
         self.save()
         log.info("wrote default config to %s (cleanup=%s, stt=%s)", self.config_path, self.data["cleanup_model"], self.data["stt_model"])
+
+    @staticmethod
+    def _validate_config(data: dict[str, Any]) -> None:
+        # Unknown app-owned preferences survive. Known engine controls must
+        # retain their types: bool("false") would silently enable a feature.
+        for key, default in DEFAULT_CONFIG.items():
+            if key not in data:
+                continue
+            value = data[key]
+            if isinstance(default, bool):
+                valid = isinstance(value, bool)
+            elif isinstance(default, str):
+                valid = isinstance(value, str)
+            elif isinstance(default, (int, float)):
+                valid = isinstance(value, (int, float)) and not isinstance(value, bool) and math.isfinite(value)
+            elif isinstance(default, list):
+                valid = isinstance(value, list) and all(isinstance(item, str) for item in value)
+            else:
+                valid = isinstance(value, dict)
+            if not valid:
+                raise ValueError(f"Invalid {key} in config.json")
+        if "replacements" in data and any(not isinstance(k, str) or not isinstance(v, str)
+                                          for k, v in data["replacements"].items()):
+            raise ValueError("Invalid replacements in config.json")
+        if "builtin_modes_rev" in data and (type(data["builtin_modes_rev"]) is not int
+                                            or data["builtin_modes_rev"] < 0):
+            raise ValueError("Invalid builtin_modes_rev in config.json")
 
     def _auto_cleanup_model(self) -> str:
         """RAM-fitted cleanup model, falling back to the static default if
@@ -812,17 +898,32 @@ class Config:
             and not str(data.get("prompt", "")).strip()
             and not (data.get("vocabulary") or [])
             and not (data.get("replacements") or {})
+            and not (data.get("sites") or [])
+            and "steps" not in data
             and set(data.get("apps") or []) == cls._OLD_CODE_APPS
         )
 
     def _load_modes(self) -> None:
-        self.modes = {}
+        files: dict[Path, Mode] = {}
+        modes: dict[str, Mode] = {}
         for path in sorted(self.modes_dir.glob("*.json")):
             try:
                 mode = Mode.from_dict(json.loads(path.read_text()))
-                self.modes[mode.name.lower()] = mode
-            except Exception as exc:  # noqa: BLE001
-                log.warning("skipping bad mode file %s: %s", path.name, exc)
+            except Exception as exc:  # noqa: BLE001 — partial external edits are recoverable
+                mode = self._mode_files.get(path)
+                log.warning("bad mode file %s: %s; %s", path.name, exc,
+                            "retaining last valid mode" if mode else "skipping")
+            if mode is None:
+                continue
+            files[path] = mode
+            key = mode.name.lower()
+            if key in modes:
+                log.warning("duplicate mode name %s in %s; first filename wins", mode.name, path.name)
+                continue
+            modes[key] = mode
+        # Files that disappeared are deliberate deletions, not malformed edits.
+        self._mode_files = files
+        self.modes = modes
         log.info("loaded %d modes: %s", len(self.modes), ", ".join(m.name for m in self.modes.values()))
         self.unbound_builtin_apps = self._compute_unbound_builtin_apps()
 
@@ -876,3 +977,9 @@ class Config:
             if any(app.casefold() == key for app in mode.apps):
                 return mode
         return None
+
+    def mode_for_site(self, site: str | None) -> Mode | None:
+        site = normalize_site_slug(site)
+        if site is None:
+            return None
+        return next((mode for mode in self.modes.values() if site in mode.sites), None)

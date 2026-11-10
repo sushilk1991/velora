@@ -16,6 +16,8 @@ enum MeetingNotesPrompt {
         + "Me and Them are audio channels, not verified identities. "
         + "If a legacy transcript contains Speaker-number labels, treat those "
         + "the same way. Never guess who a speaker is."
+        + " Preserve tentative suggestions and unresolved points as such. "
+        + "The word should alone does not establish a decision or commitment."
 }
 
 enum MeetingFailurePresentation {
@@ -850,6 +852,8 @@ final class MeetingProcessor: ObservableObject {
         var message: [String: Any] = [
             "cmd": "meeting_notes", "id": work.jobID,
             "meeting_id": work.meetingID, "transcript": transcript,
+            "passages": record.segments.map { ["key": $0.sourceKey, "text": $0.text,
+                "start_ms": $0.startMs, "end_ms": $0.endMs] as [String: Any] },
         ]
         let custom = notesPrompt().trimmingCharacters(in: .whitespacesAndNewlines)
         if !custom.isEmpty { message["prompt"] = custom }

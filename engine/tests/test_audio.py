@@ -331,6 +331,124 @@ async def test_reprocess_roundtrip(engine):
     client.close()
 
 
+async def test_reprocess_lease_is_correlated_and_outlives_ui_and_decoder_release(engine):
+    import uuid
+    eng, sock, config = engine
+    client = await connect(sock)
+    await client.recv_event("ready")
+    final = await _dictate(client, "lease-source")
+    await _wait_for_clip(config.audio_dir / final["audio"])
+    first, second = str(uuid.uuid4()), str(uuid.uuid4())
+    decoding, allow_decode = asyncio.Event(), asyncio.Event()
+    releasing, allow_release = asyncio.Event(), asyncio.Event()
+    original_call = eng._stt_call
+    original_send = eng._send
+    activities = []
+
+    async def controlled(function, *arguments):
+        if function.__name__ == "transcribe_clip":
+            decoding.set()
+            await allow_decode.wait()
+        if function.__name__ == "_release_stt_memory":
+            releasing.set()
+            await allow_release.wait()
+        return await original_call(function, *arguments)
+
+    async def capture(event):
+        if event.get("event") == "reprocess_activity":
+            activities.append(event)
+        await original_send(event)
+
+    eng._stt_call, eng._send = controlled, capture
+    try:
+        await client.send_json({"cmd": "reprocess", "audio": final["audio"], "id": 42, "request_id": first})
+        await asyncio.wait_for(decoding.wait(), 2)
+        assert any(e["request_id"] == first and e["active"] for e in activities)
+        await client.send_json({"cmd": "reprocess", "audio": final["audio"], "id": 42, "request_id": second})
+        await client.recv_event("reprocess_failed")
+        for _ in range(100):
+            if any(e["request_id"] == second and not e["active"] for e in activities):
+                break
+            await asyncio.sleep(.01)
+        assert any(e["request_id"] == second and not e["active"] for e in activities)
+        assert not any(e["request_id"] == first and not e["active"] for e in activities)
+        allow_decode.set()
+        await client.recv_event("reprocessed")
+        await asyncio.wait_for(releasing.wait(), 2)
+        assert not any(e["request_id"] == first and not e["active"] for e in activities)
+        allow_release.set()
+        for _ in range(100):
+            if any(e["request_id"] == first and not e["active"] for e in activities):
+                break
+            await asyncio.sleep(.01)
+        assert any(e["request_id"] == first and not e["active"] for e in activities)
+    finally:
+        allow_decode.set(); allow_release.set()
+        client.close()
+
+
+async def test_ready_replays_reprocessing_lease_across_socket_reconnect(engine):
+    import uuid
+    eng, sock, config = engine
+    client = await connect(sock)
+    await client.recv_event("ready")
+    final = await _dictate(client, "lease-reconnect")
+    await _wait_for_clip(config.audio_dir / final["audio"])
+    request = str(uuid.uuid4())
+    entered, release = asyncio.Event(), asyncio.Event()
+    original = eng._stt_call
+
+    async def controlled(function, *arguments):
+        if getattr(function, "__name__", "") == "transcribe_clip":
+            entered.set()
+            await release.wait()
+        return await original(function, *arguments)
+
+    eng._stt_call = controlled
+    replacement = None
+    try:
+        await client.send_json({"cmd": "reprocess", "audio": final["audio"], "id": 81, "request_id": request})
+        await asyncio.wait_for(entered.wait(), 2)
+        client.close()
+        await client.writer.wait_closed()
+        for _ in range(100):
+            if eng.writer is None:
+                break
+            await asyncio.sleep(.01)
+        replacement = await connect(sock)
+        ready = await replacement.recv_event("ready")
+        assert ready["reprocess_jobs"] == [{"request_id": request, "audio": final["audio"]}]
+        release.set()
+        await replacement.recv_event("reprocessed")
+        event = await replacement.recv_event("reprocess_activity")
+        assert event["request_id"] == request and event["active"] is False
+        assert eng._reprocess_leases == {}
+    finally:
+        release.set()
+        client.close()
+        if replacement:
+            replacement.close()
+
+
+async def test_adoption_rejection_settles_preprotected_reprocess_request(engine):
+    import uuid
+    eng, sock, _ = engine
+    client = await connect(sock)
+    await client.recv_event("ready")
+    request = str(uuid.uuid4())
+    eng._adopting = True
+    try:
+        await client.send_json({"cmd": "reprocess", "audio": "not-admitted.wav", "request_id": request})
+        failure = await client.recv_event("reprocess_failed")
+        assert failure["code"] == "busy"
+        event = await client.recv_event("reprocess_activity")
+        assert event["request_id"] == request and event["active"] is False
+        assert not eng._reprocess_leases
+    finally:
+        eng._adopting = False
+        client.close()
+
+
 async def test_reprocess_restores_live_language(engine):
     eng, sock, config = engine
     client = await connect(sock)

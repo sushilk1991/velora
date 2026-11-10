@@ -2,6 +2,7 @@ import SwiftUI
 
 /// A local draft: only Save applies the preview choices to the running app.
 struct HUDPreviewView: View {
+    @ObservedObject private var interfaceLocale = InterfaceLocale.shared
     @ObservedObject var model: SettingsModel
     @Environment(\.colorScheme) private var systemScheme
     @Environment(\.accessibilityReduceMotion) private var reducedMotion
@@ -15,7 +16,7 @@ struct HUDPreviewView: View {
                 HStack(spacing: 12) {
                     Image(systemName: "mic.fill")
                     if words {
-                        Text("These are provisional words…").font(.system(size: 12)).lineLimit(1)
+                        Text(L10n.text("These are provisional words…")).font(.system(size: 12)).lineLimit(1)
                     } else {
                         HStack(alignment: .center, spacing: 2) {
                             ForEach(0..<24) { index in
@@ -24,30 +25,30 @@ struct HUDPreviewView: View {
                             }
                         }.frame(height: 24)
                     }
-                    Text("0:08").font(.system(size: 11).monospacedDigit())
+                    Text(L10n.text("0:08")).font(.system(size: 11).monospacedDigit())
                 }
                 .padding(.horizontal, 18).frame(height: 48)
                 .background(.regularMaterial, in: Capsule())
                 .overlay(Capsule().stroke(.primary.opacity(0.15)))
                 .environment(\.colorScheme, appearance == "dark" ? .dark : appearance == "light" ? .light : systemScheme)
-                .accessibilityLabel("Animated pill preview, microphone off")
+                .accessibilityLabel(L10n.text("Animated pill preview, microphone off"))
             }
-            Text("Preview without using the microphone. Changes apply only when saved.")
+            Text(L10n.text("Preview without using the microphone. Changes apply only when saved."))
                 .font(.caption).foregroundStyle(.secondary)
-            Picker("Appearance", selection: $appearance) {
-                Text("System").tag("system")
-                Text("Light").tag("light")
-                Text("Dark").tag("dark")
+            Picker(L10n.text("Appearance"), selection: $appearance) {
+                Text(L10n.text("System")).tag("system")
+                Text(L10n.text("Light")).tag("light")
+                Text(L10n.text("Dark")).tag("dark")
             }
-            Toggle("Show words while speaking", isOn: $words)
+            Toggle(L10n.text("Show words while speaking"), isOn: $words)
             HStack {
-                Button("Discard changes", action: reload)
-                Button("Save") {
+                Button(L10n.text("Discard changes"), action: reload)
+                Button(L10n.text("Save")) {
                     model.appearance = appearance
                     model.showLiveWords = words
                     saved = true
                 }
-                if saved { Text("Saved").font(.caption).foregroundStyle(.secondary) }
+                if saved { Text(L10n.text("Saved")).font(.caption).foregroundStyle(.secondary) }
             }
         }
         .onAppear(perform: reload)

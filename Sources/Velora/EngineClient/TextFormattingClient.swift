@@ -14,6 +14,7 @@ struct TextFormattingResult: Equatable {
         case "snippet": operation = "Saved snippet inserted as literal text"
         case "cleanup_disabled": operation = "Writing cleanup is off"
         case "formatting_off": operation = "No writing model"
+        case "recipe_steps": operation = "Selected text rules applied without a writing model"
         case "short_utterance": operation = "Light cleanup for a short passage"
         case "smart_terminal": operation = "Conservative terminal formatting"
         case "cleanup_unavailable": operation = "Writing model unavailable; basic cleanup only"
@@ -124,8 +125,11 @@ final class TextFormattingClient {
     static func modePayload(_ mode: Mode) -> [String: Any] {
         var replacements: [String: String] = [:]
         for item in mode.replacements { replacements[item.key] = item.value }
-        return ["name": mode.name, "prompt": mode.prompt, "formatting": mode.formatting,
-                "apps": mode.apps, "vocabulary": mode.vocabulary, "replacements": replacements]
+        var payload: [String: Any] = ["name": mode.name, "prompt": mode.prompt, "formatting": mode.formatting,
+                                      "apps": mode.apps, "sites": mode.sites,
+                                      "vocabulary": mode.vocabulary, "replacements": replacements]
+        if let steps = mode.steps { payload["steps"] = steps }
+        return payload
     }
 
     private func finish(_ id: String, _ result: Result<TextFormattingResult, TextFormattingFailure>) {

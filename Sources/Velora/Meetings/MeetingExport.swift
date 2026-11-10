@@ -39,6 +39,7 @@ extension MeetingRecord {
                     "\(notes.completedActionItems.contains($0) ? "[x]" : "[ ]") \($0)"
                 }.joined(separator: "\n")]
             }
+            if !personalNotes.isEmpty { sections += ["Personal notes", personalNotes] }
             if !formattedTranscript.isEmpty { sections += ["Transcript", formattedTranscript] }
             return sections.joined(separator: "\n\n")
         case .srt, .vtt:

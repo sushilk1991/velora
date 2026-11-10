@@ -70,11 +70,20 @@ adjusts — then stops rather than guess when the window it expects isn't there.
   microphone and computer audio, then creates a local transcript and notes.
   Import an existing recording, seek from transcript/search results, check off
   actions, and export Markdown, text, or coarse timed SRT/VTT transcripts.
+  Notes can include chapters with playback links. Ask about one meeting to find
+  exact supporting excerpts, and keep personal notes through regeneration.
   It captures audio only, never the screen.
 
 Settings also offers optional provisional dictation words, keyboard-language
 routes to installed speech models, and writing-model idle memory choices.
 Dictionary can expand explicitly saved phrases into literal snippets.
+Modes also supports website assignments and optional ordered steps for cleanup
+without a writing model. Invalid edits retain the last valid configuration.
+
+General settings offers English, Hindi and Spanish interface choices, with
+English fallback for untranslated text, plus Classic, Soft and Chime sounds.
+Advanced includes separate transcript/audio retention controls with a cleanup
+preview. Transcript text stays forever by default.
 
 The local CLI, MCP tools, and Mac Shortcuts actions use the running app's
 permission checks. Enable local integrations in Advanced, then choose separate

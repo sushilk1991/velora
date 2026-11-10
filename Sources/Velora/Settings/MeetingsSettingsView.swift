@@ -388,13 +388,13 @@ struct MeetingsSettingsView: View {
                     }.padding(14)
                 }
             }
-            MeetingNotesCards(notes: record.notes) { action, completed, completion in
+            MeetingIntelligenceCards(record: record, store: store, playback: playback, onToggleAction: { action, completed, completion in
                 store.setActionCompletedAsync(meetingID: record.id, action: action, completed: completed) { saved in
                     completion(saved)
                     guard selectedID == record.id else { return }
                     actionError = saved ? nil : "This action changed or could not be saved. Open the meeting again and retry."
                 }
-            }
+            }, showTranscript: { transcript.setExpanded(true) })
             if let actionError {
                 Text(actionError).font(.caption).foregroundStyle(VeloraStatus.warningText)
             }
@@ -887,14 +887,14 @@ private struct MeetingStatusCard: View {
 
 /// The meeting preference rows, hosted inside the Advanced form's MEETINGS
 /// section. Calendar access is requested on the spot when the toggle turns
-/// on; retention changes prune audio immediately.
+/// on. Retention is reviewed separately in Advanced.
 struct MeetingPreferenceRows: View {
     @ObservedObject var model: SettingsModel
     @ObservedObject var coordinator: MeetingCoordinator
     @AppStorage(MeetingPolicy.leadKey) private var calendarLeadMinutes = 5
     @AppStorage(MeetingPolicy.endKey) private var meetingEndBehavior = MeetingPolicy.EndBehavior.confirmedNative.rawValue
 
-    static let footer = "Velora detects calls from local call apps, the microphone, and meeting pages in your browser, never saving meeting addresses, and records only after you choose Start Meeting Notes. The retention setting removes only audio; transcripts and notes stay until you delete them."
+    static let footer = "Velora detects calls from local call apps, the microphone, and meeting pages in your browser, never saving meeting addresses, and records only after you choose Start Meeting Notes."
 
     var body: some View {
         Toggle("Suggest recording when a call is detected", isOn: $model.meetingSuggestions)
@@ -914,15 +914,6 @@ struct MeetingPreferenceRows: View {
         }
         Text("Browser and manual recordings always ask before finishing unless you choose to keep recording. Detection never starts a recording.")
             .font(.caption).foregroundStyle(.secondary)
-        Picker("Keep meeting audio", selection: $model.meetingAudioRetentionDays) {
-            Text("7 days").tag(7)
-            Text("30 days").tag(30)
-            Text("90 days").tag(90)
-            Text("1 year").tag(365)
-        }
-        .onChange(of: model.meetingAudioRetentionDays) { _, _ in
-            coordinator.pruneAudio()
-        }
         Toggle(isOn: $model.meetingDiarization) {
             VStack(alignment: .leading, spacing: 2) {
                 Text("Improve remote speech detection")

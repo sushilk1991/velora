@@ -18,7 +18,7 @@ final class MeetingNotesWindowModel: ObservableObject {
     let transcript: MeetingTranscriptLoader
     let playback: MeetingAudioPlayback
 
-    private let store: MeetingStore
+    let store: MeetingStore
     private var meetingID: String?
     private var metadataToken = UUID()
     private var exportToken = UUID()
@@ -148,7 +148,9 @@ struct MeetingNotesWindowView: View {
                         VStack(alignment: .leading, spacing: MeetingNotesCards.sectionSpacing) {
                             status(record)
                             MeetingPlaybackControls(playback: model.playback)
-                            MeetingNotesCards(notes: record.notes, onToggleAction: model.setAction)
+                            MeetingIntelligenceCards(record: record, store: model.store, playback: model.playback,
+                                onToggleAction: model.setAction,
+                                showTranscript: { model.transcript.setExpanded(true) })
                             if let error = model.actionError {
                                 Text(error).font(.caption).foregroundStyle(VeloraStatus.warningText)
                             }
@@ -280,6 +282,8 @@ struct MeetingNotesWindowView: View {
 struct MeetingNotesCards: View {
     let notes: MeetingNotes
     var onToggleAction: ((String, Bool, @escaping (Bool) -> Void) -> Void)? = nil
+    var sourceFor: ((String) -> MeetingSourceReference?)? = nil
+    var onShowSource: ((MeetingSourceReference) -> Void)? = nil
     @State private var pending: [String: (id: UUID, value: Bool, saved: Bool)] = [:]
 
     /// Space between cards, as on Home and Modes.
@@ -291,9 +295,10 @@ struct MeetingNotesCards: View {
     var body: some View {
         if !notes.summary.isEmpty {
             GroupCard(header: "Summary") {
-                Text(notes.summary)
-                    .textSelection(.enabled)
-                    .modifier(MeetingCardText())
+                VStack(alignment: .leading, spacing: VeloraSpacing.xs) {
+                    Text(notes.summary).textSelection(.enabled)
+                    sourceLink(notes.summary)
+                }.modifier(MeetingCardText())
             }
         }
         if !notes.decisions.isEmpty {
@@ -304,6 +309,7 @@ struct MeetingNotesCards: View {
                 if let onToggleAction {
                     VStack(alignment: .leading, spacing: VeloraSpacing.s) {
                         ForEach(Array(notes.actionItems.enumerated()), id: \.offset) { _, item in
+                            VStack(alignment: .leading, spacing: VeloraSpacing.xs) {
                             Toggle(item, isOn: Binding(
                                 get: { pending[item]?.value ?? notes.completedActionItems.contains(item) },
                                 set: { value in
@@ -317,6 +323,8 @@ struct MeetingNotesCards: View {
                                 }))
                                 .toggleStyle(.checkbox)
                                 .fixedSize(horizontal: false, vertical: true)
+                            sourceLink(item)
+                            }
                         }
                     }
                     .modifier(MeetingCardText())
@@ -333,6 +341,13 @@ struct MeetingNotesCards: View {
         }
     }
 
+    @ViewBuilder private func sourceLink(_ text: String) -> some View {
+        if let source = sourceFor?(text), let onShowSource {
+            Button("Related passage") { onShowSource(source) }
+                .font(.caption).help("Review the related exact transcript passage")
+        }
+    }
+
     private func bullets(_ items: [String]) -> some View {
         VStack(alignment: .leading, spacing: VeloraSpacing.s) {
             ForEach(Array(items.enumerated()), id: \.offset) { _, item in
@@ -340,9 +355,10 @@ struct MeetingNotesCards: View {
                     Text("•")
                         .foregroundStyle(.secondary)
                         .accessibilityHidden(true)
-                    Text(item)
-                        .textSelection(.enabled)
-                        .fixedSize(horizontal: false, vertical: true)
+                    VStack(alignment: .leading, spacing: VeloraSpacing.xs) {
+                        Text(item).textSelection(.enabled).fixedSize(horizontal: false, vertical: true)
+                        sourceLink(item)
+                    }
                 }
             }
         }

@@ -1,17 +1,30 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "title": "Velora mode recipe version 1",
-  "description": "Declarative writing instructions. Imported app assignments are ignored until the person adds them in Modes.",
+  "description": "Declarative writing instructions and optional model-free text rules. Imported app and site assignments are ignored.",
   "oneOf": [
-    { "$ref": "#/$defs/mode" },
+    {
+      "$ref": "#/$defs/mode"
+    },
     {
       "type": "object",
       "additionalProperties": false,
-      "required": ["format", "version", "mode"],
+      "required": [
+        "format",
+        "version",
+        "mode"
+      ],
       "properties": {
-        "format": { "const": "velora-mode" },
-        "version": { "const": 1, "type": "integer" },
-        "mode": { "$ref": "#/$defs/mode" }
+        "format": {
+          "const": "velora-mode"
+        },
+        "version": {
+          "const": 1,
+          "type": "integer"
+        },
+        "mode": {
+          "$ref": "#/$defs/mode"
+        }
       }
     }
   ],
@@ -19,25 +32,130 @@
     "mode": {
       "type": "object",
       "additionalProperties": false,
-      "required": ["name"],
+      "required": [
+        "name"
+      ],
       "properties": {
-        "name": { "type": "string", "minLength": 1, "maxLength": 100, "pattern": "\\S" },
-        "prompt": { "type": "string", "maxLength": 12000 },
-        "formatting": { "enum": ["off", "light", "full"] },
+        "name": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 240,
+          "pattern": "\\S"
+        },
+        "prompt": {
+          "type": "string",
+          "maxLength": 12000
+        },
+        "formatting": {
+          "enum": [
+            "off",
+            "light",
+            "full"
+          ]
+        },
         "apps": {
-          "type": "array", "maxItems": 256,
-          "items": { "type": "string", "maxLength": 256 }
+          "type": "array",
+          "maxItems": 256,
+          "items": {
+            "type": "string",
+            "maxLength": 256
+          }
         },
         "vocabulary": {
-          "type": "array", "maxItems": 256,
-          "items": { "type": "string", "maxLength": 200 }
+          "type": "array",
+          "maxItems": 256,
+          "items": {
+            "type": "string",
+            "maxLength": 200
+          }
         },
         "replacements": {
-          "type": "object", "maxProperties": 256,
-          "propertyNames": { "minLength": 1, "maxLength": 200, "pattern": "\\S" },
-          "additionalProperties": { "type": "string", "maxLength": 4000 }
+          "type": "object",
+          "maxProperties": 256,
+          "propertyNames": {
+            "minLength": 1,
+            "maxLength": 200,
+            "pattern": "\\S"
+          },
+          "additionalProperties": {
+            "type": "string",
+            "maxLength": 4000
+          }
+        },
+        "sites": {
+          "type": "array",
+          "maxItems": 26,
+          "uniqueItems": true,
+          "items": {
+            "enum": [
+              "gmail",
+              "outlook",
+              "proton",
+              "fastmail",
+              "superhuman",
+              "hey",
+              "zoho",
+              "yahoo",
+              "gdocs",
+              "notion",
+              "obsidian",
+              "linear",
+              "keep",
+              "evernote",
+              "onenote",
+              "coda",
+              "craft",
+              "confluence",
+              "slack",
+              "discord",
+              "whatsapp",
+              "messenger",
+              "telegram",
+              "teams",
+              "gchat",
+              "instagram"
+            ]
+          }
+        },
+        "steps": {
+          "description": "Omit to use standard formatting. An explicit list runs only these deterministic rules in order, without a writing model. An empty list preserves recognizer text.",
+          "type": "array",
+          "maxItems": 4,
+          "uniqueItems": true,
+          "items": {
+            "enum": [
+              "spoken_commands",
+              "fillers",
+              "punctuation",
+              "replacements"
+            ]
+          }
         }
-      }
+      },
+      "allOf": [
+        {
+          "if": {
+            "required": [
+              "steps"
+            ]
+          },
+          "then": {
+            "properties": {
+              "formatting": {
+                "enum": [
+                  "light",
+                  "full"
+                ]
+              },
+              "name": {
+                "not": {
+                  "pattern": "^\\s*(?:[Rr][Aa][Ww]|[Cc][Oo][Dd][Ee]|[Tt][Ee][Rr][Mm][Ii][Nn][Aa][Ll])\\s*$"
+                }
+              }
+            }
+          }
+        }
+      ]
     }
   }
 }

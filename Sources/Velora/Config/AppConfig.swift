@@ -125,10 +125,14 @@ struct STTModel: Identifiable, Equatable {
 /// subset the engine needs (model choice, language, cleanup options) is mirrored
 /// to `~/.velora/config.json`, followed by a `reload_config` push from callers.
 final class AppConfig {
-    static let shared = AppConfig(
-        defaults: sharedDefaults,
-        settingsFileURL: settingsFileURL,
-        engineConfigURL: configFileURL)
+    static let shared: AppConfig = {
+        let config = AppConfig(
+            defaults: sharedDefaults,
+            settingsFileURL: settingsFileURL,
+            engineConfigURL: configFileURL)
+        L10n.setLanguage(config.interfaceLanguage)
+        return config
+    }()
 
     /// `.standard`, or the harness's scratch suite: in any debug build, and in
     /// a local release only under `--selftest` or `--sandbox-e2e`, so a
@@ -917,6 +921,23 @@ final class AppConfig {
         get { readSetting(\.shortcuts.secondDictation) }
         set { updateSettings { $0.shortcuts.secondDictation = newValue } }
     }
+
+    @discardableResult
+    func restoreDictationShortcutDefaults() throws -> SettingsDocument.Shortcuts {
+        settingsMutationLock.lock()
+        defer { settingsMutationLock.unlock() }
+        settingsLock.lock()
+        defer { settingsLock.unlock() }
+        if let error = settingsWriteBlockError { throw error }
+        guard let restored = settingsDocument.settings.shortcuts.restoringDictationDefaults() else {
+            throw SettingsDocumentError.shortcutConflict
+        }
+        var candidate = settingsDocument
+        candidate.settings.shortcuts = restored
+        try persistSettingsDocument(candidate)
+        settingsDocument = candidate
+        return restored
+    }
     var secondDictationEnabled: Bool {
         get { readSetting(\.shortcuts.secondDictationEnabled) }
         set { updateSettings { $0.shortcuts.secondDictationEnabled = newValue } }
@@ -960,6 +981,16 @@ final class AppConfig {
     var soundsEnabled: Bool {
         get { readSetting(\.general.soundsEnabled) }
         set { updateSettings { $0.general.soundsEnabled = newValue } }
+    }
+
+    var interfaceLanguage: InterfaceLanguage {
+        get { readSetting(\.general.interfaceLanguage) }
+        set { updateSettings { $0.general.interfaceLanguage = newValue } }
+    }
+
+    var soundSet: SoundSet {
+        get { readSetting(\.general.soundSet) }
+        set { updateSettings { $0.general.soundSet = newValue } }
     }
 
     /// 0–100 slider value; playback volume is this / 100.

@@ -14,6 +14,11 @@ set -euo pipefail
 cd "$(dirname "$0")/.."
 
 OUT_DIR="Resources"
+VARIANTS_ONLY="${1:-}"
+if [[ -n "$VARIANTS_ONLY" && "$VARIANTS_ONLY" != "--variants-only" ]]; then
+  echo "Usage: $0 [--variants-only]" >&2
+  exit 2
+fi
 TMP_DIR="$(mktemp -d)"
 trap 'rm -rf "$TMP_DIR"' EXIT
 
@@ -51,11 +56,36 @@ def write_wav(name, samples):
 write_wav("start", tone(660, 0.070, -18) + tone(880, 0.070, -18))
 write_wav("stop",  tone(880, 0.070, -20) + tone(660, 0.070, -20))
 write_wav("error", tone(330, 0.120, -18))
-print("synthesized start/stop/error wavs")
+
+# Each set uses the same peaks as Classic. Soft has a rounder attack and
+# lower notes; Chime adds quiet upper partials. No microphone is involved.
+write_wav("soft-start", tone(440, .09, -18, .018, .030) + tone(554.365, .09, -18, .018, .030))
+write_wav("soft-stop", tone(554.365, .09, -20, .018, .030) + tone(440, .09, -20, .018, .030))
+write_wav("soft-error", tone(261.626, .16, -18, .018, .035))
+
+def bell(freq, dur, db):
+    fundamental = tone(freq, dur, db, .005, .055)
+    overtone = tone(freq * 2, dur, db - 12, .003, .025)
+    samples = [a + b for a, b in zip(fundamental, overtone)]
+    target = 10 ** (db / 20)
+    scale = target / max(abs(s) for s in samples)
+    return [s * scale for s in samples]
+
+write_wav("chime-start", bell(783.991, .11, -18) + bell(1046.502, .14, -18))
+write_wav("chime-stop", bell(1046.502, .11, -20) + bell(783.991, .14, -20))
+write_wav("chime-error", bell(391.995, .20, -18))
+print("synthesized Classic, Soft and Chime wavs")
 PY
 
 mkdir -p "$OUT_DIR"
-for name in start stop error; do
+for name in start stop error soft-start soft-stop soft-error chime-start chime-stop chime-error; do
+  if [[ "$VARIANTS_ONLY" == "--variants-only" && "$name" != *-* ]]; then continue; fi
+  # New variants are deterministic lossless PCM, with no encoder dependency.
+  if [[ "$name" == *-* ]]; then
+    afconvert -f caff -d LEI16 "$TMP_DIR/$name.wav" "$OUT_DIR/$name.caf"
+    echo "wrote $OUT_DIR/$name.caf"
+    continue
+  fi
   if ! afconvert -f caff -d aac -b 64000 "$TMP_DIR/$name.wav" "$OUT_DIR/$name.caf" 2>/dev/null; then
     echo "afconvert aac failed for $name; falling back to LEI16" >&2
     afconvert -f caff -d LEI16 "$TMP_DIR/$name.wav" "$OUT_DIR/$name.caf"

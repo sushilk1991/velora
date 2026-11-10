@@ -1311,9 +1311,11 @@ final class DictationController: NSObject {
         }
         guard interruptedRows[record.id] == nil else { return }
         interruptedRows[record.id] = session
+        let requestID = UUID().uuidString
+        if StorageRetention.shared.isConfigured { StorageRetention.shared.protectClip(audio, owner: requestID) }
         supervisor.send([
             "cmd": "reprocess", "audio": audio, "id": record.id,
-            "recovery": true,
+            "recovery": true, "request_id": requestID,
         ])
         NSLog("Velora: recovering interrupted dictation session=%@", session)
     }
@@ -1335,7 +1337,10 @@ final class DictationController: NSObject {
             return
         }
         pendingReformat = (record.id, record.targetBundleID)
+        let requestID = UUID().uuidString
+        if StorageRetention.shared.isConfigured { StorageRetention.shared.protectClip(audio, owner: requestID) }
         var cmd: [String: Any] = ["cmd": "reprocess", "audio": audio, "id": record.id, "mode": mode]
+        cmd["request_id"] = requestID
         if let bundleID = record.targetBundleID { cmd["bundle_id"] = bundleID }
         if let appName = record.targetAppName { cmd["app_name"] = appName }
         supervisor.send(cmd)

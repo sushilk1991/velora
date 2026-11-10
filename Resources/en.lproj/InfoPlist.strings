@@ -1,0 +1,5 @@
+"CFBundleDisplayName" = "Velora";
+"NSMicrophoneUsageDescription" = "Velora uses the microphone to transcribe your speech into text. Audio never leaves this Mac.";
+"NSAudioCaptureUsageDescription" = "Velora captures computer audio only after you confirm a meeting recording, so it can create a local transcript and notes.";
+"NSCalendarsFullAccessUsageDescription" = "Velora optionally reads nearby calendar events to suggest meeting recording at the right time. Calendar data stays on this Mac.";
+"NSAppleEventsUsageDescription" = "Velora uses app automation only when you ask it to read browser context or control playback. Everything stays on this Mac.";

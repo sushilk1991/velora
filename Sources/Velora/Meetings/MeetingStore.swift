@@ -76,6 +76,7 @@ struct MeetingNotes: Equatable {
     /// Exact action text keeps completion state attached to an unchanged
     /// commitment when notes are regenerated, never to a reused row index.
     var completedActionItems: Set<String> = []
+    var chapters: [MeetingChapter] = []
 
     var isEmpty: Bool {
         summary.isEmpty && decisions.isEmpty && actionItems.isEmpty
@@ -126,6 +127,10 @@ struct MeetingRecord: Identifiable, Equatable {
     var segments: [MeetingSegment] = []
     var isImported: Bool = false
     var importedDurationMs: Int? = nil
+    /// Changes only when committed transcript content changes.
+    var transcriptRevision: Int64 = 0
+    var personalNotes: String = ""
+    var personalNotesRevision: Int64 = 0
 
     var durationMs: Int {
         if isImported, let importedDurationMs { return max(0, importedDurationMs) }
@@ -173,6 +178,7 @@ struct MeetingRecord: Identifiable, Equatable {
                 "- [\(notes.completedActionItems.contains($0) ? "x" : " ")] \($0)"
             }
         }
+        if !personalNotes.isEmpty { sections += ["", "## Personal notes", "", personalNotes] }
         let transcript = formattedTranscript
         if !transcript.isEmpty { sections += ["", "## Transcript", "", transcript] }
         return sections.joined(separator: "\n")
@@ -338,9 +344,25 @@ final class MeetingStore {
             "notes_partial INTEGER NOT NULL DEFAULT 0",
             "imported INTEGER NOT NULL DEFAULT 0",
             "imported_duration_ms INTEGER",
+            "transcript_revision INTEGER NOT NULL DEFAULT 0",
+            "chapters TEXT NOT NULL DEFAULT ''",
+            "personal_notes TEXT NOT NULL DEFAULT ''",
+            "personal_notes_revision INTEGER NOT NULL DEFAULT 0",
         ] {
             sqlite3_exec(db, "ALTER TABLE meetings ADD COLUMN \(column);", nil, nil, nil)
         }
+        // Revision changes commit atomically with transcript mutations,
+        // including replacement/deletion and any external SQLite writer.
+        sqlite3_exec(db, """
+            CREATE TRIGGER IF NOT EXISTS meeting_segment_revision_insert AFTER INSERT ON meeting_segments
+            BEGIN UPDATE meetings SET transcript_revision = transcript_revision + 1, chapters = '' WHERE id = NEW.meeting_id; END;
+            CREATE TRIGGER IF NOT EXISTS meeting_segment_revision_update AFTER UPDATE ON meeting_segments
+            WHEN OLD.text != NEW.text OR OLD.start_ms != NEW.start_ms OR OLD.end_ms != NEW.end_ms
+              OR OLD.speaker != NEW.speaker OR OLD.chunk_index != NEW.chunk_index
+            BEGIN UPDATE meetings SET transcript_revision = transcript_revision + 1, chapters = '' WHERE id = NEW.meeting_id; END;
+            CREATE TRIGGER IF NOT EXISTS meeting_segment_revision_delete AFTER DELETE ON meeting_segments
+            BEGIN UPDATE meetings SET transcript_revision = transcript_revision + 1, chapters = '' WHERE id = OLD.meeting_id; END;
+            """, nil, nil, nil)
         // The automatic notes retry upgrade runs once, as one transaction:
         //
         //   add notes_auto_retried   fails as a duplicate column once done
@@ -730,7 +752,7 @@ final class MeetingStore {
             guard sqlite3_prepare_v2(db, """
                 UPDATE meetings SET status = ?, summary = ?, decisions = ?,
                     action_items = ?, error = NULL, notes_pending = 0,
-                    notes_partial = ? WHERE id = ?;
+                    notes_partial = ?, chapters = ? WHERE id = ?;
                 """, -1, &stmt, nil) == SQLITE_OK else { return false }
             defer { sqlite3_finalize(stmt) }
             bindText(stmt, 1, MeetingStatus.ready.rawValue)
@@ -738,8 +760,9 @@ final class MeetingStore {
             bindText(stmt, 3, notes.decisions.joined(separator: "\n"))
             bindText(stmt, 4, notes.actionItems.joined(separator: "\n"))
             sqlite3_bind_int(stmt, 5, notes.partial ? 1 : 0)
-            bindText(stmt, 6, meetingID)
-            guard sqlite3_step(stmt) == SQLITE_DONE else {
+            bindText(stmt, 6, MeetingChapter.encode(notes.chapters))
+            bindText(stmt, 7, meetingID)
+            guard sqlite3_step(stmt) == SQLITE_DONE, sqlite3_changes(db) == 1 else {
                 NSLog("Velora: meeting notes save failed: %@", lastError)
                 return false
             }
@@ -785,7 +808,8 @@ final class MeetingStore {
                 guard sqlite3_prepare_v2(db, """
                     UPDATE meetings SET status = ?, summary = ?, decisions = ?,
                         action_items = ?, error = NULL, notes_pending = 0,
-                        notes_partial = ?, mic_issue = ?, system_issue = ?
+                        notes_partial = ?, mic_issue = ?, system_issue = ?, chapters = ?,
+                        transcript_revision = transcript_revision + 1
                     WHERE id = ?;
                     """, -1, &update, nil) == SQLITE_OK else { return false }
                 bindText(update, 1, MeetingStatus.ready.rawValue)
@@ -795,7 +819,8 @@ final class MeetingStore {
                 sqlite3_bind_int(update, 5, notes.partial ? 1 : 0)
                 bindText(update, 6, Self.issueText(issues[.me]))
                 bindText(update, 7, Self.issueText(issues[.them]))
-                bindText(update, 8, meetingID)
+                bindText(update, 8, MeetingChapter.encode(notes.chapters))
+                bindText(update, 9, meetingID)
                 let updated = sqlite3_step(update) == SQLITE_DONE
                 sqlite3_finalize(update)
                 guard updated else { return false }
@@ -1013,6 +1038,39 @@ final class MeetingStore {
         }
     }
 
+    /// A retention preview is an optimistic snapshot. Compare it while the
+    /// store queue and SQLite write transaction exclude personal-note/action
+    /// writes, and commit deletion before touching any recording directory.
+    func deleteForRetention(expected: MeetingRecord) -> Bool {
+        guard expected.segments.isEmpty else { return false }
+        return queue.sync { [self] in
+            let committed = transactionOnQueue {
+                guard let current = recordsOnQueue(whereClause: """
+                    WHERE id = ? AND status IN ('ready', 'failed') AND notes_pending = 0
+                      AND NOT EXISTS (SELECT 1 FROM meeting_reprocess_jobs WHERE meeting_id = meetings.id)
+                    """, bindings: [expected.id], limit: 1, includeSegments: false).first,
+                      current == expected,
+                      executeOnQueue("DELETE FROM meetings WHERE id = ?;", meetingID: expected.id),
+                      sqlite3_changes(db) == 1 else { return false }
+                if ftsAvailable {
+                    guard executeOnQueue("DELETE FROM meeting_search WHERE meeting_id = ?;", meetingID: expected.id)
+                    else { return false }
+                }
+                return true
+            }
+            guard committed else { return false }
+            var filesRemoved = true
+            if let directory = meetingDirectoryURL(id: expected.id) {
+                do { try FileManager.default.removeItem(at: directory) }
+                catch CocoaError.fileNoSuchFile { }
+                catch CocoaError.fileReadNoSuchFile { }
+                catch { filesRemoved = false }
+            }
+            DispatchQueue.main.async { NotificationCenter.default.post(name: .veloraMeetingsChanged, object: nil) }
+            return filesRemoved
+        }
+    }
+
     /// Removes a meeting's audio directory and leaves its row: the
     /// coordinator's cleanup of a capture SQLite wouldn't delete. True when
     /// nothing is left there (nothing ever was counts); false for an id
@@ -1030,6 +1088,53 @@ final class MeetingStore {
                 return false
             }
             return true
+        }
+    }
+
+    /// Counts only regular, owned track entries left after a committed
+    /// retention deletion. A UUID is not enough: a live or unreadable row
+    /// protects the whole directory, and directory/track links are excluded.
+    func retentionOrphanAudioURLs(meetingID: String) -> [URL]? {
+        queue.sync { [self] in
+            guard let directory = meetingDirectoryURL(id: meetingID),
+                  rowCheckOnQueue(meetingID: meetingID) == .absent else { return nil }
+            do {
+                let type = try FileManager.default.attributesOfItem(atPath: directory.path)[.type] as? FileAttributeType
+                guard type == .typeDirectory else { return [] }
+                var tracks: [URL] = []
+                for name in ["me.caf", "them.caf", "them.m4a"] {
+                    let candidate = directory.appendingPathComponent(name)
+                    do {
+                        let type = try FileManager.default.attributesOfItem(atPath: candidate.path)[.type] as? FileAttributeType
+                        guard type == .typeRegular else { continue }
+                        // This helper is called only after both logical
+                        // entries have been established as non-link entries.
+                        guard let url = retentionAudioURL(relativePath: meetingID + "/" + name) else { return nil }
+                        tracks.append(url)
+                    } catch let error as CocoaError where error.code == .fileNoSuchFile || error.code == .fileReadNoSuchFile {
+                        continue
+                    }
+                }
+                return tracks
+            } catch let error as CocoaError where error.code == .fileNoSuchFile || error.code == .fileReadNoSuchFile {
+                return []
+            } catch { return nil }
+        }
+    }
+
+    /// Retry only a manifest's logical orphan directory. The absent-row
+    /// check and removal share the store queue and a SQLite write lock, so
+    /// no queued personal/action write or new row can acquire this target.
+    /// removeItem unlinks a substituted directory link itself, not its target.
+    func removeRetentionOrphan(meetingID: String) -> Bool {
+        queue.sync { [self] in
+            guard let directory = meetingDirectoryURL(id: meetingID) else { return false }
+            return transactionOnQueue {
+                guard rowCheckOnQueue(meetingID: meetingID) == .absent else { return false }
+                do { try FileManager.default.removeItem(at: directory); return true }
+                catch let error as CocoaError where error.code == .fileNoSuchFile || error.code == .fileReadNoSuchFile { return true }
+                catch { return false }
+            }
         }
     }
 
@@ -1081,39 +1186,69 @@ final class MeetingStore {
     func pruneAudio(olderThanDays days: Int) {
         guard days > 0 else { return }
         queue.async { [self] in
-            let cutoff = Date().timeIntervalSince1970 - Double(days) * 86_400
-            var stmt: OpaquePointer?
-            guard sqlite3_prepare_v2(db, """
-                SELECT id, mic_path, system_path FROM meetings
-                WHERE status IN ('ready', 'failed') AND ended_at < ?
-                  AND (mic_path IS NOT NULL OR system_path IS NOT NULL);
-                """, -1, &stmt, nil) == SQLITE_OK else { return }
-            sqlite3_bind_double(stmt, 1, cutoff)
-            var ids: [String] = []
-            while sqlite3_step(stmt) == SQLITE_ROW {
-                guard let id = columnText(stmt, 0) else { continue }
-                ids.append(id)
-                for column in [1, 2] {
-                    removeTrack(relativePath: columnText(stmt, Int32(column)))
-                }
-            }
-            sqlite3_finalize(stmt)
-            for id in ids {
-                var update: OpaquePointer?
-                if sqlite3_prepare_v2(
-                    db, "UPDATE meetings SET mic_path = NULL, system_path = NULL WHERE id = ?;",
-                    -1, &update, nil) == SQLITE_OK {
-                    bindText(update, 1, id); sqlite3_step(update)
-                }
-                sqlite3_finalize(update)
-            }
-            if !ids.isEmpty {
-                DispatchQueue.main.async {
-                    NotificationCenter.default.post(
-                        name: .veloraMeetingsChanged, object: nil)
-                }
-            }
+            let cutoff = Date().addingTimeInterval(-Double(days) * 86_400)
+            let records = recordsOnQueue(whereClause: """
+                WHERE ended_at < CAST(? AS REAL) AND status IN ('ready', 'failed')
+                  AND notes_pending = 0 AND (mic_path IS NOT NULL OR system_path IS NOT NULL)
+                  AND NOT EXISTS (SELECT 1 FROM meeting_reprocess_jobs WHERE meeting_id = meetings.id)
+                """, bindings: [String(cutoff.timeIntervalSince1970)], limit: Int(Int32.max), includeSegments: false)
+            var changed = false
+            for record in records { changed = expireAudioOnQueue(expected: record) || changed }
+            if changed { notifyAudioExpired() }
         }
+    }
+
+    /// Applies exactly the audio removal the user previewed. Notes, transcript,
+    /// personal edits and staged/retry work remain protected by the comparison.
+    func expireAudio(expected: MeetingRecord) -> Bool {
+        let saved = queue.sync { [self] in expireAudioOnQueue(expected: expected) }
+        if saved { notifyAudioExpired() }
+        return saved
+    }
+
+    private func notifyAudioExpired() {
+        DispatchQueue.main.async { NotificationCenter.default.post(name: .veloraMeetingsChanged, object: nil) }
+    }
+
+    private func expireAudioOnQueue(expected: MeetingRecord) -> Bool {
+        guard expected.segments.isEmpty, expected.micPath != nil || expected.systemPath != nil else { return false }
+        return transactionOnQueue {
+            guard let current = recordsOnQueue(whereClause: """
+                WHERE id = ? AND status IN ('ready', 'failed') AND notes_pending = 0
+                  AND NOT EXISTS (SELECT 1 FROM meeting_reprocess_jobs WHERE meeting_id = meetings.id)
+                """, bindings: [expected.id], limit: 1, includeSegments: false).first,
+                  current == expected else { return false }
+            for relative in [current.micPath, current.systemPath].compactMap({ $0 }) {
+                guard removeTrackChecked(relativePath: relative, meetingID: current.id) else { return false }
+            }
+            guard executeOnQueue("UPDATE meetings SET mic_path = NULL, system_path = NULL WHERE id = ?;", meetingID: current.id),
+                  sqlite3_changes(db) == 1 else { return false }
+            return true
+        }
+    }
+
+    private func removeTrackChecked(relativePath: String, meetingID: String) -> Bool {
+        let parts = relativePath.split(separator: "/", omittingEmptySubsequences: false).map(String.init)
+        guard parts.count == 2, parts[0] == meetingID,
+              ["me.caf", "them.caf", "them.m4a"].contains(parts[1]),
+              let directory = meetingDirectoryURL(id: meetingID) else { return false }
+        do {
+            // Read the entry itself (lstat), never traverse a substituted
+            // directory link. Its target's files do not belong to this row;
+            // detach the stored paths and leave both link and target alone.
+            let attributes = try FileManager.default.attributesOfItem(atPath: directory.path)
+            if attributes[.type] as? FileAttributeType == .typeSymbolicLink { return true }
+            guard attributes[.type] as? FileAttributeType == .typeDirectory else { return false }
+            let file = directory.appendingPathComponent(parts[1])
+            if let attributes = try? FileManager.default.attributesOfItem(atPath: file.path),
+               attributes[.type] as? FileAttributeType == .typeDirectory { return false }
+            // A link planted as the track itself is unlinked without
+            // resolving its target, including a target outside filesRoot.
+            try FileManager.default.removeItem(at: file)
+            return true
+        } catch let error as CocoaError where error.code == .fileNoSuchFile || error.code == .fileReadNoSuchFile {
+            return true
+        } catch { return false }
     }
 
     // MARK: - Reads
@@ -1132,6 +1267,64 @@ final class MeetingStore {
             recordsOnQueue(
                 whereClause: "", bindings: [], limit: min(500, max(1, limit)),
                 includeSegments: false)
+        }
+    }
+
+    /// All eligible expired metadata, without the list's 500-row cap. Active,
+    /// notes-pending and staged Recreate jobs are protected at the SQL boundary.
+    func retentionMetadata(before: Date) -> [MeetingRecord] {
+        queue.sync { [self] in
+            recordsOnQueue(whereClause: """
+                WHERE ended_at < CAST(? AS REAL) AND status IN ('ready', 'failed')
+                  AND notes_pending = 0 AND NOT EXISTS (
+                    SELECT 1 FROM meeting_reprocess_jobs WHERE meeting_id = meetings.id)
+                """, bindings: [String(before.timeIntervalSince1970)],
+                limit: Int(Int32.max), includeSegments: false)
+        }
+    }
+
+    /// Optimistic writes stop another notes window overwriting a newer edit.
+    /// Generated-note replacement never writes either personal-notes column.
+    func savePersonalNotes(meetingID: String, text: String, expectedRevision: Int64) -> Bool {
+        guard text.utf8.count <= 200_000 else { return false }
+        let saved = queue.sync { [self] in
+            var stmt: OpaquePointer?
+            guard sqlite3_prepare_v2(db, """
+                UPDATE meetings SET personal_notes = ?, personal_notes_revision = personal_notes_revision + 1
+                WHERE id = ? AND personal_notes_revision = ?;
+                """, -1, &stmt, nil) == SQLITE_OK else { return false }
+            defer { sqlite3_finalize(stmt) }
+            bindText(stmt, 1, text)
+            bindText(stmt, 2, meetingID)
+            sqlite3_bind_int64(stmt, 3, expectedRevision)
+            return sqlite3_step(stmt) == SQLITE_DONE && sqlite3_changes(db) == 1
+        }
+        if saved {
+            DispatchQueue.main.async { NotificationCenter.default.post(name: .veloraMeetingsChanged, object: nil) }
+        }
+        return saved
+    }
+
+    /// A source opens only while its meeting and exact transcript revision
+    /// still exist. A reused speaker/chunk key cannot redirect an old link.
+    func resolve(_ reference: MeetingSourceReference) -> MeetingSegment? {
+        resolve([reference])?.first
+    }
+
+    func resolve(_ references: [MeetingSourceReference]) -> [MeetingSegment]? {
+        queue.sync { [self] in
+            guard let first = references.first, references.count <= 20_000,
+                  references.allSatisfy({ $0.meetingID == first.meetingID && $0.revision == first.revision }),
+                  let record = recordsOnQueue(whereClause: "WHERE id = ?", bindings: [first.meetingID],
+                    limit: 1, includeSegments: false).first,
+                  record.transcriptRevision == first.revision else { return nil }
+            let segments = Dictionary(uniqueKeysWithValues: segmentsOnQueue(meetingID: first.meetingID).map { ($0.sourceKey, $0) })
+            var resolved: [MeetingSegment] = []
+            for reference in references {
+                guard let segment = segments[reference.key], segment.text == reference.text else { return nil }
+                resolved.append(segment)
+            }
+            return resolved
         }
     }
 
@@ -1362,6 +1555,22 @@ final class MeetingStore {
         return candidate
     }
 
+    /// Preview owned bytes without following a planted track/directory link
+    /// into a different recording. Removal uses the store's separate guard.
+    func retentionAudioURL(relativePath: String?) -> URL? {
+        guard let relativePath, audioURL(relativePath: relativePath) != nil else { return nil }
+        let parts = relativePath.split(separator: "/").map(String.init)
+        guard parts.count == 2, let directory = meetingDirectoryURL(id: parts[0]) else { return nil }
+        let url = directory.appendingPathComponent(parts[1])
+        do {
+            guard try FileManager.default.attributesOfItem(atPath: directory.path)[.type] as? FileAttributeType == .typeDirectory else { return nil }
+            let type = try FileManager.default.attributesOfItem(atPath: url.path)[.type] as? FileAttributeType
+            return type == .typeRegular ? url : nil
+        } catch CocoaError.fileNoSuchFile { return url }
+        catch CocoaError.fileReadNoSuchFile { return url }
+        catch { return nil }
+    }
+
     /// A prepared CAF header exists even when capture wrote zero frames, and
     /// random/corrupt bytes can also exceed a size threshold. Retry is offered
     /// only when Core Audio can open the container, observe real frames, and
@@ -1435,7 +1644,8 @@ final class MeetingStore {
         let sql = """
             SELECT id, title, started_at, ended_at, source_app, calendar_event_id,
                    status, summary, decisions, action_items, mic_path, system_path, error,
-                   mic_issue, system_issue, notes_partial, imported, imported_duration_ms
+                   mic_issue, system_issue, notes_partial, imported, imported_duration_ms,
+                   transcript_revision, personal_notes, personal_notes_revision, chapters
             FROM meetings \(whereClause) ORDER BY started_at DESC LIMIT ?;
             """
         var stmt: OpaquePointer?
@@ -1462,7 +1672,8 @@ final class MeetingStore {
                     actionItems: Self.lines(columnText(stmt, 9)),
                     partial: sqlite3_column_int(stmt, 15) == 1,
                     completedActionItems: completedActionsOnQueue(
-                        meetingID: id, actions: Self.lines(columnText(stmt, 9)))),
+                        meetingID: id, actions: Self.lines(columnText(stmt, 9))),
+                    chapters: MeetingChapter.decode(columnText(stmt, 21))),
                 micPath: columnText(stmt, 10),
                 systemPath: columnText(stmt, 11),
                 error: columnText(stmt, 12),
@@ -1471,7 +1682,10 @@ final class MeetingStore {
                 segments: includeSegments ? segmentsOnQueue(meetingID: id) : [],
                 isImported: sqlite3_column_int(stmt, 16) == 1,
                 importedDurationMs: sqlite3_column_type(stmt, 17) == SQLITE_NULL
-                    ? nil : Int(sqlite3_column_int64(stmt, 17))))
+                    ? nil : Int(sqlite3_column_int64(stmt, 17)),
+                transcriptRevision: sqlite3_column_int64(stmt, 18),
+                personalNotes: columnText(stmt, 19) ?? "",
+                personalNotesRevision: sqlite3_column_int64(stmt, 20)))
         }
         return output
     }
@@ -1482,9 +1696,13 @@ final class MeetingStore {
               !segment.text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
         else { return }
         let sql = """
-            INSERT OR REPLACE INTO \(table)
+            INSERT INTO \(table)
                 (meeting_id, speaker, chunk_index, start_ms, end_ms, text)
-            VALUES (?, ?, ?, ?, ?, ?);
+            VALUES (?, ?, ?, ?, ?, ?)
+            ON CONFLICT(meeting_id, speaker, chunk_index) DO UPDATE SET
+                start_ms = excluded.start_ms, end_ms = excluded.end_ms, text = excluded.text
+            WHERE \(table).start_ms != excluded.start_ms OR \(table).end_ms != excluded.end_ms
+                OR \(table).text != excluded.text;
             """
         var stmt: OpaquePointer?
         guard sqlite3_prepare_v2(db, sql, -1, &stmt, nil) == SQLITE_OK else { return }

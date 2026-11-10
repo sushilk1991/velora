@@ -72,8 +72,8 @@ final class LocalWorkflowService {
                 }
                 let mode: String?
                 if let supplied = arguments["mode"] {
-                    guard let name = supplied as? String, !name.isEmpty, name.count <= 128 else {
-                        finish(.failure(Self.invalid("mode must be a name of at most 128 characters"))); return
+                    guard let name = supplied as? String, !name.isEmpty, name.unicodeScalars.count <= ModeRecipeDocument.maximumNameCharacters else {
+                        finish(.failure(Self.invalid("mode must be a name of at most 240 characters"))); return
                     }
                     mode = name
                 } else { mode = nil }
@@ -118,7 +118,7 @@ final class LocalWorkflowService {
             return ["valid": true, "name": mode.name, "formatting": mode.formatting,
                     "saved": false, "app_assignments_applied": false]
         case "modes_init":
-            let name = try Self.text(arguments, "name", maximum: 100, fallback: "Custom mode")
+            let name = try Self.text(arguments, "name", maximum: ModeRecipeDocument.maximumNameCharacters, fallback: "Custom mode")
             var mode: Mode
             if let recipe = arguments["recipe"] as? String {
                 guard let selected = ModeRecipe.all.first(where: { $0.id == recipe }) else {

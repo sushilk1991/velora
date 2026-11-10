@@ -11,12 +11,12 @@ enum MainPane: String, CaseIterable, Identifiable {
 
     var title: String {
         switch self {
-        case .home: return "Home"
-        case .history: return "History"
-        case .stats: return "Stats"
-        case .meetings: return "Meetings"
-        case .dictionary: return "Dictionary"
-        case .modes: return "Modes"
+        case .home: return L10n.text("Home")
+        case .history: return L10n.text("History")
+        case .stats: return L10n.text("Stats")
+        case .meetings: return L10n.text("Meetings")
+        case .dictionary: return L10n.text("Dictionary")
+        case .modes: return L10n.text("Modes")
         }
     }
 
@@ -179,7 +179,7 @@ final class MainWindowController: NSWindowController, NSWindowDelegate {
             actions: actions)
 
         let window = Self.makeShellWindow(
-            rootView: root, title: "Velora", size: Self.contentSize, minimumSize: Self.minimumSize)
+            rootView: LocalizedInterface { root }, title: "Velora", size: Self.contentSize, minimumSize: Self.minimumSize)
         // Reopens at the size and place the user left it: AppKit restores
         // the saved frame here and saves each move or resize. Not in
         // makeShellWindow, so selftest and harness windows never save one.
@@ -300,9 +300,9 @@ final class MainWindowController: NSWindowController, NSWindowDelegate {
         let alert = NSAlert()
         alert.messageText = "Save changes to “\(name)” before quitting?"
         alert.informativeText = "Your edits to this mode aren't saved yet."
-        alert.addButton(withTitle: "Save")
-        alert.addButton(withTitle: "Don't Save")
-        alert.addButton(withTitle: "Cancel")
+        alert.addButton(withTitle: L10n.text("Save"))
+        alert.addButton(withTitle: L10n.text("Don't Save"))
+        alert.addButton(withTitle: L10n.text("Cancel"))
         switch runQuitAlert(alert) {
         case .alertFirstButtonReturn:
             return .save
@@ -352,6 +352,7 @@ final class MainWindowController: NSWindowController, NSWindowDelegate {
 
 /// Internal (not private) so `--snapshot` can render the same shell offscreen.
 struct MainRootView: View {
+    @ObservedObject private var interfaceLocale = InterfaceLocale.shared
     @ObservedObject var model: SettingsModel
     @ObservedObject var selection: MainWindowSelection
     let supervisor: EngineSupervisor?
@@ -404,6 +405,7 @@ struct MainRootView: View {
 /// History: the pane title with the search box and app filter beside it,
 /// over the journal. One view model, owned here, feeds both.
 struct HistoryPane: View {
+    @ObservedObject private var interfaceLocale = InterfaceLocale.shared
     @ObservedObject var model: SettingsModel
     var onEditStyle: () -> Void
     @StateObject private var viewModel: HistoryViewModel
@@ -428,6 +430,7 @@ struct HistoryPane: View {
 /// Stats: the pane title with the range picker and Share beside it, over
 /// the dashboard. Same one-view-model arrangement as `HistoryPane`.
 struct StatsPane: View {
+    @ObservedObject private var interfaceLocale = InterfaceLocale.shared
     @ObservedObject var model: SettingsModel
     @StateObject private var viewModel: IntelligenceViewModel
 
@@ -449,6 +452,7 @@ struct StatsPane: View {
 /// The main window's glass sidebar: pane rows, a Settings row with the ⌘,
 /// hint, and the engine status line at the bottom.
 struct MainSidebar: View {
+    @ObservedObject private var interfaceLocale = InterfaceLocale.shared
     @ObservedObject var selection: MainWindowSelection
     let supervisor: EngineSupervisor?
     let openSettings: () -> Void
@@ -484,8 +488,8 @@ struct MainSidebar: View {
             }
             Spacer(minLength: VeloraSpacing.m)
             Button(action: openSettings) {
-                SidebarRow(symbol: "gearshape", title: "Settings", selected: false) {
-                    Text("⌘,")
+                SidebarRow(symbol: "gearshape", title: L10n.text("Settings"), selected: false) {
+                    Text(L10n.text("⌘,"))
                         .font(.system(size: 11))
                         .foregroundStyle(.tertiary)
                 }
@@ -508,6 +512,7 @@ struct MainSidebar: View {
 ///     ● uv not found. Install it
 ///       from https://astral.sh/uv
 struct EngineStatusLine: View {
+    @ObservedObject private var interfaceLocale = InterfaceLocale.shared
     @StateObject private var status: EngineStatusModel
 
     init(supervisor: EngineSupervisor?) {
@@ -535,7 +540,7 @@ struct EngineStatusLine: View {
                 .fill(status.state == .ready ? VeloraStatus.success : VeloraStatus.warning)
                 .frame(width: Self.dotDiameter, height: Self.dotDiameter)
                 .alignmentGuide(.firstTextBaseline) { $0[VerticalAlignment.center] + Self.dotLift }
-            Text(status.caption)
+            Text(L10n.text(status.caption))
                 .font(.system(size: Self.captionSize))
                 .foregroundStyle(.secondary)
                 .fixedSize(horizontal: false, vertical: true)

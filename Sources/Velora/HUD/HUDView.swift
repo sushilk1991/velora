@@ -5,6 +5,7 @@ import SwiftUI
 /// waveform-only; opaque Stream targets use the capsule for a non-mutating
 /// live preview before one authoritative final insertion.
 struct HUDView: View {
+    @ObservedObject private var interfaceLocale = InterfaceLocale.shared
     private typealias ActionResultValue = (
         id: String,
         status: HUDState.ActionResultStatus,
@@ -271,7 +272,7 @@ struct HUDView: View {
         HStack(spacing: VeloraSpacing.s) {
             Image(systemName: "waveform")
                 .foregroundStyle(VeloraBrand.iconGradient)
-            Text(model.transcribeProgress)
+            Text(L10n.text(model.transcribeProgress))
                 .font(.system(size: 12, weight: .medium))
                 .foregroundStyle(hudPrimaryText)
                 .lineLimit(1)
@@ -285,7 +286,7 @@ struct HUDView: View {
                 .font(.system(size: 13, weight: .semibold))
                 .foregroundStyle(VeloraBrand.iconGradient)
                 .frame(width: 18)
-            Text(model.liveTranscript.isEmpty ? "Listening…" : model.liveTranscript)
+            Text(model.liveTranscript.isEmpty ? L10n.text("Listening…") : model.liveTranscript)
                 .font(.system(size: 12, weight: .medium))
                 .foregroundStyle(
                     model.liveTranscript.isEmpty
@@ -368,7 +369,7 @@ struct HUDView: View {
                     .foregroundStyle(hudPrimaryText)
                     .lineLimit(1)
                     .truncationMode(.tail)
-                Text("Local mic + Mac audio · Tell everyone")
+                Text(L10n.text("Local mic + Mac audio · Tell everyone"))
                     .font(.system(size: 10, weight: .medium))
                     .foregroundStyle(hudSecondaryText)
                     .lineLimit(1)
@@ -378,7 +379,7 @@ struct HUDView: View {
                 model.onMeetingSuggestionAccept?()
             }
                 .help(MeetingCoordinator.consentDescription)
-                .accessibilityLabel("Start meeting notes")
+                .accessibilityLabel(L10n.text("Start meeting notes"))
             Button { model.onMeetingSuggestionDismiss?() } label: {
                 Image(systemName: "xmark")
                     .font(.system(size: 10, weight: .bold))
@@ -386,8 +387,8 @@ struct HUDView: View {
             }
             .buttonStyle(.plain)
             .foregroundStyle(hudSecondaryText)
-            .help("Not Now")
-            .accessibilityLabel("Dismiss meeting suggestion")
+            .help(L10n.text("Not Now"))
+            .accessibilityLabel(L10n.text("Dismiss meeting suggestion"))
         }
         .padding(.horizontal, HUDGeometry.contentInsetH)
         .padding(.vertical, HUDGeometry.contentInsetV)
@@ -407,7 +408,7 @@ struct HUDView: View {
                 .fill(Color(nsColor: .systemRed))
                 .frame(width: HUDGeometry.dotDiameter, height: HUDGeometry.dotDiameter)
             VStack(alignment: .leading, spacing: 1) {
-                Text(meetingValue?.title ?? "Meeting")
+                Text(meetingValue?.title ?? L10n.text("Meeting"))
                     .font(.system(size: 12, weight: .semibold))
                     .foregroundStyle(hudPrimaryText)
                     .lineLimit(1)
@@ -430,8 +431,8 @@ struct HUDView: View {
             }
             .buttonStyle(.borderless)
             .foregroundStyle(hudPrimaryText)
-            .help("Stop meeting recording")
-            .accessibilityLabel("Stop meeting recording")
+            .help(L10n.text("Stop meeting recording"))
+            .accessibilityLabel(L10n.text("Stop meeting recording"))
         }
         .padding(.horizontal, HUDGeometry.contentInsetH)
         .padding(.vertical, HUDGeometry.contentInsetV)
@@ -440,7 +441,7 @@ struct HUDView: View {
 
     private var meetingEndTitle: String {
         if case .meetingEnd(let title) = model.state { return title }
-        return "Meeting"
+        return L10n.text("Meeting")
     }
 
     private var meetingEndContent: some View {
@@ -452,7 +453,7 @@ struct HUDView: View {
                     width: HUDGeometry.meetingPromptIconSide,
                     height: HUDGeometry.meetingPromptIconSide)
             VStack(alignment: .leading, spacing: 1) {
-                Text("Meeting ended?")
+                Text(L10n.text("Meeting ended?"))
                     .font(.system(size: 12, weight: .semibold))
                     .foregroundStyle(hudPrimaryText)
                 Text(meetingEndTitle)
@@ -462,15 +463,15 @@ struct HUDView: View {
                     .truncationMode(.tail)
             }
             .frame(width: 130, alignment: .leading)
-            Button("Keep Recording") { model.onMeetingEndKeep?() }
+            Button(L10n.text("Keep Recording")) { model.onMeetingEndKeep?() }
                 .buttonStyle(.borderless)
                 .font(.system(size: 11, weight: .semibold))
                 .foregroundStyle(hudSecondaryText)
-                .accessibilityLabel("Keep recording meeting")
+                .accessibilityLabel(L10n.text("Keep recording meeting"))
             meetingPrimaryButton("Finish Notes") {
                 model.onMeetingEndConfirm?()
             }
-                .accessibilityLabel("Stop meeting and create notes")
+                .accessibilityLabel(L10n.text("Stop meeting and create notes"))
             Button { model.onMeetingEndDiscard?() } label: {
                 Image(systemName: "trash")
                     .font(.system(size: 10, weight: .semibold))
@@ -478,8 +479,8 @@ struct HUDView: View {
             }
             .buttonStyle(.plain)
             .foregroundStyle(hudSecondaryText)
-            .help("Discard meeting recording…")
-            .accessibilityLabel("Discard meeting recording")
+            .help(L10n.text("Discard meeting recording…"))
+            .accessibilityLabel(L10n.text("Discard meeting recording"))
         }
         .padding(.horizontal, HUDGeometry.contentInsetH)
         .padding(.vertical, HUDGeometry.contentInsetV)
@@ -618,11 +619,11 @@ struct HUDView: View {
                 .foregroundStyle(hudPrimaryText)
             Spacer(minLength: 0)
             if let meetingID = meetingFailureID {
-                Button("Open") { model.onMeetingFailureOpen?(meetingID) }
+                Button(L10n.text("Open")) { model.onMeetingFailureOpen?(meetingID) }
                     .buttonStyle(.borderless)
                     .font(.system(size: 12, weight: .semibold))
                     .foregroundStyle(Color.accentColor)
-                Button("Retry") { model.onMeetingFailureRetry?(meetingID) }
+                Button(L10n.text("Retry")) { model.onMeetingFailureRetry?(meetingID) }
                     .buttonStyle(.borderless)
                     .font(.system(size: 12, weight: .semibold))
                     .foregroundStyle(Color.accentColor)
@@ -666,7 +667,7 @@ struct HUDView: View {
                 .font(.system(size: 12, weight: .semibold))
                 .foregroundStyle(hudPrimaryText)
                 .lineLimit(1)
-            Text("· Learned")
+            Text(L10n.text("· Learned"))
                 .font(.system(size: 11, weight: .medium))
                 .foregroundStyle(Self.learnedTextColor(for: colorSchemeContrast).color)
         }
@@ -829,7 +830,7 @@ struct HUDView: View {
                 }
                 .padding(.trailing, actionResultButtonWidth(appName: value.appName))
                 HStack(spacing: VeloraSpacing.xs) {
-                    Text("Open \(appName)")
+                    Text(L10n.format("Open %@", appName))
                     Image(systemName: "arrow.up.forward.app")
                 }
                 .font(.system(size: 11, weight: .semibold))
@@ -861,9 +862,9 @@ struct HUDView: View {
 
     private func actionResultOpenLabel(_ value: ActionResultValue) -> String {
         guard let appName = value.appName, !appName.isEmpty else {
-            return "Action Mode result"
+            return L10n.text("Action Mode result")
         }
-        return "Open \(appName)"
+        return L10n.format("Open %@", appName)
     }
 
     private func openActionResult(_ value: ActionResultValue) {
@@ -945,9 +946,9 @@ struct HUDView: View {
         }
         switch state {
         case .notice(_, let message) where message.contains("Esc cancels"):
-            return "Press Escape to cancel the running action"
+            return L10n.text("Press Escape to cancel the running action")
         default:
-            return state == .standby ? "Click to start dictation" : "Click to stop dictation"
+            return state == .standby ? L10n.text("Click to start dictation") : L10n.text("Click to stop dictation")
         }
     }
 
@@ -983,11 +984,11 @@ struct HUDView: View {
         // the state's name. Not "Polishing": the engine may not run cleanup
         // (docs/plans/2026-07-11-hud-trust-recovery-design.md).
         case .listening:
-            return "Listening"
+            return L10n.text("Listening")
         case .transcribing:
             return Self.accessibilityStatus(for: model)
         default:
-            return "Velora dictation"
+            return L10n.text("Velora dictation")
         }
     }
 

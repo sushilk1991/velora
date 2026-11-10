@@ -235,9 +235,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             self?.supervisor.send(["cmd": "reload_config"])
         })
         dictionarySync = ICloudDictionarySync(repository: dictionary)
-        // Transcript text is tiny and kept indefinitely; only the audio archive
-        // expires (the engine prunes clips). Play just disables when a row's
-        // clip has aged out.
+        // Text stays indefinitely by default. Optional retention uses the
+        // existing store owners and never participates in capture startup.
         dictation = DictationController(
             supervisor: supervisor,
             contextTracker: contextTracker,
@@ -288,6 +287,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                     || self.transcriber.isTranscribing
                     || !self.hud.model.state.isAvailable
             })
+        StorageRetention.shared.configure(history: history, meetings: meetings,
+            canApply: { [weak self] in
+                guard let self, self.restartBlock() == nil, !self.history.hasPendingWrites else { return false }
+                if case .processing = self.meetingProcessor.state { return false }
+                return true
+            }, didApplyAudioPolicy: { [weak self] in self?.supervisor.send(["cmd": "reload_config"]) }, supervisor: supervisor)
         dictation.recordingBlockReason = { [weak self] in
             guard let self else { return nil }
             if case .suggesting = self.meetingCoordinator.state {

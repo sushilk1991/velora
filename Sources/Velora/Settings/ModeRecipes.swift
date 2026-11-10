@@ -44,6 +44,7 @@ enum ModeRecipeDocument {
     static let format = "velora-mode"
     static let version = 1
     static let maximumBytes = 256 * 1_024
+    static let maximumNameCharacters = 240
 
     struct ValidationError: LocalizedError {
         let message: String
@@ -58,8 +59,8 @@ enum ModeRecipeDocument {
         return try decode(handle.read(upToCount: maximumBytes + 1) ?? Data())
     }
 
-    static func decode(_ data: Data) throws -> Mode {
-        guard data.count <= maximumBytes else { throw invalid("The recipe is larger than 256 KB.") }
+    static func decode(_ data: Data, preservingAssignments: Bool = false) throws -> Mode {
+        guard preservingAssignments || data.count <= maximumBytes else { throw invalid("The recipe is larger than 256 KB.") }
         let object: Any
         do { object = try JSONSerialization.jsonObject(with: data) }
         catch { throw invalid("This file isn't valid JSON. \(error.localizedDescription)") }
@@ -86,16 +87,31 @@ enum ModeRecipeDocument {
             // Existing mode JSON is also shareable, without an export step.
             fields = document
         }
-        try knownKeys(fields, allowed: ["name", "prompt", "formatting", "apps", "vocabulary", "replacements"], label: "mode")
-        let name = try string(fields, "name", maximum: 100, required: true)
+        try knownKeys(fields, allowed: ["name", "prompt", "formatting", "apps", "sites", "steps", "vocabulary", "replacements"], label: "mode")
+        let name = try string(fields, "name", maximum: maximumNameCharacters, required: true)
             .trimmingCharacters(in: .whitespacesAndNewlines)
         guard !name.isEmpty else { throw invalid("Give the recipe a name.") }
         let prompt = try string(fields, "prompt", maximum: 12_000)
-        let formatting = try string(fields, "formatting", maximum: 16, fallback: "light")
+        let formatting = try string(fields, "formatting", maximum: 16, fallback: "full")
         guard Mode.formattingOptions.contains(formatting) else {
             throw invalid("Formatting must be off, light, or full.")
         }
-        _ = try strings(fields, "apps", maximumCount: 256, maximumLength: 256)
+        let apps = try strings(fields, "apps", maximumCount: 256, maximumLength: 256)
+        let sites = try strings(fields, "sites", maximumCount: Mode.knownSites.count, maximumLength: 32)
+        guard Set(sites).count == sites.count, sites.allSatisfy({ Mode.knownSites.contains($0) }) else {
+            throw invalid("Sites must be a unique list of recognized site names.")
+        }
+        var steps: [String]?
+        if fields["steps"] != nil {
+            let list = try strings(fields, "steps", maximumCount: Mode.processingSteps.count, maximumLength: 32)
+            guard Set(list).count == list.count, list.allSatisfy({ Mode.processingSteps.contains($0) }) else {
+                throw invalid("Processing steps must be a unique ordered list of supported text rules.")
+            }
+            guard formatting != "off", !["raw", "code", "terminal"].contains(name.lowercased()) else {
+                throw invalid("Custom steps require light or full formatting in a prose mode. Raw, Code, and Terminal use their standard processing.")
+            }
+            steps = list
+        }
         let vocabulary = try strings(fields, "vocabulary", maximumCount: 256, maximumLength: 200)
         var replacements: [Mode.Replacement] = []
         if let value = fields["replacements"] {
@@ -110,23 +126,40 @@ enum ModeRecipeDocument {
                 replacements.append(Mode.Replacement(key: key, value: value))
             }
         }
-        return Mode(name: name, prompt: prompt, formatting: formatting, apps: [],
-                    vocabulary: vocabulary, replacements: replacements)
+        return Mode(name: name, prompt: prompt, formatting: formatting,
+                    apps: preservingAssignments ? apps : [], vocabulary: vocabulary, replacements: replacements,
+                    sites: preservingAssignments ? sites : [], steps: steps)
     }
 
-    static func encode(_ mode: Mode) throws -> Data {
+    /// Validation runs before saving, exporting, or trying a draft. Sharing
+    /// uses the same allowlist while deliberately dropping local assignments.
+    static func validate(_ mode: Mode) throws {
+        let data = try JSONSerialization.data(withJSONObject: payload(mode, sharing: false))
+        _ = try decode(data, preservingAssignments: true)
+    }
+
+    static func payload(_ mode: Mode, sharing: Bool = false) throws -> [String: Any] {
         var replacements: [String: String] = [:]
         for pair in mode.replacements {
             guard replacements[pair.key] == nil else {
-                throw invalid("Each heard phrase can have only one replacement before sharing.")
+                throw invalid("Each heard phrase can have only one replacement.")
             }
             replacements[pair.key] = pair.value
         }
-        let fields: [String: Any] = [
+        var fields: [String: Any] = [
             "name": mode.name, "prompt": mode.prompt, "formatting": mode.formatting,
-            "apps": [String](), "vocabulary": mode.vocabulary, "replacements": replacements,
+            "apps": sharing ? [String]() : mode.apps,
+            "sites": sharing ? [String]() : mode.sites,
+            "vocabulary": mode.vocabulary, "replacements": replacements,
         ]
-        let document: [String: Any] = ["format": format, "version": version, "mode": fields]
+        if let steps = mode.steps { fields["steps"] = steps }
+        return fields
+    }
+
+    static func encode(_ mode: Mode) throws -> Data {
+        try validate(mode)
+        let document: [String: Any] = ["format": format, "version": version,
+                                       "mode": try payload(mode, sharing: true)]
         let data = try JSONSerialization.data(withJSONObject: document, options: [.prettyPrinted, .sortedKeys])
         _ = try decode(data)
         return data

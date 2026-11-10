@@ -10,11 +10,25 @@ final class SoundPlayer {
     }
 
     private var players: [Cue: AVAudioPlayer] = [:]
+    private let cues: [Cue]
+    private var loadedSet: SoundSet?
 
     /// Loads `cues`; a player that loads none stays silent (selftest).
     init(cues: [Cue] = [.start, .stop, .error]) {
+        self.cues = cues
+        // The selftest's empty initializer must not resolve app preferences
+        // or load a device-backed player.
+        if !cues.isEmpty { load(AppConfig.shared.soundSet) }
+    }
+
+    private func load(_ set: SoundSet) {
+        guard loadedSet != set else { return }
+        players.values.forEach { $0.stop() }
+        players.removeAll()
+        loadedSet = set
         for cue in cues {
-            guard let url = ResourceLocator.resource(named: cue.rawValue, extension: "caf") else {
+            let name = set.assetName(for: cue.rawValue)
+            guard let url = ResourceLocator.resource(named: name, extension: "caf") else {
                 NSLog("Velora: missing sound asset %@.caf (run scripts/make-sounds.sh)", cue.rawValue)
                 continue
             }
@@ -29,9 +43,12 @@ final class SoundPlayer {
     }
 
     /// Plays a cue if sounds are enabled; volume from the settings slider.
-    func play(_ cue: Cue) {
+    func play(_ cue: Cue, preview: Bool = false) {
+        guard !cues.isEmpty else { return }
         let config = AppConfig.shared
-        guard config.soundsEnabled, let player = players[cue] else { return }
+        guard preview || config.soundsEnabled else { return }
+        load(config.soundSet)
+        guard let player = players[cue] else { return }
         player.volume = Float(config.soundVolume / 100.0)
         player.currentTime = 0
         player.play()

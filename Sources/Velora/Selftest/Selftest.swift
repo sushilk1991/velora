@@ -296,6 +296,14 @@ enum Selftest {
         testMeetingLibraryImport()
         testLocalWorkflowCapabilities()
         testRuntimePreferences()
+        testAdvancedRecipeRules()
+        testMeetingIntelligence()
+        testInterfacePreferences()
+        testStorageRetention()
+        testMeetingRetentionSnapshotWrites()
+        testMeetingRetentionOrphans()
+        testRetentionFeedbackRollback()
+        testStorageCleanupRetry()
         testScratchPreferenceCheck()
         testSelftestIsolation(preferencesBaseline: preferencesBaseline)
         testNothingLeftOnScreen()
@@ -4810,7 +4818,7 @@ enum Selftest {
             "event": "ready", "setup_complete": true,
             "stt_model": "mlx-community/whisper-large-v3-turbo",
         ])
-        if case .ready(let setupComplete, let sttModel) = ready {
+        if case .ready(let setupComplete, let sttModel, _) = ready {
             expect(setupComplete, "ready event carries cached setup completion")
             expect(sttModel == "mlx-community/whisper-large-v3-turbo",
                    "ready event carries the engine's proven speech backend")
@@ -18137,5 +18145,638 @@ private final class RecordingOutputVolume: OutputVolumeControlling {
                "malformed language tokens cannot become routing rules")
     }
 
+    static func testAdvancedRecipeRules() {
+        let base = FileManager.default.temporaryDirectory.appendingPathComponent("velora-recipe-rules-\(UUID().uuidString)")
+        let directory = base.appendingPathComponent("modes", isDirectory: true)
+        try! FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: base) }
+        var mode = Mode(name: "Rules", prompt: "Keep facts", formatting: "full", apps: ["com.apple.Notes"],
+                        vocabulary: [String(repeating: "🙂", count: 200)],
+                        replacements: [Mode.Replacement(key: "break", value: "new line")],
+                        sites: ["gmail"], steps: ["replacements", "spoken_commands"])
+        do {
+            let data = try ModeRecipeDocument.encode(mode)
+            let imported = try ModeRecipeDocument.decode(data)
+            expect(imported.steps == mode.steps && imported.apps.isEmpty && imported.sites.isEmpty,
+                   "shared rules preserve order while removing automatic app and website assignments")
+            let payload = TextFormattingClient.modePayload(mode)
+            expect(payload["steps"] as? [String] == mode.steps && payload["sites"] as? [String] == ["gmail"],
+                   "Try it sends the displayed processing order and site assignments")
+            let literal = Data(#"{"name":"Literal prose","steps":[]}"#.utf8)
+            expect(try ModeRecipeDocument.decode(literal).steps == [], "empty processing list is explicit literal mode")
+            let invalid = [
+                #"{"name":"Invalid","steps":["fillers","fillers"]}"#,
+                #"{"name":"Invalid","steps":["execute"]}"#,
+                #"{"name":"Invalid","steps":null}"#,
+                #"{"name":"Raw","steps":[]}"#,
+                #"{"name":"Invalid","formatting":"off","steps":[]}"#,
+                #"{"name":"Invalid","sites":["arbitrary-site"]}"#,
+                #"{"name":"Invalid","sites":["gmail","gmail"]}"#,
+            ]
+            for document in invalid {
+                do { _ = try ModeRecipeDocument.decode(Data(document.utf8)); expect(false, "malformed advanced rule rejected") }
+                catch { expect(true, "malformed advanced rule rejected") }
+            }
+            mode.name = String(repeating: "🙂", count: 240)
+            try ModeRecipeDocument.validate(mode)
+            mode.name += "🙂"
+            do { try ModeRecipeDocument.validate(mode); expect(false, "Unicode name limit enforced") }
+            catch { expect(true, "Unicode name uses code points rather than UTF-16 units") }
+        } catch { expect(false, "valid advanced recipe: \(error)") }
+
+        let file = directory.appendingPathComponent("rules.json")
+        let original = Data(#"{"name":"Rules","prompt":"Last valid","formatting":"full","apps":["com.apple.Notes"],"sites":["gmail"],"steps":["replacements","spoken_commands"]}"#.utf8)
+        try! original.write(to: file)
+        let loaded = Mode.loadAll(from: directory, packaged: nil)
+        expect(loaded.first?.steps == ["replacements", "spoken_commands"] && loaded.first?.sites == ["gmail"],
+               "saved advanced fields load with assignments intact")
+        let malformed = Data("{partial".utf8)
+        try! malformed.write(to: file, options: .atomic)
+        let retained = Mode.loadAll(from: directory, packaged: nil)
+        expect(retained.first?.prompt == "Last valid", "malformed mode edit retains the last valid settings")
+        let vm = ModesViewModel(supervisor: nil, directory: directory, packagedDirectory: nil)
+        vm.select(retained.first?.id)
+        vm.draft.prompt = "Edited"
+        vm.save()
+        expect(vm.saveError != nil && (try? Data(contentsOf: file)) == malformed,
+               "saving retained settings refuses to overwrite the malformed external edit")
+        try! original.write(to: file, options: .atomic)
+        ModesViewModel.prepareStyleExample(text: "A useful history example", modeName: "Rules", bundleID: "com.apple.Notes")
+        let example = ModesViewModel(supervisor: nil, directory: directory, packagedDirectory: nil)
+        expect(example.draft.name == "Rules" && example.previewInput == "A useful history example" && !example.isDirty,
+               "History style example selects the current saved mode and fills Try it without saving")
+        example.draft.steps = ["replacements", "spoken_commands"]
+        example.moveStep("spoken_commands", by: -1)
+        expect(example.draft.steps == ["spoken_commands", "replacements"], "processing controls reorder enabled steps")
+        example.setStep("replacements", enabled: false)
+        expect(example.draft.steps == ["spoken_commands"], "processing controls disable a named step")
+        example.draft.formatting = "off"
+        expect(example.draftValidationError != nil, "invalid combination is visible before Save")
+        let second = directory.appendingPathComponent("second.json")
+        try! Data(#"{"name":"Other","sites":["gmail"]}"#.utf8).write(to: second)
+        let conflict = ModesViewModel(supervisor: nil, directory: directory, packagedDirectory: nil)
+        conflict.select(conflict.modes.first { $0.name == "Other" }?.id)
+        expect(conflict.draftValidationError?.contains("already assigned") == true,
+               "duplicate site assignment is identified before Save")
+        try! FileManager.default.removeItem(at: file)
+        expect(!Mode.loadAll(from: directory, packaged: nil).contains { $0.name == "Rules" },
+               "deleted mode is removed instead of being retained as malformed")
+    }
+
+
+// Integrate this method inside Selftest and call testMeetingIntelligence().
+static func testMeetingIntelligence() {
+    let root = FileManager.default.temporaryDirectory.appendingPathComponent("velora-meeting-intelligence-\(UUID().uuidString)", isDirectory: true)
+    defer { try? FileManager.default.removeItem(at: root) }
+    let store = MeetingStore(url: root.appendingPathComponent("meetings.sqlite3"), filesRoot: root)
+    let start = Date(timeIntervalSince1970: 1_700_000_000)
+    let id = UUID().uuidString
+    let first = MeetingSegment(meetingID: id, speaker: .me, chunkIndex: 0, startMs: 0, endMs: 60_000,
+                               text: "The launch budget is approved. We will prepare the launch plan.")
+    let second = MeetingSegment(meetingID: id, speaker: .them, chunkIndex: 0, startMs: 60_000, endMs: 120_000,
+                                text: "Simplify the onboarding welcome screen.")
+    store.insertProcessing(MeetingRecord(id: id, title: "Launch", startedAt: start,
+        endedAt: start.addingTimeInterval(120), status: .processing, micPath: id + "/me.caf"))
+    store.appendSegment(first); store.appendSegment(second)
+    let chapter = MeetingChapter(title: "Launch budget and plan", startKey: first.sourceKey, endKey: first.sourceKey,
+                                 startText: first.text, endText: first.text)
+    expect(store.complete(meetingID: id, notes: MeetingNotes(summary: "The launch budget is approved.",
+        actionItems: ["Prepare the launch plan"], chapters: [chapter])), "intelligence notes and semantic chapters persist")
+    guard let record = store.record(id: id), let metadata = store.recordMetadata(id: id) else {
+        expect(false, "intelligence fixture loads"); return
+    }
+    let answers = MeetingPassageSearch.matches(question: "What was approved for the launch budget?", record: record)
+    expect(answers.count == 1 && answers[0].text == first.text && answers[0].startMs == 0 && answers[0].endMs == 60_000,
+           "meeting questions return exact supporting blocks with original coarse timings")
+    expect(MeetingPassageSearch.matches(question: "When did Alice approve the migration deadline?", record: record).isEmpty
+        && MeetingPassageSearch.matches(question: "What did we do?", record: record).isEmpty,
+           "unsupported and empty-content questions have explicit no-answer results")
+    expect(MeetingPassageSearch.related(to: "Prepare the launch plan", record: record)?.text == first.text
+        && MeetingPassageSearch.related(to: "Alice owns migration deadlines", record: record) == nil,
+           "notes link only to lexically related real passages")
+    let chapters = MeetingPassageSearch.chapters(in: record)
+    expect(chapters.count == 1 && chapters[0].title == chapter.title && chapters[0].sources.count == 1
+        && chapters[0].endMs == 60_000, "chapter bounds preserve real source blocks")
+    let reference = MeetingSourceReference(segment: first, revision: record.transcriptRevision)
+    expect(store.resolve(reference)?.text == first.text, "fresh source references resolve")
+    store.appendSegment(first)
+    expect(store.recordMetadata(id: id)?.transcriptRevision == metadata.transcriptRevision
+        && store.resolve(reference) != nil && store.recordMetadata(id: id)?.notes.chapters == [chapter],
+           "replayed identical checkpoints neither duplicate chapters nor invalidate references")
+    expect(store.savePersonalNotes(meetingID: id, text: "My private follow-up", expectedRevision: 0)
+        && !store.savePersonalNotes(meetingID: id, text: "Stale edit", expectedRevision: 0),
+           "personal notes persist and reject a stale window's overwrite")
+    expect(store.complete(meetingID: id, notes: MeetingNotes(summary: "Regenerated"))
+        && store.recordMetadata(id: id)?.personalNotes == "My private follow-up"
+        && store.recordMetadata(id: id)?.personalNotesRevision == 1
+        && store.resolve(reference) != nil, "regenerating notes preserves personal edits and current transcript links")
+    expect(store.record(id: id)?.exportText.contains("My private follow-up") == true
+        && store.record(id: id)?.export(format: .plainText).contains("My private follow-up") == true,
+           "personal notes are included in text exports")
+    expect(!store.expireAudio(expected: metadata), "audio expiry rejects a changed preview snapshot")
+    guard let current = store.recordMetadata(id: id) else { return }
+    store.markProcessing(meetingID: id, notesPending: true)
+    expect(!store.expireAudio(expected: current) && store.retentionMetadata(before: Date()).isEmpty,
+           "pending notes protect retained audio and meeting metadata")
+    _ = store.complete(meetingID: id, notes: MeetingNotes(summary: "Ready"))
+    expect(store.beginReprocess(meetingID: id), "intelligence fixture stages recreate")
+    _ = store.markReprocessFailed(meetingID: id, error: "Interrupted")
+    guard let staged = store.recordMetadata(id: id) else { return }
+    expect(!store.expireAudio(expected: staged) && store.retentionMetadata(before: Date()).isEmpty,
+           "ready rows with staged recreate work are excluded from expiry")
+    let replacement = MeetingSegment(meetingID: id, speaker: .me, chunkIndex: 0, startMs: 0, endMs: 60_000,
+                                     text: "A different launch budget discussion.")
+    store.appendReprocessSegment(replacement)
+    expect(store.completeReprocess(meetingID: id, notes: MeetingNotes(summary: "Recreated"), requiredSpeakers: [.me], issues: [:])
+        && store.resolve(reference) == nil && store.recordMetadata(id: id)?.personalNotes == "My private follow-up",
+           "recreate atomically invalidates previous sources and keeps personal notes")
+    guard let recreated = store.recordMetadata(id: id) else { return }
+    expect(store.expireAudio(expected: recreated) && store.recordMetadata(id: id)?.micPath == nil
+        && store.recordMetadata(id: id)?.personalNotes == "My private follow-up"
+        && store.record(id: id)?.segments.count == 1, "expiry clears only previewed audio paths, preserving notes and transcript")
+    let currentReference = MeetingSourceReference(segment: replacement, revision: recreated.transcriptRevision)
+    let model = MeetingIntelligenceModel(store: store)
+    model.load(recreated)
+    expect(waitUntil { !model.loading }, "intelligence loads its one-meeting snapshot")
+    model.ask("What launch budget discussion?")
+    expect(waitUntil { !model.searching } && model.answer.first?.text == replacement.text,
+           "async meeting questions return one-meeting exact excerpts")
+    model.ask("launch budget")
+    model.clearQuestion()
+    _ = waitUntil(timeout: 0.1) { false }
+    expect(!model.asked && model.answer.isEmpty, "clearing a question invalidates an in-flight search")
+    expect(store.delete(meetingID: id) && store.resolve(currentReference) == nil
+        && !store.savePersonalNotes(meetingID: id, text: "Resurrect", expectedRevision: 1),
+           "deletion invalidates source links and personal-note mutations")
+    model.open([currentReference])
+    expect(waitUntil { model.sourceError != nil } && model.selectedSources.isEmpty,
+           "deleted asynchronous source requests fail without opening another passage")
+    model.cancel()
+}
+
+
+    // Call testInterfacePreferences() from Selftest.run(). No real preferences,
+    // microphone, permission probes or sound playback are used here.
+    private static func testInterfacePreferences() {
+        expect(InterfaceLanguage.system.resolvedIdentifier(preferredLanguages: ["es-MX", "en-US"]) == "es",
+               "system interface language resolves Spanish regions")
+        expect(InterfaceLanguage.system.resolvedIdentifier(preferredLanguages: ["hi_IN"]) == "hi",
+               "system interface language resolves Hindi regions")
+        expect(InterfaceLanguage.system.resolvedIdentifier(preferredLanguages: ["de-DE"]) == "en",
+               "unsupported system interface language falls back to English")
+        expect(InterfaceLanguage.english.resolvedIdentifier(preferredLanguages: ["hi-IN"]) == "en",
+               "explicit interface language overrides the system language")
+        expect(L10n.text("Settings", language: .hindi) == "सेटिंग्स"
+               && L10n.text("Settings", language: .spanish) == "Ajustes",
+               "Hindi and Spanish catalogs load through actual resource lookup")
+        expect(L10n.text("Uncatalogued technical detail", language: .spanish) == "Uncatalogued technical detail",
+               "missing translations retain the English source")
+        expect(L10n.formatted("Version %@", arguments: ["100% %@"], language: .spanish) == "Versión 100% %@",
+               "localized interpolation treats argument percent signs as text")
+        expect(L10n.formatted("Version %@", arguments: ["1", "2"], language: .hindi) == "Version %@",
+               "placeholder mismatches safely retain the source format")
+        expect(SoundSet.classic.assetName(for: "start") == "start"
+               && SoundSet.soft.assetName(for: "stop") == "soft-stop"
+               && SoundSet.chime.assetName(for: "error") == "chime-error",
+               "sound sets resolve distinct assets while preserving Classic names")
+        for soundSet in SoundSet.allCases {
+            for cue in ["start", "stop", "error"] {
+                expect(ResourceLocator.resource(named: soundSet.assetName(for: cue), extension: "caf") != nil,
+                       "every sound set has each local cue: \(soundSet.rawValue) \(cue)")
+            }
+        }
+        do {
+            let decoder = JSONDecoder()
+            decoder.keyDecodingStrategy = .convertFromSnakeCase
+            let legacy = Data(#"{"appearance":"dark","sounds_enabled":true,"sound_volume":73}"#.utf8)
+            let general = try decoder.decode(SettingsDocument.General.self, from: legacy)
+            expect(general.interfaceLanguage == .system && general.soundSet == .classic
+                   && general.appearance == "dark" && general.soundVolume == 73,
+                   "older settings preserve their values and gain system language plus Classic sounds")
+            var portable = SettingsDocument.defaults
+            portable.settings.general.interfaceLanguage = .spanish
+            portable.settings.general.soundSet = .chime
+            portable.settings.dictation.language = "hi"
+            let roundTrip = try SettingsDocumentCodec.decode(SettingsDocumentCodec.encode(portable))
+            expect(roundTrip == portable && roundTrip.settings.dictation.language == "hi",
+                   "portable settings round-trip interface choices independently of speech language")
+        } catch { expect(false, "interface preference decoding: \(error)") }
+        do {
+            let decoder = JSONDecoder()
+            decoder.keyDecodingStrategy = .convertFromSnakeCase
+            let invalid = Data(#"{"appearance":"system","sounds_enabled":true,"sound_volume":40,"sound_set":"missing"}"#.utf8)
+            _ = try decoder.decode(SettingsDocument.General.self, from: invalid)
+            expect(false, "unknown sound-set values are rejected")
+        } catch { expect(true, "unknown sound-set values are rejected") }
+
+        var before = SettingsDocument.Shortcuts.defaults
+        before.dictation = .f19
+        before.secondDictationEnabled = true
+        before.behavior = .toggle
+        let restored = before.restoringDictationDefaults()
+        expect(restored?.dictation == .rightOption && restored?.secondDictationEnabled == false
+               && restored?.secondDictation == .f19 && restored?.behavior == .hold
+               && restored?.editSelection == before.editSelection,
+               "dictation default reset preserves every other feature's shortcut")
+        before.editSelection = .rightOption
+        expect(before.restoringDictationDefaults() == nil && before.dictation == .f19
+               && before.secondDictationEnabled && before.behavior == .toggle,
+               "a reserved default rejects the whole reset without partial mutations")
+
+        let directory = FileManager.default.temporaryDirectory
+            .appendingPathComponent("velora-interface-\(UUID().uuidString)")
+        let suite = scratchDomain("interface")
+        let defaults = UserDefaults(suiteName: suite)!
+        defer { removeScratchDomain(suite); try? FileManager.default.removeItem(at: directory) }
+        do {
+            try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+            let settingsURL = directory.appendingPathComponent("settings.json")
+            let engineURL = directory.appendingPathComponent("config.json")
+            var initial = SettingsDocument.defaults
+            initial.settings.shortcuts.dictation = .f19
+            initial.settings.shortcuts.behavior = .toggle
+            initial.settings.shortcuts.secondDictationEnabled = true
+            initial.settings.shortcuts.secondDictation = .rightOption
+            try SettingsDocumentCodec.encode(initial).write(to: settingsURL)
+            try Data(#"{"language":"hi","future":true}"#.utf8).write(to: engineURL)
+            let config = AppConfig(defaults: defaults, settingsFileURL: settingsURL,
+                                   engineConfigURL: engineURL, registerDefaults: false)
+            let engineBefore = try Data(contentsOf: engineURL)
+            config.interfaceLanguage = .spanish
+            config.soundSet = .soft
+            let engineAfter = try Data(contentsOf: engineURL)
+            expect(engineAfter == engineBefore,
+                   "interface language and sound choices do not change speech configuration")
+            _ = try config.restoreDictationShortcutDefaults()
+            let saved = try SettingsDocumentCodec.decode(Data(contentsOf: settingsURL))
+            expect(saved.settings.shortcuts.dictation == .rightOption
+                   && !saved.settings.shortcuts.secondDictationEnabled
+                   && saved.settings.shortcuts.behavior == .hold
+                   && saved.settings.general.interfaceLanguage == .spanish,
+                   "dictation defaults are committed as one settings transaction")
+            config.hotkey = .f19
+            config.editHotkey = .rightOption
+            config.secondDictationHotkey = .optionShiftA
+            config.secondDictationEnabled = true
+            config.hotkeyMode = .toggle
+            let conflictBefore = try Data(contentsOf: settingsURL)
+            do {
+                try config.restoreDictationShortcutDefaults()
+                expect(false, "conflicting reset must throw")
+            } catch SettingsDocumentError.shortcutConflict {
+                let conflictAfter = try Data(contentsOf: settingsURL)
+                expect(conflictAfter == conflictBefore
+                       && config.hotkey == .f19 && config.secondDictationEnabled
+                       && config.hotkeyMode == .toggle,
+                       "conflicting reset leaves durable and in-memory preferences unchanged")
+            }
+            // Move the settings folder aside, then block its old path. This
+            // exercises persistence failure without relying on chmod/root.
+            config.editHotkey = .optionShiftE
+            let fileBefore = try Data(contentsOf: settingsURL)
+            let moved = directory.appendingPathExtension("moved")
+            defer { try? FileManager.default.removeItem(at: moved) }
+            try FileManager.default.moveItem(at: directory, to: moved)
+            try Data().write(to: directory)
+            do {
+                try config.restoreDictationShortcutDefaults()
+                expect(false, "unwritable reset must throw")
+            } catch {
+                let failedFile = try Data(contentsOf: moved.appendingPathComponent("settings.json"))
+                expect(config.hotkey == .f19 && config.secondDictationEnabled
+                       && config.hotkeyMode == .toggle
+                       && failedFile == fileBefore,
+                       "failed persistence leaves all shortcut defaults unchanged")
+            }
+        } catch { expect(false, "isolated interface settings checks: \(error)") }
+    }
+
+
+    private static func testStorageRetention() {
+        let directory = FileManager.default.temporaryDirectory.appendingPathComponent("velora-retention-" + UUID().uuidString)
+        try! FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let database = directory.appendingPathComponent("history.sqlite3")
+        var removed: [String] = []
+        var forgetFails = false
+        var forgotten: Set<String> = []
+        let history = HistoryStore(url: database, removeArchivedClip: { removed.append($0) },
+            forgetTrialRuns: { sessions in
+                if forgetFails { throw RetentionFailure.writeFailed }
+                forgotten.formUnion(sessions)
+                return {}
+            })
+        var old = dictation(daysAgo: 90, words: 3, session: "retained-session")
+        old.audioPath = "retained.wav"
+        expect(history.insertForTermination(old), "retention fixture persists")
+        let cutoff = Date().addingTimeInterval(-30 * 86_400)
+        let candidates = history.retentionCandidates(before: cutoff)
+        expect(candidates.count == 1, "retention enumerates expired metadata")
+        let original = history.recent(limit: 1)[0]
+        expect(history.updateFinal(expected: original, final: "a newer correction"), "retention edit fixture")
+        expect(history.deleteForRetention(candidates) == nil && history.record(id: original.id) != nil && removed.isEmpty,
+               "retention cannot remove a corrected record from an older preview")
+        let current = history.retentionCandidates(before: cutoff)
+        var handle: OpaquePointer?
+        expect(sqlite3_open(database.path, &handle) == SQLITE_OK, "retention trigger fixture opens")
+        sqlite3_exec(handle, "CREATE TRIGGER refuse_cleanup BEFORE DELETE ON dictations BEGIN SELECT RAISE(IGNORE); END;", nil, nil, nil)
+        expect(history.deleteForRetention(current) == nil && removed.isEmpty && history.record(id: original.id) != nil,
+               "a silently refused delete preserves audio and transcript")
+        sqlite3_exec(handle, "DROP TRIGGER refuse_cleanup;", nil, nil, nil)
+        sqlite3_close(handle)
+        forgetFails = true
+        expect(history.deleteForRetention(current) == nil && history.record(id: original.id) != nil && removed.isEmpty,
+               "trial feedback cleanup failure rolls back transcript removal")
+        forgetFails = false
+        expect(history.deleteForRetention(current) == 1 && removed == ["retained.wav"] && forgotten == ["retained-session"],
+               "confirmed cleanup removes the row before its audio and forgets related trial text")
+
+        let trial = HistoryTrialFeedbackStore(metadataURL: directory.appendingPathComponent("runs.jsonl"),
+                                              feedbackURL: directory.appendingPathComponent("feedback.jsonl"))
+        let feedback = "{\"session_id\":\"erase\",\"raw\":\"private words\"}\n{\"session_id\":\"keep\",\"raw\":\"keep words\"}\n"
+        try! Data(feedback.utf8).write(to: trial.feedbackURL)
+        do {
+            try trial.forget(sessionIDs: ["erase"])
+            let kept = try String(contentsOf: trial.feedbackURL, encoding: .utf8)
+            expect(!kept.contains("private words") && kept.contains("keep words"),
+                   "retention physically removes only matching trial feedback text")
+            expect(try String(contentsOf: trial.metadataURL, encoding: .utf8).contains("\"deleted\":true"),
+                   "retention marks forgotten trial sessions against stale feedback saves")
+        } catch { expect(false, "feedback retention fixture: \(error)") }
+
+        let domain = "velora-retention-test-" + UUID().uuidString
+        let defaults = UserDefaults(suiteName: domain)!
+        defer { defaults.removePersistentDomain(forName: domain) }
+        expect(TranscriptRetentionPolicy.load(from: defaults) == TranscriptRetentionPolicy(),
+               "transcript retention defaults to forever")
+        let archive = directory.appendingPathComponent("audio")
+        try! FileManager.default.createDirectory(at: archive, withIntermediateDirectories: true)
+        let clip = archive.appendingPathComponent("old.wav")
+        try! Data([1, 2, 3]).write(to: clip)
+        try! FileManager.default.setAttributes([.modificationDate: Date().addingTimeInterval(-90 * 86_400)], ofItemAtPath: clip.path)
+        let meetingRoot = directory.appendingPathComponent("meetings")
+        let meetings = MeetingStore(url: meetingRoot.appendingPathComponent("meetings.sqlite3"), filesRoot: meetingRoot)
+        let service = StorageRetention(defaults: defaults, archive: archive)
+        var permitted = true
+        service.configure(history: history, meetings: meetings, canApply: { permitted }, didApplyAudioPolicy: {}, startAutomatic: false)
+        var prepared: RetentionPreview?
+        func preview() {
+            prepared = nil
+            service.preview(policy: TranscriptRetentionPolicy(), dictationAudioDays: 30, meetingAudioDays: 30) {
+                if case .success(let value) = $0 { prepared = value }
+            }
+            expect(waitUntil { prepared != nil }, "retention preview completes off the main thread")
+        }
+        preview()
+        expect(prepared?.audioCount == 1 && prepared?.audioBytes == 3 && prepared?.history.isEmpty == true,
+               "audio cleanup preview counts bytes without expiring forever transcripts")
+        try! Data([4, 5, 6, 7]).write(to: clip)
+        if let prepared, case .failure = service.apply(prepared, persist: false) {
+            expect(FileManager.default.fileExists(atPath: clip.path), "changed recording survives an old cleanup preview")
+        } else { expect(false, "changed audio invalidates cleanup") }
+        try! FileManager.default.setAttributes([.modificationDate: Date().addingTimeInterval(-90 * 86_400)], ofItemAtPath: clip.path)
+        preview()
+        permitted = false
+        if let prepared, case .failure = service.apply(prepared, persist: false) {
+            expect(true, "active processing blocks cleanup")
+        } else { expect(false, "active processing must block cleanup") }
+        permitted = true
+        let leaseID = UUID().uuidString
+        service.protectClip("old.wav", owner: leaseID)
+        RunLoop.current.run(until: Date().addingTimeInterval(0.03))
+        expect(service.hasProtectedJobs, "UI timeouts do not release an active engine job")
+        NotificationCenter.default.post(name: .veloraEngineReprocessActivity,
+            object: EngineEvent.reprocessActivity(requestID: leaseID, audio: nil, active: false))
+        expect(!service.hasProtectedJobs, "engine completion releases protection without a History pane")
+        NotificationCenter.default.post(name: .veloraEngineReprocessSnapshot,
+            object: [ReprocessJobLease(requestID: leaseID, audio: "old.wav")], userInfo: ["valid": true])
+        expect(service.hasProtectedJobs, "reconnecting to a still-running engine restores active jobs")
+        NotificationCenter.default.post(name: .veloraEngineReprocessSnapshot,
+            object: [ReprocessJobLease](), userInfo: ["valid": true])
+        expect(!service.hasProtectedJobs, "an authoritative empty snapshot retires jobs from an old engine")
+        if let prepared, case .success = service.apply(prepared, persist: false) {
+            expect(!FileManager.default.fileExists(atPath: clip.path), "reviewed unchanged recording expires")
+        } else { expect(false, "reviewed audio cleanup succeeds") }
+    }
+// Integrate inside Selftest and call testMeetingRetentionSnapshotWrites().
+static func testMeetingRetentionSnapshotWrites() {
+    let root = FileManager.default.temporaryDirectory.appendingPathComponent("velora-retention-snapshot-\(UUID().uuidString)", isDirectory: true)
+    defer { try? FileManager.default.removeItem(at: root) }
+    let store = MeetingStore(url: root.appendingPathComponent("meetings.sqlite3"), filesRoot: root)
+    let id = UUID().uuidString, start = Date(timeIntervalSince1970: 1_700_000_000)
+    let directory = root.appendingPathComponent(id, isDirectory: true)
+    MeetingStore.ensurePrivateDirectory(directory)
+    let audio = directory.appendingPathComponent("me.caf")
+    FileManager.default.createFile(atPath: audio.path, contents: Data("retained audio".utf8))
+    store.insertProcessing(MeetingRecord(id: id, title: "Retention", startedAt: start,
+        endedAt: start.addingTimeInterval(60), status: .processing, micPath: id + "/me.caf"))
+    store.appendSegment(MeetingSegment(meetingID: id, speaker: .me, chunkIndex: 0, startMs: 0, endMs: 60_000, text: "Prepare the draft."))
+    _ = store.complete(meetingID: id, notes: MeetingNotes(summary: "Ready", actionItems: ["Prepare draft"]))
+    guard let original = store.recordMetadata(id: id) else { expect(false, "retention snapshot fixture loads"); return }
+    expect(store.savePersonalNotes(meetingID: id, text: "New personal edit", expectedRevision: 0)
+        && !store.deleteForRetention(expected: original)
+        && FileManager.default.fileExists(atPath: audio.path),
+           "a personal edit after preview rejects retention before destructive steps")
+    guard let beforeAction = store.recordMetadata(id: id) else { return }
+    var actionSaved: Bool?
+    store.setActionCompletedAsync(meetingID: id, action: "Prepare draft", completed: true) { actionSaved = $0 }
+    expect(waitUntil { actionSaved != nil } && actionSaved == true
+        && !store.deleteForRetention(expected: beforeAction)
+        && FileManager.default.fileExists(atPath: audio.path),
+           "serialized background action writes invalidate an older retention preview")
+    _ = store.markNotesFailed(meetingID: id, error: "Retry notes")
+    guard let pending = store.recordMetadata(id: id) else { return }
+    expect(!store.deleteForRetention(expected: pending) && !store.expireAudio(expected: pending),
+           "ready notes-pending rows cannot be retained away even with matching metadata")
+    _ = store.complete(meetingID: id, notes: MeetingNotes(summary: "Ready"))
+    _ = store.beginReprocess(meetingID: id)
+    _ = store.markReprocessFailed(meetingID: id, error: "Interrupted")
+    guard let staged = store.recordMetadata(id: id) else { return }
+    expect(!store.deleteForRetention(expected: staged) && !store.expireAudio(expected: staged),
+           "matching ready metadata cannot bypass a staged recreate job")
+    expect(store.completeReprocess(meetingID: id, notes: MeetingNotes(summary: "Recreated"), requiredSpeakers: [], issues: [:]),
+           "retention fixture completes staged work")
+    guard let ready = store.recordMetadata(id: id) else { return }
+    expect(store.deleteForRetention(expected: ready) && store.recordMetadata(id: id) == nil
+        && !FileManager.default.fileExists(atPath: audio.path),
+           "matching eligible retention commits metadata deletion before owned-directory cleanup")
+    expect(!store.deleteForRetention(expected: ready), "a deleted retention snapshot cannot be applied twice")
+
+    let absentID = UUID().uuidString
+    store.insertProcessing(MeetingRecord(id: absentID, title: "Absent audio", startedAt: start,
+        endedAt: start.addingTimeInterval(60), status: .processing, micPath: absentID + "/me.caf"))
+    _ = store.complete(meetingID: absentID, notes: MeetingNotes(summary: "Ready"))
+    guard let absent = store.recordMetadata(id: absentID) else { return }
+    expect(store.expireAudio(expected: absent) && store.recordMetadata(id: absentID)?.micPath == nil,
+           "audio expiry treats an already-absent owned directory as removed")
+
+    let blockedID = UUID().uuidString
+    let blockedDirectory = root.appendingPathComponent(blockedID, isDirectory: true)
+    MeetingStore.ensurePrivateDirectory(blockedDirectory.appendingPathComponent("me.caf", isDirectory: true))
+    store.insertProcessing(MeetingRecord(id: blockedID, title: "Unexpected track directory", startedAt: start,
+        endedAt: start.addingTimeInterval(60), status: .processing, micPath: blockedID + "/me.caf"))
+    _ = store.complete(meetingID: blockedID, notes: MeetingNotes(summary: "Ready"))
+    guard let blocked = store.recordMetadata(id: blockedID) else { return }
+    expect(!store.expireAudio(expected: blocked) && store.recordMetadata(id: blockedID)?.micPath != nil
+        && FileManager.default.fileExists(atPath: blockedDirectory.appendingPathComponent("me.caf").path),
+           "audio expiry reports refused unexpected-directory removal and retains its stored path")
+}
+
+
+    private static func testRetentionFeedbackRollback() {
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent("velora-retention-rollback-" + UUID().uuidString)
+        try! FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: root) }
+        let trial = HistoryTrialFeedbackStore(metadataURL: root.appendingPathComponent("runs.jsonl"), feedbackURL: root.appendingPathComponent("feedback.jsonl"))
+        let line = "{\"session_id\":\"rollback-session\",\"corrected\":\"preserve my correction\"}\n"
+        try! Data(line.utf8).write(to: trial.feedbackURL)
+        let lockPath = URL(fileURLWithPath: trial.metadataURL.path + ".lock")
+        try! FileManager.default.createDirectory(at: lockPath, withIntermediateDirectories: false)
+        do {
+            try trial.forget(sessionIDs: ["rollback-session"])
+            expect(false, "unwritable metadata must fail feedback deletion")
+        } catch {
+            expect((try? String(contentsOf: trial.feedbackURL, encoding: .utf8)) == line,
+                   "metadata failure restores corrections removed earlier in the cleanup")
+        }
+        try! FileManager.default.removeItem(at: lockPath)
+        let url = root.appendingPathComponent("history.sqlite3")
+        let store = HistoryStore(url: url, forgetTrialRuns: { try trial.beginForget(sessionIDs: $0) })
+        expect(store.insertForTermination(dictation(daysAgo: 90, words: 2, session: "rollback-session")),
+               "commit-failure retention fixture persists")
+        let record = store.recent(limit: 1)[0]
+        let run = HistoryTrialRun(schema: 1, sessionID: "rollback-session", rawSHA256: HistoryTrialRun.sha256(record.raw),
+            finalSHA256: HistoryTrialRun.sha256(record.final), backend: .standard, attemptedBackend: "standard",
+            modelIdentity: "quality-test", applied: true, reason: nil, cleanupMs: 0, cleanupWallMs: 0,
+            recordedAt: Date().timeIntervalSince1970)
+        var metadata = try! JSONEncoder().encode(run); metadata.append(0x0a)
+        try! metadata.write(to: trial.metadataURL)
+        var handle: OpaquePointer?
+        expect(sqlite3_open(url.path, &handle) == SQLITE_OK, "deferred commit fixture opens")
+        defer { sqlite3_close(handle) }
+        let sql = "PRAGMA foreign_keys=ON; CREATE TABLE dependent (history_id INTEGER REFERENCES dictations(id) DEFERRABLE INITIALLY DEFERRED); INSERT INTO dependent VALUES (\(record.id));"
+        expect(sqlite3_exec(handle, sql, nil, nil, nil) == SQLITE_OK, "deferred reference fixture is valid")
+        let candidates = store.retentionCandidates(before: Date().addingTimeInterval(-30 * 86_400))
+        expect(store.deleteForRetention(candidates) == nil && store.record(id: record.id) != nil,
+               "a deferred SQLite commit refusal restores the transcript row")
+        expect((try? String(contentsOf: trial.feedbackURL, encoding: .utf8)) == line,
+               "a deferred commit refusal restores removed feedback without replacing concurrent entries")
+        expect((try? trial.loadMatch(for: record)) == run,
+               "commit recovery cancels deletion provenance markers and restores trial access")
+    }
+// Integrate inside Selftest and call testMeetingRetentionOrphans().
+static func testMeetingRetentionOrphans() {
+    let root = FileManager.default.temporaryDirectory.appendingPathComponent("velora-retention-orphans-\(UUID().uuidString)", isDirectory: true)
+    defer { try? FileManager.default.removeItem(at: root) }
+    let store = MeetingStore(url: root.appendingPathComponent("meetings.sqlite3"), filesRoot: root)
+    let id = UUID().uuidString
+    let directory = root.appendingPathComponent(id, isDirectory: true)
+    MeetingStore.ensurePrivateDirectory(directory)
+    let regular = directory.appendingPathComponent("me.caf")
+    let legacy = directory.appendingPathComponent("them.m4a")
+    FileManager.default.createFile(atPath: regular.path, contents: Data("owned mic".utf8))
+    FileManager.default.createFile(atPath: legacy.path, contents: Data("owned legacy".utf8))
+    let external = root.appendingPathComponent("external.caf")
+    FileManager.default.createFile(atPath: external.path, contents: Data("keep external".utf8))
+    try? FileManager.default.createSymbolicLink(at: directory.appendingPathComponent("them.caf"), withDestinationURL: external)
+    expect(Set(store.retentionOrphanAudioURLs(meetingID: id)?.map(\.lastPathComponent) ?? []) == ["me.caf", "them.m4a"],
+           "orphan previews count only regular owned tracks and never a track link target")
+    store.rowCheckStepOverride = SQLITE_BUSY
+    expect(store.retentionOrphanAudioURLs(meetingID: id) == nil
+        && !store.removeRetentionOrphan(meetingID: id)
+        && FileManager.default.fileExists(atPath: regular.path),
+           "an unknown row check cannot preview or remove an orphan")
+    store.rowCheckStepOverride = nil
+    expect(store.removeRetentionOrphan(meetingID: id)
+        && !FileManager.default.fileExists(atPath: directory.path)
+        && FileManager.default.fileExists(atPath: external.path),
+           "orphan removal deletes the logical owned directory while preserving linked targets")
+    expect(store.retentionOrphanAudioURLs(meetingID: id)?.isEmpty == true && store.removeRetentionOrphan(meetingID: id),
+           "already-missing safe orphan targets are idempotent")
+    expect(store.retentionOrphanAudioURLs(meetingID: "../outside") == nil
+        && !store.removeRetentionOrphan(meetingID: "../outside"),
+           "retention orphan APIs refuse non-UUID traversal targets")
+
+    let linkedID = UUID().uuidString
+    let linkedDirectory = root.appendingPathComponent(linkedID, isDirectory: true)
+    try? FileManager.default.createSymbolicLink(at: linkedDirectory, withDestinationURL: root)
+    expect(store.retentionOrphanAudioURLs(meetingID: linkedID)?.isEmpty == true
+        && store.removeRetentionOrphan(meetingID: linkedID)
+        && (try? FileManager.default.attributesOfItem(atPath: linkedDirectory.path)) == nil
+        && FileManager.default.fileExists(atPath: external.path),
+           "an orphan directory link is excluded from counts and unlinked without target traversal")
+
+    let liveID = UUID().uuidString, start = Date(timeIntervalSince1970: 1_700_000_000)
+    let liveDirectory = root.appendingPathComponent(liveID, isDirectory: true)
+    MeetingStore.ensurePrivateDirectory(liveDirectory)
+    let liveAudio = liveDirectory.appendingPathComponent("me.caf")
+    FileManager.default.createFile(atPath: liveAudio.path, contents: Data("live".utf8))
+    expect(store.retentionOrphanAudioURLs(meetingID: liveID)?.count == 1,
+           "an unclaimed safe directory can be previewed before a row takes ownership")
+    store.insertProcessing(MeetingRecord(id: liveID, title: "New owner", startedAt: start,
+        endedAt: start.addingTimeInterval(60), status: .processing, micPath: liveID + "/me.caf"))
+    expect(store.retentionOrphanAudioURLs(meetingID: liveID) == nil
+        && !store.removeRetentionOrphan(meetingID: liveID)
+        && FileManager.default.fileExists(atPath: liveAudio.path),
+           "a row acquired after orphan preview protects its directory at removal time")
+}
+
+
+    private static func testStorageCleanupRetry() {
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent("velora-cleanup-retry-" + UUID().uuidString)
+        let archive = root.appendingPathComponent("audio")
+        try! FileManager.default.createDirectory(at: archive, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: root) }
+        let domain = "velora-cleanup-retry-" + UUID().uuidString
+        let defaults = UserDefaults(suiteName: domain)!
+        defer { defaults.removePersistentDomain(forName: domain) }
+        let history = HistoryStore(url: root.appendingPathComponent("history.sqlite3"), removeArchivedClip: { _ in })
+        let meetingRoot = root.appendingPathComponent("meetings")
+        let meetings = MeetingStore(url: meetingRoot.appendingPathComponent("meetings.sqlite3"), filesRoot: meetingRoot)
+        let clip = archive.appendingPathComponent("young.wav")
+        try! Data("private recording".utf8).write(to: clip)
+        var record = dictation(daysAgo: 90, words: 2, session: "retry-audio")
+        record.audioPath = clip.lastPathComponent
+        expect(history.insertForTermination(record), "retry cleanup fixture persists")
+        var refuseRemoval = true
+        let service = StorageRetention(defaults: defaults, archive: archive, removeFile: { url in
+            if refuseRemoval { throw CocoaError(.fileWriteNoPermission) }
+            try FileManager.default.removeItem(at: url)
+        })
+        service.configure(history: history, meetings: meetings, canApply: { true }, didApplyAudioPolicy: {}, startAutomatic: false)
+        var result: Result<RetentionPreview, Error>?
+        func prepare(_ policy: TranscriptRetentionPolicy) -> RetentionPreview? {
+            result = nil
+            service.preview(policy: policy, dictationAudioDays: 180, meetingAudioDays: 30) { result = $0 }
+            expect(waitUntil { result != nil }, "retry cleanup preview returns")
+            if case .success(let value)? = result { return value }
+            return nil
+        }
+        if let preview = prepare(TranscriptRetentionPolicy(dictationDays: 30)),
+           case .failure = service.apply(preview, persist: false) {
+            expect(history.recent(limit: 1).isEmpty && FileManager.default.fileExists(atPath: clip.path),
+                   "unlink refusal reports partial cleanup while retaining a retry target")
+        } else { expect(false, "refused file removal cannot report success") }
+        if let preview = prepare(TranscriptRetentionPolicy()) {
+            expect(preview.history.isEmpty && preview.audioCount == 1 && !preview.pendingClips.isEmpty,
+                   "a new preview rediscovers young audio after its transcript was already deleted")
+            refuseRemoval = false
+            if case .success = service.apply(preview, persist: false) {
+                expect(!FileManager.default.fileExists(atPath: clip.path), "retry removes the reviewed orphan recording")
+            } else { expect(false, "retry cleanup succeeds after permissions recover") }
+        } else { expect(false, "pending cleanup preview is available") }
+        var automatic = dictation(daysAgo: 90, words: 2, session: "automatic-policy-race")
+        automatic.audioPath = nil
+        expect(history.insertForTermination(automatic), "automatic cleanup race fixture persists")
+        let oldPolicy = TranscriptRetentionPolicy(dictationDays: 7)
+        try! oldPolicy.save(to: defaults)
+        if let preview = prepare(oldPolicy) {
+            try! TranscriptRetentionPolicy().save(to: defaults)
+            if case .failure = service.apply(preview, persist: false, automatic: true) {
+                expect(!history.recent(limit: 1).isEmpty,
+                       "saving Forever invalidates an already-running automatic cleanup preview")
+            } else { expect(false, "obsolete automatic policy cannot delete records") }
+        }
+    }
 }
 #endif

@@ -17,7 +17,7 @@ import re
 import unicodedata
 from dataclasses import dataclass, field
 
-from .config import Config, Mode
+from .config import Config, Mode, normalize_site_slug
 from .snippets import expansion as snippet_expansion
 
 # --- app category mapping (known bundle ids) -------------------------------
@@ -918,14 +918,18 @@ _SITE_CATEGORY = {
 }
 
 
+def _site_from_entities(entities: list[dict[str, str]] | None) -> str | None:
+    for entity in entities or []:
+        if isinstance(entity, dict) and entity.get("type") == "site":
+            site = normalize_site_slug(entity.get("value"))
+            if site is not None:
+                return site
+    return None
+
+
 def _site_mode(config: Config, entities: list[dict[str, str]] | None) -> tuple[Mode, str] | None:
     """Resolve (mode, category) from a detected browser site, or None."""
-    site = next(
-        (str(e.get("value", "")).lower()
-         for e in (entities or [])
-         if isinstance(e, dict) and e.get("type") == "site"),
-        "",
-    )
+    site = _site_from_entities(entities)
     category = _SITE_CATEGORY.get(site)
     if not category:
         return None
@@ -1022,10 +1026,17 @@ def run_gate(
     # no user per-app binding) do we let the detected site (Gmail, Docs, Linear…)
     # pick a better mode — never override an explicit or user-bound mode.
     default_name = str(config.data.get("default_mode", "Default")).lower()
-    if explicit_mode is None and category == "browser" and mode.name.lower() == default_name:
-        refined = _site_mode(config, entities)
-        if refined is not None:
-            mode, category = refined
+    if (config.mode_by_name(explicit_mode) is None and config.mode_for_bundle(bundle_id) is None
+            and category == "browser"):
+        site = _site_from_entities(entities)
+        assigned = config.mode_for_site(site)
+        if assigned is not None:
+            mode = assigned
+            category = _SITE_CATEGORY.get(site, category)
+        elif mode.name.lower() == default_name:
+            refined = _site_mode(config, entities)
+            if refined is not None:
+                mode, category = refined
     # Personal Dictionary rules are global explicit user intent, so they win
     # over a conflicting per-mode rule on every deterministic formatting path.
     replacements = {**mode.replacements, **config.global_replacements}
@@ -1034,7 +1045,7 @@ def run_gate(
     text = raw.strip()
     # Explicit whole-take expansion. Never hand literal snippets to a model,
     # punctuation normalization, or technical-command formatting.
-    if (config.data.get("allow_snippets", True) is True and mode.formatting != "off"
+    if (mode.steps is None and config.data.get("allow_snippets", True) is True and mode.formatting != "off"
             and mode.name.casefold() != "raw" and category not in ("code", "terminal")):
         expanded = snippet_expansion(config.home, text)
         if expanded is not None:
@@ -1059,6 +1070,24 @@ def run_gate(
             Mode(name="Raw", formatting="off"), category, False,
             "cleanup_disabled", text, replacements=replacements,
             auto_punctuation=False)
+
+    # Opt-in declarative rules have a deliberately narrow contract: only the
+    # selected deterministic functions run, once and in the displayed order.
+    # Fast dictation above and literal/technical modes keep their existing path.
+    if (mode.steps is not None and mode.formatting != "off"
+            and mode.name.casefold() not in {"raw", "code", "terminal"}):
+        for step in mode.steps:
+            if step == "spoken_commands":
+                text = apply_spoken_commands(text)
+            elif step == "fillers":
+                text = scrub_fillers(text)
+            elif step == "punctuation":
+                text = normalize_spoken_punctuation(text)
+                text = _punctuation_only(text, chat_style, config.auto_punctuation)
+            elif step == "replacements":
+                text = apply_replacements(text, replacements)
+        return GateResult(mode, category, False, "recipe_steps", text,
+                          auto_punctuation=False)
 
     # Romanization is explicit SCRIPT intent, not cleanup, so it outranks
     # every formatting decision below — including formatting-off modes. It

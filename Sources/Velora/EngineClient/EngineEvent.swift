@@ -1,12 +1,28 @@
 import Foundation
 
+struct ReprocessJobLease: Equatable {
+    let requestID: String
+    let audio: String
+
+    static func parse(_ object: Any?) -> [Self]? {
+        guard let values = object as? [[String: Any]], values.count <= 10_000 else { return nil }
+        var leases: [Self] = []
+        for value in values {
+            guard let id = value["request_id"] as? String, UUID(uuidString: id) != nil,
+                  let audio = value["audio"] as? String, !audio.isEmpty, audio.utf8.count <= 4_096 else { return nil }
+            leases.append(Self(requestID: id, audio: audio))
+        }
+        return leases
+    }
+}
+
 /// Events emitted by velora-engine over the control channel.
 /// See docs/ARCHITECTURE.md "Wire protocol".
 enum EngineEvent {
     private static let defaultStallAfterS: Double = 20
     /// Engine finished STT startup and is ready for `start`. `setupComplete`
     /// snapshots whether the later writing-model setup has also finished.
-    case ready(setupComplete: Bool, sttModel: String?)
+    case ready(setupComplete: Bool, sttModel: String?, reprocessJobs: [ReprocessJobLease]? = nil)
 
     /// First-run setup progress ("Downloading the speech model (1.6 GB)",
     /// fraction 0…1 when measurable). `phase == nil` clears the status.
@@ -65,6 +81,7 @@ enum EngineEvent {
         sttModel: String?, sttMs: Int, cleanupMs: Int, cleanupApplied: Bool,
         cleanupWallMs: Int?)
     case reprocessFailed(id: Int64?, error: String, code: String)
+    case reprocessActivity(requestID: String, audio: String?, active: Bool)
 
     /// Text-only formatting is preview-only: it never enters live insertion.
     case textFormatted(requestID: String, result: TextFormattingResult)
@@ -158,7 +175,8 @@ enum EngineEvent {
         case "ready":
             return .ready(
                 setupComplete: object["setup_complete"] as? Bool ?? false,
-                sttModel: object["stt_model"] as? String)
+                sttModel: object["stt_model"] as? String,
+                reprocessJobs: ReprocessJobLease.parse(object["reprocess_jobs"]))
         case "loading":
             return .loading(
                 phase: (object["phase"] as? String).flatMap { $0.isEmpty ? nil : $0 },
@@ -243,6 +261,10 @@ enum EngineEvent {
                 id: (object["id"] as? NSNumber)?.int64Value,
                 error: object["error"] as? String ?? "reprocess failed",
                 code: object["code"] as? String ?? "failed")
+        case "reprocess_activity":
+            guard let id = object["request_id"] as? String, UUID(uuidString: id) != nil,
+                  let active = object["active"] as? Bool else { return .unknown(object) }
+            return .reprocessActivity(requestID: id, audio: object["audio"] as? String, active: active)
         case "text_formatted":
             guard let requestID = object["request_id"] as? String, !requestID.isEmpty,
                   let raw = object["raw"] as? String,
@@ -373,7 +395,8 @@ enum EngineEvent {
                     summary: object["summary"] as? String ?? "",
                     decisions: object["decisions"] as? [String] ?? [],
                     actionItems: object["action_items"] as? [String] ?? [],
-                    partial: object["partial"] as? Bool ?? false))
+                    partial: object["partial"] as? Bool ?? false,
+                    chapters: MeetingChapter.parse(object["chapters"])))
         case "meeting_notes_failed":
             return .meetingNotesFailed(
                 id: object["id"] as? String,

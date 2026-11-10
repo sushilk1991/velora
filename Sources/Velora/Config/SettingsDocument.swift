@@ -44,9 +44,29 @@ extension SettingsDocument {
         var appearance: String
         var soundsEnabled: Bool
         var soundVolume: Double
+        var interfaceLanguage: InterfaceLanguage = .system
+        var soundSet: SoundSet = .classic
 
         static let defaults = General(
             appearance: "system", soundsEnabled: true, soundVolume: 40)
+
+        init(appearance: String, soundsEnabled: Bool, soundVolume: Double,
+             interfaceLanguage: InterfaceLanguage = .system, soundSet: SoundSet = .classic) {
+            self.appearance = appearance
+            self.soundsEnabled = soundsEnabled
+            self.soundVolume = soundVolume
+            self.interfaceLanguage = interfaceLanguage
+            self.soundSet = soundSet
+        }
+
+        init(from decoder: Decoder) throws {
+            let container = try decoder.container(keyedBy: CodingKeys.self)
+            appearance = try container.decode(String.self, forKey: .appearance)
+            soundsEnabled = try container.decode(Bool.self, forKey: .soundsEnabled)
+            soundVolume = try container.decode(Double.self, forKey: .soundVolume)
+            interfaceLanguage = try container.decodeIfPresent(InterfaceLanguage.self, forKey: .interfaceLanguage) ?? .system
+            soundSet = try container.decodeIfPresent(SoundSet.self, forKey: .soundSet) ?? .classic
+        }
     }
 
     struct HUD: Codable, Equatable {
@@ -348,6 +368,20 @@ extension SettingsDocument {
 
         static let defaultActionHotkey = Hotkey.controlShiftA
 
+        /// Restore only dictation preferences. A reserved default must not
+        /// silently displace another feature or leave a partially reset UI.
+        func restoringDictationDefaults() -> Shortcuts? {
+            guard ![editSelection, proofreadSelection, streamTyping, action].contains(.rightOption) else {
+                return nil
+            }
+            var restored = self
+            restored.dictation = .rightOption
+            restored.secondDictationEnabled = false
+            restored.secondDictation = .f19
+            restored.behavior = .hold
+            return restored
+        }
+
         static func defaultProofreadHotkey(excluding used: [Hotkey]) -> Hotkey {
             [Hotkey.controlShiftG, .f19, .optionShiftA,
              .controlShiftA, .controlShiftS, .optionShiftE]
@@ -442,21 +476,24 @@ enum SettingsDocumentError: Error, LocalizedError, Equatable {
     case couldNotSave
     case engineProjectionFailed
     case rollbackFailed
+    case shortcutConflict
 
     var errorDescription: String? {
         switch self {
         case .invalidFile:
-            return "This isn't a valid Velora settings file."
+            return L10n.text("This isn't a valid Velora settings file.")
         case .unsupportedVersion(let version):
-            return "This settings file uses version \(version), which this version of Velora can't import."
+            return L10n.format("This settings file uses version %@, which this version of Velora can't import.", String(version))
         case .invalidValue(let field):
-            return "The settings file contains an invalid value for \(field)."
+            return L10n.format("The settings file contains an invalid value for %@.", field)
         case .couldNotSave:
-            return "Velora couldn't save the imported settings on this Mac."
+            return L10n.text("Velora couldn't save the imported settings on this Mac.")
         case .engineProjectionFailed:
-            return "Velora couldn't update the engine configuration, so your previous settings were restored."
+            return L10n.text("Velora couldn't update the engine configuration, so your previous settings were restored.")
         case .rollbackFailed:
-            return "Velora couldn't update the engine configuration or restore settings.json. A recovery copy remains beside it as settings.import-backup.json."
+            return L10n.text("Velora couldn't update the engine configuration or restore settings.json. A recovery copy remains beside it as settings.import-backup.json.")
+        case .shortcutConflict:
+            return L10n.text("Right Option is assigned to another feature. Change that shortcut before restoring dictation defaults.")
         }
     }
 }
@@ -571,7 +608,7 @@ enum SettingsDocumentCodec {
         guard isPrintableNonempty(value.models.speech, maximumLength: 512) else {
             throw SettingsDocumentError.invalidValue("speech model")
         }
-        guard isPrintableNonempty(value.engine.defaultMode, maximumLength: 128) else {
+        guard isPrintableNonempty(value.engine.defaultMode, maximumLength: ModeRecipeDocument.maximumNameCharacters) else {
             throw SettingsDocumentError.invalidValue("default mode")
         }
         guard value.engine.maximumRecordingSeconds.isFinite,

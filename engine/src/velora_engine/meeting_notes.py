@@ -42,7 +42,7 @@ def parse_notes_json(raw: str) -> dict[str, Any] | None:
         value = json.loads(text)
     except (TypeError, json.JSONDecodeError):
         return None
-    if not isinstance(value, dict) or set(value) != _NOTES_KEYS:
+    if not isinstance(value, dict) or set(value) not in (_NOTES_KEYS, _NOTES_KEYS | {"chapters"}):
         return None
     if not isinstance(value["summary"], str):
         return None
@@ -54,24 +54,32 @@ def parse_notes_json(raw: str) -> dict[str, Any] | None:
         return None
     if any(not isinstance(item, str) for item in value["action_items"]):
         return None
+    if "chapters" in value and not isinstance(value["chapters"], list):
+        return None
     summary = value["summary"].strip()[:MAX_SUMMARY_CHARS]
     if not summary:
         return None
     decisions = _strings(value["decisions"])
     actions = _strings(value["action_items"])
-    return {"summary": summary, "decisions": decisions, "action_items": actions}
+    result = {"summary": summary, "decisions": decisions, "action_items": actions}
+    if "chapters" in value:
+        result["chapters"] = [item for item in value["chapters"] if isinstance(item, dict)][:80]
+    return result
 
 
 def merge_notes(parts: list[dict[str, Any]]) -> dict[str, Any]:
     summaries = [str(part.get("summary") or "").strip() for part in parts]
     summaries = [value for value in summaries if value]
-    return {
+    result = {
         "summary": " ".join(summaries)[:MAX_SUMMARY_CHARS],
         "decisions": _dedupe(item for part in parts for item in _strings(part.get("decisions"))),
         "action_items": _dedupe(
             item for part in parts for item in _strings(part.get("action_items"))
         ),
     }
+    if any("chapters" in part for part in parts):
+        result["chapters"] = [chapter for part in parts for chapter in part.get("chapters", [])][:80]
+    return result
 
 
 def _strings(value: Any) -> list[str]:

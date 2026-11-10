@@ -11,7 +11,7 @@ struct OnboardingSetupState: Equatable {
     var canTryIt: Bool { isComplete }
     var progressFraction: Double? { fraction.map { min(0.99, max(0, $0)) } }
     var primaryActionTitle: String {
-        canTryIt ? "Finish" : "Continue in the Background"
+        canTryIt ? L10n.text("Finish") : L10n.text("Continue in the Background")
     }
 }
 
@@ -283,6 +283,7 @@ private enum OnboardingLayout {
 /// only, or English and other languages: the answer picks the default speech
 /// model (small and fast for English, multilingual Whisper otherwise).
 struct OnboardingView: View {
+    @ObservedObject private var interfaceLocale = InterfaceLocale.shared
     @ObservedObject var model: OnboardingModel
 
     var body: some View {
@@ -347,24 +348,24 @@ struct OnboardingView: View {
     // MARK: - Steps
 
     private var welcomeStep: some View {
-        stepLayout(title: "You talk. Velora types") {
+        stepLayout(title: L10n.text("You talk. Velora types")) {
             // The real app icon, as in About and the update window.
             Image(nsImage: VeloraAppInfo.icon)
                 .resizable()
                 .interpolation(.high)
                 .frame(width: OnboardingLayout.welcomeIconSide, height: OnboardingLayout.welcomeIconSide)
-            Text("Hold a key, talk, let go. The words appear wherever your cursor is: an email, Slack, a terminal.")
+            Text(L10n.text("Hold a key, talk, let go. The words appear wherever your cursor is: an email, Slack, a terminal."))
                 .font(.title3)
                 .foregroundStyle(.secondary)
                 .multilineTextAlignment(.center)
                 .frame(width: 440)
-            Text("A few short steps, about two minutes.")
+            Text(L10n.text("A few short steps, about two minutes."))
                 .font(.callout)
                 .foregroundStyle(.tertiary)
                 .multilineTextAlignment(.center)
                 .frame(width: 440)
         } button: {
-            Button("Get Started") { model.pressContinue(isRepeat: Self.pressIsRepeat) }
+            Button(L10n.text("Get Started")) { model.pressContinue(isRepeat: Self.pressIsRepeat) }
                 .buttonStyle(.primaryCapsule)
                 .keyboardShortcut(.defaultAction)
         }
@@ -375,22 +376,22 @@ struct OnboardingView: View {
     /// exceptions stay next to the claim: a promise with a hidden asterisk
     /// is worse than no promise.
     private var privacyStep: some View {
-        stepLayout(title: "Your voice stays on this Mac") {
+        stepLayout(title: L10n.text("Your voice stays on this Mac")) {
             Image(systemName: "airplane")
                 .font(.system(size: 60))
                 .foregroundStyle(VeloraBrand.iconGradient)
-            Text("Velora has no dictation server. Your audio, the screenshots it takes and the text it reads on screen stay on this Mac and are never sent to us. Nothing it reads on screen is kept.")
+            Text(L10n.text("Velora has no dictation server. Your audio, the screenshots it takes and the text it reads on screen stay on this Mac and are never sent to us. Nothing it reads on screen is kept."))
                 .font(.title3)
                 .foregroundStyle(.secondary)
                 .multilineTextAlignment(.center)
                 .frame(width: 440)
-            Text("Dictation works with no internet. Velora goes online only for setup, model downloads, update checks, and syncing your Dictionary through iCloud.")
+            Text(L10n.text("Dictation works with no internet. Velora goes online only for setup, model downloads, update checks, and syncing your Dictionary through iCloud."))
                 .font(.callout)
                 .foregroundStyle(.tertiary)
                 .multilineTextAlignment(.center)
                 .frame(width: 440)
         } button: {
-            Button("Continue") { model.pressContinue(isRepeat: Self.pressIsRepeat) }
+            Button(L10n.text("Continue")) { model.pressContinue(isRepeat: Self.pressIsRepeat) }
                 .buttonStyle(.primaryCapsule)
                 .keyboardShortcut(.defaultAction)
         }
@@ -403,23 +404,23 @@ struct OnboardingView: View {
     /// because the answer changes what downloads next, and that consequence
     /// deserves more than a dropdown.
     private var languagesStep: some View {
-        stepLayout(title: "Choose your dictation languages") {
+        stepLayout(title: L10n.text("Choose your dictation languages")) {
             LanguageChoiceCard(
-                title: "English only",
-                detail: "Use a compact English model. Add other languages later.",
+                title: L10n.text("English only"),
+                detail: L10n.text("Use a compact English model. Add other languages later."),
                 selected: model.languageScope == "english") {
                     model.languageScope = "english"
                 }
             LanguageChoiceCard(
-                title: "English and other languages",
-                detail: "Download support for 99 languages, including Hindi. Choose this if you mix languages.",
+                title: L10n.text("English and other languages"),
+                detail: L10n.text("Download support for 99 languages, including Hindi. Choose this if you mix languages."),
                 selected: model.languageScope == "multilingual") {
                     model.languageScope = "multilingual"
                 }
             Toggle(isOn: $model.smartWriting) {
                 VStack(alignment: .leading, spacing: VeloraSpacing.xs) {
-                    Text("Add smart writing")
-                    Text("Optional AI rewriting downloads a separate model. Leave this off for fast dictation with less memory.")
+                    Text(L10n.text("Add smart writing"))
+                    Text(L10n.text("Optional AI rewriting downloads a separate model. Leave this off for fast dictation with less memory."))
                         .font(.caption)
                         .foregroundStyle(.secondary)
                         .fixedSize(horizontal: false, vertical: true)
@@ -428,7 +429,7 @@ struct OnboardingView: View {
             .toggleStyle(.switch)
             .frame(width: 480)
         } button: {
-            Button("Continue") { model.pressContinue(isRepeat: Self.pressIsRepeat) }
+            Button(L10n.text("Continue")) { model.pressContinue(isRepeat: Self.pressIsRepeat) }
                 .buttonStyle(.primaryCapsule)
                 .keyboardShortcut(.defaultAction)
         }
@@ -436,13 +437,13 @@ struct OnboardingView: View {
 
     private var microphoneStep: some View {
         permissionStep(
-            title: "Allow the microphone",
+            title: L10n.text("Allow the microphone"),
             card: PermissionCard(
                 symbol: "mic.fill",
-                title: "Microphone",
-                explanation: "Velora turns your voice into text on this Mac. The audio goes nowhere else.",
+                title: L10n.text("Microphone"),
+                explanation: L10n.text("Velora turns your voice into text on this Mac. The audio goes nowhere else."),
                 granted: model.microphoneGranted,
-                buttonTitle: model.microphoneDenied ? "Open Settings" : "Allow Access",
+                buttonTitle: model.microphoneDenied ? L10n.text("Open Settings") : L10n.text("Allow Access"),
                 action: {
                     if model.microphoneDenied {
                         Permissions.openMicrophoneSettings()
@@ -455,13 +456,13 @@ struct OnboardingView: View {
 
     private var inputMonitoringStep: some View {
         permissionStep(
-            title: "Allow Input Monitoring",
+            title: L10n.text("Allow Input Monitoring"),
             card: PermissionCard(
                 symbol: "keyboard.fill",
-                title: "Input Monitoring",
-                explanation: "Lets Velora notice your dictation key in every app. Without it, the key does nothing.",
+                title: L10n.text("Input Monitoring"),
+                explanation: L10n.text("Lets Velora notice your dictation key in every app. Without it, the key does nothing."),
                 granted: model.inputMonitoringGranted,
-                buttonTitle: "Open Settings",
+                buttonTitle: L10n.text("Open Settings"),
                 action: { model.requestInputMonitoring() }),
             continueEnabled: model.canContinue(from: .inputMonitoring),
             staleHint: !model.inputMonitoringGranted)
@@ -475,13 +476,13 @@ struct OnboardingView: View {
 
     private var accessibilityStep: some View {
         permissionStep(
-            title: "Allow Accessibility",
+            title: L10n.text("Allow Accessibility"),
             card: PermissionCard(
                 symbol: "accessibility",
-                title: "Accessibility",
-                explanation: "Lets Velora type the finished text into the app you're in. Without it, Velora hears you but can't type.",
+                title: L10n.text("Accessibility"),
+                explanation: L10n.text("Lets Velora type the finished text into the app you're in. Without it, Velora hears you but can't type."),
                 granted: model.accessibilityGranted,
-                buttonTitle: "Open Settings",
+                buttonTitle: L10n.text("Open Settings"),
                 action: { model.requestAccessibility() }),
             continueEnabled: model.canContinue(from: .accessibility),
             staleHint: !model.accessibilityGranted)
@@ -502,7 +503,7 @@ struct OnboardingView: View {
                 HStack(alignment: .top, spacing: 6) {
                     Image(systemName: "info.circle")
                         .font(.system(size: 11))
-                    Text("Velora already in the list but the switch won't stick? Select it, click “−”, then add Velora back. An older Velora build was signed differently, so macOS needs the entry re-added.")
+                    Text(L10n.text("Velora already in the list but the switch won't stick? Select it, click “−”, then add Velora back. An older Velora build was signed differently, so macOS needs the entry re-added."))
                 }
                 .font(.system(size: 12))
                 .foregroundStyle(.secondary)
@@ -511,7 +512,7 @@ struct OnboardingView: View {
                 .padding(.top, VeloraSpacing.xs)
             }
         } button: {
-            Button("Continue") { model.pressContinue(isRepeat: Self.pressIsRepeat) }
+            Button(L10n.text("Continue")) { model.pressContinue(isRepeat: Self.pressIsRepeat) }
                 .buttonStyle(.primaryCapsule)
                 .keyboardShortcut(.defaultAction)
                 .disabled(!continueEnabled)
@@ -519,8 +520,8 @@ struct OnboardingView: View {
     }
 
     private var hotkeyStep: some View {
-        stepLayout(title: "Pick your dictation key") {
-            Text("Hold it, talk, let go, and the text appears. Or tap once to start and tap again to stop.")
+        stepLayout(title: L10n.text("Pick your dictation key")) {
+            Text(L10n.text("Hold it, talk, let go, and the text appears. Or tap once to start and tap again to stop."))
                 .font(.body)
                 .foregroundStyle(.secondary)
                 .multilineTextAlignment(.center)
@@ -531,7 +532,7 @@ struct OnboardingView: View {
             HotkeyRecorderView(hotkey: $model.hotkey)
                 .fixedSize(horizontal: true, vertical: false)
         } button: {
-            Button("Continue") { model.pressContinue(isRepeat: Self.pressIsRepeat) }
+            Button(L10n.text("Continue")) { model.pressContinue(isRepeat: Self.pressIsRepeat) }
                 .buttonStyle(.primaryCapsule)
                 .keyboardShortcut(.defaultAction)
         }
@@ -542,7 +543,7 @@ struct OnboardingView: View {
         return stepLayout(title: setup.canTryIt ? "Try it" : "Set up speech",
                           contentSpacing: VeloraSpacing.s) {
             if setup.canTryIt {
-                Text("Click the box, hold \(model.hotkey.displayLabel), and say anything.")
+                Text(L10n.format("Click the box, hold %@, and say anything.", model.hotkey.displayLabel))
                     .font(.body)
                     .foregroundStyle(.secondary)
                     .multilineTextAlignment(.center)
@@ -563,7 +564,7 @@ struct OnboardingView: View {
                         // Green text measured 1.9:1 on light: only the glyph
                         // is green, the words stay primary.
                         Label {
-                            Text("You're set up.")
+                            Text(L10n.text("You're set up."))
                         } icon: {
                             Image(systemName: "checkmark.circle.fill")
                                 .foregroundStyle(VeloraStatus.success)
@@ -582,7 +583,7 @@ struct OnboardingView: View {
                         DownloadRecoveryView(state: model.downloads)
                     }
                     .frame(maxHeight: 220)
-                    Text("You can close setup. Recovery stays in Settings › Models.")
+                    Text(L10n.text("You can close setup. Recovery stays in Settings › Models."))
                         .font(.caption)
                         .foregroundStyle(.secondary)
                 }
@@ -618,7 +619,7 @@ struct OnboardingView: View {
             HStack {
                 Spacer()
                 if model.step != .welcome {
-                    Button("Skip") { model.pressSkip(isRepeat: Self.pressIsRepeat) }
+                    Button(L10n.text("Skip")) { model.pressSkip(isRepeat: Self.pressIsRepeat) }
                     .buttonStyle(.plain)
                     .font(.callout)
                     .foregroundStyle(.tertiary)
@@ -637,6 +638,7 @@ struct OnboardingView: View {
 /// selection state, not a toggle — the two scopes are answers to one
 /// question, not independent switches.
 private struct LanguageChoiceCard: View {
+    @ObservedObject private var interfaceLocale = InterfaceLocale.shared
     let title: String
     let detail: String
     let selected: Bool
@@ -650,9 +652,9 @@ private struct LanguageChoiceCard: View {
                     .font(.system(size: 20))
                     .foregroundStyle(selected ? VeloraStatus.success : Color.secondary)
                 VStack(alignment: .leading, spacing: 2) {
-                    Text(title)
+                    Text(L10n.text(title))
                         .font(.system(size: 15, weight: .semibold))
-                    Text(detail)
+                    Text(L10n.text(detail))
                         .font(.system(size: 13))
                         .foregroundStyle(.secondary)
                         .fixedSize(horizontal: false, vertical: true)
@@ -679,6 +681,7 @@ private struct LanguageChoiceCard: View {
 // MARK: - Permission card (design brief §4.2)
 
 struct PermissionCard: View {
+    @ObservedObject private var interfaceLocale = InterfaceLocale.shared
     let symbol: String
     let title: String
     let explanation: String
@@ -707,9 +710,9 @@ struct PermissionCard: View {
             .animation(VeloraMotion.quick, value: granted)
 
             VStack(alignment: .leading, spacing: VeloraSpacing.xs) {
-                Text(title)
+                Text(L10n.text(title))
                     .font(.system(size: 15, weight: .semibold))
-                Text(explanation)
+                Text(L10n.text(explanation))
                     .font(.system(size: 13))
                     .foregroundStyle(.secondary)
                     .fixedSize(horizontal: false, vertical: true)
@@ -722,11 +725,11 @@ struct PermissionCard: View {
             // one status glyph; green text measured 1.83:1 on the card fill,
             // so the word stays secondary.
             if granted {
-                Text("Granted")
+                Text(L10n.text("Granted"))
                     .font(.system(size: 13, weight: .medium))
                     .foregroundStyle(.secondary)
             } else {
-                Button(buttonTitle, action: action)
+                Button(L10n.text(buttonTitle), action: action)
             }
         }
         .padding(VeloraSpacing.l)
@@ -741,6 +744,7 @@ struct PermissionCard: View {
 // MARK: - Try-it editor
 
 private struct TryItEditor: View {
+    @ObservedObject private var interfaceLocale = InterfaceLocale.shared
     @Binding var text: String
 
     var body: some View {

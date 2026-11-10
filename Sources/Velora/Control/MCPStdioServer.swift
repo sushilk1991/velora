@@ -161,7 +161,7 @@ enum MCPStdioServer {
                         "description": "Absolute path to a local audio file.",
                     ],
                     "mode": [
-                        "type": "string", "minLength": 1, "maxLength": 128,
+                        "type": "string", "minLength": 1, "maxLength": ModeRecipeDocument.maximumNameCharacters,
                         "description": "Optional built-in or custom Velora formatting mode.",
                     ],
                 ],
@@ -175,7 +175,7 @@ enum MCPStdioServer {
                 "type": "object",
                 "properties": [
                     "mode": [
-                        "type": "string", "minLength": 1, "maxLength": 128,
+                        "type": "string", "minLength": 1, "maxLength": ModeRecipeDocument.maximumNameCharacters,
                         "description": "Optional built-in or custom Velora formatting mode.",
                     ],
                 ],
@@ -185,8 +185,8 @@ enum MCPStdioServer {
 
     private static let workflowTools: [[String: Any]] = {
         let limit: [String: Any] = ["type": "integer", "minimum": 1, "maximum": 100]
-        let mode: [String: Any] = ["type": "string", "minLength": 1, "maxLength": 128]
-        let meetingID: [String: Any] = ["type": "string", "minLength": 1, "maxLength": 128]
+        let mode: [String: Any] = ["type": "string", "minLength": 1, "maxLength": ModeRecipeDocument.maximumNameCharacters]
+        let meetingID: [String: Any] = ["type": "string", "minLength": 1, "maxLength": ModeRecipeDocument.maximumNameCharacters]
         func tool(_ name: String, _ description: String, _ properties: [String: Any],
                   required: [String] = [], readOnly: Bool = true) -> [String: Any] {
             ["name": name, "description": description,
@@ -199,7 +199,7 @@ enum MCPStdioServer {
             tool("validate_mode_recipe", "Validate supplied Velora recipe JSON. Does not install or save it.",
                  ["document": ["type": "string", "maxLength": 262144]], required: ["document"]),
             tool("create_mode_recipe", "Return a declarative recipe scaffold. Does not install it or execute code.",
-                 ["name": ["type": "string", "maxLength": 100],
+                 ["name": ["type": "string", "maxLength": ModeRecipeDocument.maximumNameCharacters],
                   "recipe": ["type": "string", "enum": ["work-update", "issue-report", "meeting-follow-up", "structured-note"]]]),
             tool("list_vocabulary", "Read Personal Dictionary entries after its separate read grant is enabled.", ["limit": limit]),
             tool("add_vocabulary", "Add an explicitly requested spelling or phrase. Requires Dictionary write access; changes can sync through the user's iCloud Dictionary.",

@@ -8,6 +8,8 @@ extension Notification.Name {
     static let veloraEngineStatus = Notification.Name("VeloraEngineStatus")
     /// A `reprocessed` reply arrived. `object` is the `EngineEvent.reprocessed`.
     static let veloraEngineReprocessed = Notification.Name("VeloraEngineReprocessed")
+    static let veloraEngineReprocessActivity = Notification.Name("VeloraEngineReprocessActivity")
+    static let veloraEngineReprocessSnapshot = Notification.Name("VeloraEngineReprocessSnapshot")
     static let veloraEngineTextFormatted = Notification.Name("VeloraEngineTextFormatted")
     /// First-run setup progress changed. `userInfo["status"]` is the display
     /// string ("Downloading the speech model (1.6 GB): 42%") and
@@ -709,7 +711,9 @@ final class EngineSupervisor: NSObject, EngineClientDelegate {
 
     func engineClient(_ client: EngineClient, didReceive event: EngineEvent) {
         switch event {
-        case .ready(let setupIsComplete, let activeSTTModel):
+        case .ready(let setupIsComplete, let activeSTTModel, let reprocessJobs):
+            NotificationCenter.default.post(name: .veloraEngineReprocessSnapshot,
+                object: reprocessJobs ?? [], userInfo: ["valid": reprocessJobs != nil])
             downloads.readiness(speech: true, writing: nil)
             if state != .ready {
                 restartAttempts = 0
@@ -758,6 +762,8 @@ final class EngineSupervisor: NSObject, EngineClientDelegate {
                 name: .veloraEngineStatus, object: nil, userInfo: ["payload": payload])
         case .reprocessed, .reprocessFailed:
             NotificationCenter.default.post(name: .veloraEngineReprocessed, object: event)
+        case .reprocessActivity:
+            NotificationCenter.default.post(name: .veloraEngineReprocessActivity, object: event)
         case .textFormatted, .textFormatFailed:
             NotificationCenter.default.post(name: .veloraEngineTextFormatted, object: event)
         default:

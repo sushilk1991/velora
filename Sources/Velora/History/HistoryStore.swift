@@ -1,6 +1,18 @@
 import Foundation
 import SQLite3
 
+extension Notification.Name {
+    static let veloraHistoryChanged = Notification.Name("VeloraHistoryChanged")
+}
+
+struct HistoryRetentionCandidate: Equatable {
+    let id: Int64
+    let timestamp: Date
+    let revision: Int64
+    let audioPath: String?
+    let sessionID: String?
+}
+
 enum HistoryDurabilityPolicy {
     static let sqliteBusyTimeoutMs: Int32 = 2_000
     private static let drainMargin: TimeInterval = 2
@@ -92,6 +104,7 @@ final class HistoryStore {
     private let queue = DispatchQueue(label: "com.velora.history")
     private let removeArchivedClip: (String) -> Void
     private let invalidateTrialRun: (String) throws -> Void
+    private let forgetTrialRuns: (Set<String>) throws -> (() throws -> Void)
     private let pendingLock = NSLock()
     private var pendingWrites = 0
 
@@ -117,16 +130,22 @@ final class HistoryStore {
     init(
         url: URL = AppConfig.historyDatabaseURL,
         removeArchivedClip: @escaping (String) -> Void = HistoryStore.removeClip,
-        invalidateTrialRun: ((String) throws -> Void)? = nil
+        invalidateTrialRun: ((String) throws -> Void)? = nil,
+        forgetTrialRuns: ((Set<String>) throws -> (() throws -> Void))? = nil
     ) {
         self.removeArchivedClip = removeArchivedClip
         // Alternate databases (including selftest fixtures) never touch the
         // owner's trial files unless their caller explicitly injects a store.
         self.invalidateTrialRun = invalidateTrialRun ?? Self.trialInvalidator(databaseURL: url)
+        self.forgetTrialRuns = forgetTrialRuns ?? { sessions in
+            guard url.standardizedFileURL == AppConfig.historyDatabaseURL.standardizedFileURL else { return {} }
+            return try HistoryTrialFeedbackStore.shared.beginForget(sessionIDs: sessions)
+        }
         AppConfig.shared.ensureVeloraDirectory()
         var handle: OpaquePointer?
         if sqlite3_open(url.path, &handle) == SQLITE_OK {
             db = handle
+            sqlite3_exec(handle, "PRAGMA foreign_keys=ON;", nil, nil, nil)
             // The engine's idle vocab miner reads this DB concurrently; without
             // a busy timeout an INSERT that collides with its SELECT fails
             // SQLITE_BUSY instantly and the dictation silently vanishes from
@@ -610,28 +629,90 @@ final class HistoryStore {
         return true
     }
 
-    /// Deletes a single row and its archived audio clip (if any).
+    /// Deletes a single row before removing its audio. Refused SQLite deletes
+    /// preserve the recording, including triggers which silently ignore writes.
     func delete(id: Int64) {
         queue.sync { [self] in
-            guard db != nil else { return }
-            // Remove the clip first — best effort; a missing file is fine.
-            if let name = audioPathOnQueue(forID: id) { removeArchivedClip(name) }
-            var stmt: OpaquePointer?
-            guard sqlite3_prepare_v2(db, "DELETE FROM dictations WHERE id = ?;", -1, &stmt, nil) == SQLITE_OK
-            else { return }
-            defer { sqlite3_finalize(stmt) }
-            sqlite3_bind_int64(stmt, 1, id)
-            sqlite3_step(stmt)
+            let candidates = retentionCandidatesOnQueue(id: id)
+            _ = deleteCandidatesOnQueue(candidates)
         }
     }
 
     /// Wipes the entire history, including every archived audio clip.
     func deleteAll() {
         queue.sync { [self] in
-            guard db != nil else { return }
-            for name in allAudioPathsOnQueue() { removeArchivedClip(name) }
-            sqlite3_exec(db, "DELETE FROM dictations;", nil, nil, nil)
+            _ = deleteCandidatesOnQueue(retentionCandidatesOnQueue())
         }
+    }
+
+    func retentionCandidates(before: Date) -> [HistoryRetentionCandidate] {
+        queue.sync { retentionCandidatesOnQueue(before: before) }
+    }
+
+    /// All rows must still match the preview. New dictations and intervening
+    /// corrections are never swept into a previously reviewed cleanup.
+    func deleteForRetention(_ candidates: [HistoryRetentionCandidate]) -> Int? {
+        queue.sync { deleteCandidatesOnQueue(candidates) }
+    }
+
+    func retentionMatches(_ candidates: [HistoryRetentionCandidate]) -> Bool {
+        queue.sync { candidates.allSatisfy { retentionCandidatesOnQueue(id: $0.id) == [$0] } }
+    }
+
+    func referencesAudio(named name: String) -> Bool {
+        queue.sync {
+            var stmt: OpaquePointer?
+            guard sqlite3_prepare_v2(db, "SELECT 1 FROM dictations WHERE audio_path = ? LIMIT 1;", -1, &stmt, nil) == SQLITE_OK else { return true }
+            defer { sqlite3_finalize(stmt) }
+            bindText(stmt, 1, name)
+            return sqlite3_step(stmt) != SQLITE_DONE
+        }
+    }
+
+    private func retentionCandidatesOnQueue(before: Date? = nil, id: Int64? = nil) -> [HistoryRetentionCandidate] {
+        var stmt: OpaquePointer?
+        var sql = "SELECT id, ts, transcript_revision, audio_path, session_id FROM dictations"
+        if before != nil { sql += " WHERE ts < ?" }
+        if id != nil { sql += " WHERE id = ?" }
+        sql += " ORDER BY id;"
+        guard sqlite3_prepare_v2(db, sql, -1, &stmt, nil) == SQLITE_OK else { return [] }
+        defer { sqlite3_finalize(stmt) }
+        if let before { sqlite3_bind_double(stmt, 1, before.timeIntervalSince1970) }
+        if let id { sqlite3_bind_int64(stmt, 1, id) }
+        var rows: [HistoryRetentionCandidate] = []
+        while sqlite3_step(stmt) == SQLITE_ROW {
+            rows.append(HistoryRetentionCandidate(id: sqlite3_column_int64(stmt, 0),
+                timestamp: Date(timeIntervalSince1970: sqlite3_column_double(stmt, 1)),
+                revision: sqlite3_column_int64(stmt, 2), audioPath: columnText(stmt, 3), sessionID: columnText(stmt, 4)))
+        }
+        return rows
+    }
+
+    private func deleteCandidatesOnQueue(_ candidates: [HistoryRetentionCandidate]) -> Int? {
+        guard !candidates.isEmpty else { return 0 }
+        guard sqlite3_exec(db, "BEGIN IMMEDIATE;", nil, nil, nil) == SQLITE_OK else { return nil }
+        var committed = false
+        defer { if !committed { sqlite3_exec(db, "ROLLBACK;", nil, nil, nil) } }
+        for candidate in candidates {
+            guard retentionCandidatesOnQueue(id: candidate.id) == [candidate] else { return nil }
+            var stmt: OpaquePointer?
+            guard sqlite3_prepare_v2(db, "DELETE FROM dictations WHERE id = ?;", -1, &stmt, nil) == SQLITE_OK else { return nil }
+            sqlite3_bind_int64(stmt, 1, candidate.id)
+            let step = sqlite3_step(stmt)
+            sqlite3_finalize(stmt)
+            guard step == SQLITE_DONE, sqlite3_changes(db) == 1 else { return nil }
+        }
+        let recoverFeedback: () throws -> Void
+        do { recoverFeedback = try forgetTrialRuns(Set(candidates.compactMap(\.sessionID))) }
+        catch { return nil }
+        guard sqlite3_exec(db, "COMMIT;", nil, nil, nil) == SQLITE_OK else {
+            try? recoverFeedback()
+            return nil
+        }
+        committed = true
+        for name in Set(candidates.compactMap(\.audioPath)) { removeArchivedClip(name) }
+        DispatchQueue.main.async { NotificationCenter.default.post(name: .veloraHistoryChanged, object: nil) }
+        return candidates.count
     }
 
     /// Looks up the clip basename for a row. MUST be called on `queue`.

@@ -34,7 +34,8 @@ final class OnboardingWindowController: NSWindowController, NSWindowDelegate {
         super.init(window: window)
 
         model.onFinish = { [weak self] in self?.close() }
-        window.contentView = NSHostingView(rootView: OnboardingView(model: model))
+        let onboardingModel = model
+        window.contentView = NSHostingView(rootView: LocalizedInterface { OnboardingView(model: onboardingModel) })
         window.delegate = self
     }
 

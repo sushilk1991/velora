@@ -264,7 +264,7 @@ final class LocalControlRouter {
         guard let mode = validatedMode(request.arguments) else {
             completion(.error(id: request.id, ControlFailure(
                 code: "invalid_arguments",
-                message: "mode must be a non-empty name of at most 128 characters")))
+                message: "mode must be a non-empty name of at most 240 characters")))
             return nil
         }
 
@@ -374,7 +374,7 @@ final class LocalControlRouter {
         guard let supplied = arguments["mode"] else { return .some(nil) }
         guard let raw = supplied as? String else { return nil }
         let value = raw.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard !value.isEmpty, value.count <= 128,
+        guard !value.isEmpty, value.unicodeScalars.count <= ModeRecipeDocument.maximumNameCharacters,
               value.unicodeScalars.allSatisfy({
                   !CharacterSet.controlCharacters.contains($0)
               }) else { return nil }

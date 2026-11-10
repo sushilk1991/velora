@@ -15,6 +15,9 @@ struct Mode: Identifiable, Equatable {
     var apps: [String]
     var vocabulary: [String]
     var replacements: [Replacement]
+    var sites: [String] = []
+    /// nil keeps standard formatting; an explicit list runs only these rules.
+    var steps: [String]?
     /// Built-ins (Default, Raw) are protected from deletion.
     var isProtected: Bool = false
     /// The file this mode lives in ("a" for a.json, "Work" for Work.json),
@@ -36,6 +39,26 @@ struct Mode: Identifiable, Equatable {
     private static let protectedStems: Set<String> = ["default", "raw"]
 
     static let formattingOptions = ["off", "light", "full"]
+    static let processingSteps = ["spoken_commands", "fillers", "punctuation", "replacements"]
+    static let knownSites = [
+        "gmail", "outlook", "proton", "fastmail", "superhuman", "hey", "zoho", "yahoo",
+        "gdocs", "notion", "obsidian", "linear", "keep", "evernote", "onenote", "coda", "craft", "confluence",
+        "slack", "discord", "whatsapp", "messenger", "telegram", "teams", "gchat", "instagram",
+    ]
+
+    static func stepTitle(_ step: String) -> String {
+        switch step {
+        case "spoken_commands": return "Spoken line breaks"
+        case "fillers": return "Remove fillers"
+        case "punctuation": return "Punctuation"
+        case "replacements": return "Dictionary replacements"
+        default: return step
+        }
+    }
+
+    var supportsCustomSteps: Bool {
+        formatting != "off" && !["raw", "code", "terminal"].contains(name.lowercased())
+    }
 
     /// The mode a dictation with no stored mode ran in.
     static let defaultName = "Default"
@@ -164,6 +187,8 @@ struct Mode: Identifiable, Equatable {
         bakedEngine: Bundle.main.object(forInfoDictionaryKey: "VeloraEngineDir") as? String,
         repoRoot: ResourceLocator.repoRoot)
 
+    private static let readCache = ModeReadCache()
+
     /// Every mode file in `folder` with its filename stem, case as on disk,
     /// and its identity, taken before the read so a change after it shows.
     fileprivate static func decodeAll(in folder: URL?) -> [(stem: String, mode: Mode, stamp: FileStamp?)] {
@@ -173,32 +198,28 @@ struct Mode: Identifiable, Equatable {
         else {
             return []
         }
-        return files.filter { $0.pathExtension == "json" }.compactMap { url in
+        let jsonFiles = files.filter { $0.pathExtension == "json" }
+        readCache.removeMissing(in: folder, keeping: Set(jsonFiles.map { $0.standardizedFileURL.path }))
+        return jsonFiles.sorted { $0.lastPathComponent < $1.lastPathComponent }.compactMap { url in
             let stamp = FileStamp(url)
-            guard var mode = decode(url) else {
-                return nil
-            }
             let stem = url.deletingPathExtension().lastPathComponent
-            mode.stem = stem
-            return (stem, mode, stamp)
+            if var mode = decode(url) {
+                mode.stem = stem
+                readCache.store(mode, stamp: stamp, at: url)
+                return (stem, mode, stamp)
+            }
+            // Keep both the last valid data and its stamp. Save must still
+            // refuse to overwrite the malformed bytes the user is editing.
+            guard let previous = readCache.value(at: url) else { return nil }
+            return (stem, previous.mode, previous.stamp)
         }
     }
 
     fileprivate static func decode(_ url: URL) -> Mode? {
         guard let data = try? Data(contentsOf: url),
-              let dict = (try? JSONSerialization.jsonObject(with: data)) as? [String: Any]
-        else { return nil }
-        let name = dict["name"] as? String ?? url.deletingPathExtension().lastPathComponent
-        let replacements = (dict["replacements"] as? [String: String] ?? [:])
-            .map { Mode.Replacement(key: $0.key, value: $0.value) }
-            .sorted { $0.key < $1.key }
-        return Mode(
-            name: name,
-            prompt: dict["prompt"] as? String ?? "",
-            formatting: dict["formatting"] as? String ?? "light",
-            apps: dict["apps"] as? [String] ?? [],
-            vocabulary: dict["vocabulary"] as? [String] ?? [],
-            replacements: replacements)
+              let object = (try? JSONSerialization.jsonObject(with: data)) as? [String: Any],
+              object["format"] == nil, object["version"] == nil, object["mode"] == nil else { return nil }
+        return try? ModeRecipeDocument.decode(data, preservingAssignments: true)
     }
 
     /// Comma-separated list-field text -> trimmed, non-empty items. The
@@ -340,6 +361,32 @@ struct Mode: Identifiable, Equatable {
     }
 }
 
+/// Shared by Modes and History readers. Only existing malformed files retain
+/// a snapshot; listing a directory also evicts snapshots of deleted files.
+private final class ModeReadCache: @unchecked Sendable {
+    private let lock = NSLock()
+    private var entries: [String: (mode: Mode, stamp: FileStamp?)] = [:]
+
+    func store(_ mode: Mode, stamp: FileStamp?, at url: URL) {
+        lock.lock()
+        defer { lock.unlock() }
+        entries[url.standardizedFileURL.path] = (mode, stamp)
+    }
+
+    func value(at url: URL) -> (mode: Mode, stamp: FileStamp?)? {
+        lock.lock()
+        defer { lock.unlock() }
+        return entries[url.standardizedFileURL.path]
+    }
+
+    func removeMissing(in directory: URL, keeping paths: Set<String>) {
+        lock.lock()
+        defer { lock.unlock() }
+        let prefix = directory.standardizedFileURL.path + "/"
+        entries = entries.filter { !$0.key.hasPrefix(prefix) || paths.contains($0.key) }
+    }
+}
+
 /// A mode file as it was when read: which file it is (a replace makes a
 /// new one) and when its bytes last changed. Save and Reset compare it
 /// again before they replace or remove the file.
@@ -378,6 +425,7 @@ final class ModesViewModel: ObservableObject {
     /// pane asks Save / Don't Save / Cancel.
     @Published var pendingChange: PendingChange?
     @Published var recipeError: String?
+    @Published private(set) var reloadWarning: String?
     @Published var previewInput = "" {
         didSet { if previewInput != oldValue { invalidatePreview() } }
     }
@@ -513,6 +561,16 @@ final class ModesViewModel: ObservableObject {
     /// A mode the next model opens straight into its editor, one-shot
     /// (the window-snapshot harness captures the editor this way).
     private static var pendingOpen: String?
+    private struct StyleExample {
+        let text: String
+        let modeName: String?
+        let bundleID: String?
+    }
+    private static var pendingExample: StyleExample?
+
+    static func prepareStyleExample(text: String, modeName: String?, bundleID: String?) {
+        pendingExample = StyleExample(text: text, modeName: modeName, bundleID: bundleID)
+    }
 
     /// Stems of the modes the engine ships (`modes_builtin`), so a shipped
     /// mode still never deletes or renames, and no other mode takes its
@@ -541,6 +599,17 @@ final class ModesViewModel: ObservableObject {
         load()
         restoreParked()
         openPending()
+        consumeStyleExample()
+    }
+
+    func consumeStyleExample() {
+        guard let example = Self.pendingExample else { return }
+        Self.pendingExample = nil
+        let named = modes.first { $0.name.caseInsensitiveCompare(example.modeName ?? "") == .orderedSame }
+        let bound = modes.first { mode in mode.apps.contains { $0.caseInsensitiveCompare(example.bundleID ?? "") == .orderedSame } }
+        let fallback = modes.first { $0.name == Mode.defaultName }
+        if !isDirty, let mode = named ?? bound ?? fallback { select(mode.id) }
+        previewInput = example.text
     }
 
     static func requestOpen(_ name: String) {
@@ -558,6 +627,38 @@ final class ModesViewModel: ObservableObject {
             return
         }
         select(mode.id)
+    }
+
+    var draftValidationError: String? {
+        do { try ModeRecipeDocument.validate(draft) }
+        catch { return error.localizedDescription }
+        if let site = draft.sites.first(where: { site in
+            modes.contains { $0.id != selectedID && $0.sites.contains(site) }
+        }), let other = modes.first(where: { $0.id != selectedID && $0.sites.contains(site) }) {
+            return "\(site.capitalized) is already assigned to “\(other.name)”. Remove that site assignment first."
+        }
+        return nil
+    }
+
+    var effectiveRuleSummary: String {
+        let appText = draft.apps.isEmpty ? "No app assignments." : "\(draft.apps.count) app assignment\(draft.apps.count == 1 ? "" : "s")."
+        let siteText = draft.sites.isEmpty ? "No site assignments." : "Sites: \(draft.sites.joined(separator: ", "))."
+        let steps = draft.steps.map { $0.isEmpty ? "Recognized text stays literal." : "Rules: \($0.map(Mode.stepTitle).joined(separator: " → "))." } ?? "Uses standard formatting."
+        return "\(appText) \(siteText) \(steps) An explicit choice wins, then an app assignment, then a site assignment, then automatic detection or the default mode."
+    }
+
+    func setStep(_ step: String, enabled: Bool) {
+        guard var steps = draft.steps else { return }
+        steps.removeAll { $0 == step }
+        if enabled { steps.append(step) }
+        draft.steps = steps
+    }
+
+    func moveStep(_ step: String, by offset: Int) {
+        guard var steps = draft.steps, let index = steps.firstIndex(of: step),
+              steps.indices.contains(index + offset) else { return }
+        steps.swapAt(index, index + offset)
+        draft.steps = steps
     }
 
     var hasSelection: Bool { selectedID != nil }
@@ -695,6 +796,8 @@ final class ModesViewModel: ObservableObject {
         lhs.name == rhs.name
             && lhs.prompt == rhs.prompt
             && lhs.formatting == rhs.formatting
+            && lhs.sites == rhs.sites
+            && lhs.steps == rhs.steps
             && Mode.normalizedApplicationIDs(lhs.apps) == Mode.normalizedApplicationIDs(rhs.apps)
             && lhs.vocabulary == rhs.vocabulary
             && lhs.replacements.map { [$0.key, $0.value] } == rhs.replacements.map { [$0.key, $0.value] }
@@ -772,6 +875,8 @@ final class ModesViewModel: ObservableObject {
     func previewDraft() {
         let text = previewInput.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !text.isEmpty else { return }
+        do { try ModeRecipeDocument.validate(draft) }
+        catch { previewError = error.localizedDescription; return }
         invalidatePreview()
         isPreviewing = true
         let generation = previewGeneration
@@ -1014,6 +1119,9 @@ final class ModesViewModel: ObservableObject {
     func load() {
         removeStaleTemps()
         let loaded = Mode.loadStamped(from: directory, packaged: packagedDirectory)
+        let unreadable = ((try? FileManager.default.contentsOfDirectory(at: directory, includingPropertiesForKeys: nil)) ?? [])
+            .filter { $0.pathExtension == "json" && Mode.decode($0) == nil }.map(\.lastPathComponent).sorted()
+        reloadWarning = unreadable.isEmpty ? nil : "Couldn't load \(unreadable.joined(separator: ", ")). Existing modes keep their last valid settings. Fix the file and reopen Modes."
         modes = loaded.modes.sorted(by: Self.listOrder)
         stamps = loaded.stamps
 
@@ -1055,6 +1163,7 @@ final class ModesViewModel: ObservableObject {
         mode.stem = nil
         mode.unsavedID = Self.unsavedRowID()
         mode.apps = []
+        mode.sites = []
         modes.append(mode)
         unsavedIDs.insert(mode.id)
         modes.sort(by: Self.listOrder)
@@ -1074,6 +1183,7 @@ final class ModesViewModel: ObservableObject {
         copy.stem = nil
         copy.unsavedID = Self.unsavedRowID()
         copy.apps = []
+        copy.sites = []
         modes.append(copy)
         unsavedIDs.insert(copy.id)
         modes.sort(by: Self.listOrder)
@@ -1164,6 +1274,7 @@ final class ModesViewModel: ObservableObject {
     /// in the folder that isn't the mode's own, or a failed write.
     func save() {
         saveErrorTitle = Self.saveFailedTitle
+        if let error = draftValidationError { saveError = error; return }
         guard !draft.name.trimmingCharacters(in: .whitespaces).isEmpty else {
             saveError = "Give the mode a name."
             return
@@ -1581,20 +1692,9 @@ final class ModesViewModel: ObservableObject {
     ///                  │                    .refuse: `installExclusive`, EEXIST if taken
     ///                  └─── any failure ──▶ remove the temp file only
     private func writeFile(_ mode: Mode, to url: URL, existing: ExistingFile) throws {
-        var replacements: [String: String] = [:]
-        for pair in mode.replacements where !pair.key.isEmpty {
-            replacements[pair.key] = pair.value
-        }
-        let payload: [String: Any] = [
-            "name": mode.name,
-            "prompt": mode.prompt,
-            "formatting": mode.formatting,
-            "apps": mode.apps,
-            "vocabulary": mode.vocabulary,
-            "replacements": replacements,
-        ]
+        try ModeRecipeDocument.validate(mode)
         let data = try JSONSerialization.data(
-            withJSONObject: payload, options: [.prettyPrinted, .sortedKeys])
+            withJSONObject: ModeRecipeDocument.payload(mode), options: [.prettyPrinted, .sortedKeys])
         try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
         let temp = directory.appendingPathComponent("\(Self.tempPrefix)\(UUID().uuidString)\(Self.tempSuffix)")
         do {
@@ -1696,7 +1796,11 @@ struct ModesSettingsView: View {
     }
 
     var body: some View {
-        Group {
+        VStack(alignment: .leading, spacing: VeloraSpacing.s) {
+            if let warning = vm.reloadWarning {
+                Text(warning).font(.callout).foregroundStyle(.secondary)
+                    .textSelection(.enabled)
+            }
             if vm.hasSelection {
                 ModeEditor(vm: vm)
             } else {
@@ -1731,6 +1835,7 @@ struct ModesSettingsView: View {
         // until the dialog above is answered.
         .onAppear {
             selection.openModes = vm
+            vm.consumeStyleExample()
         }
         // Leaving the pane rebuilds the model. A draft still dirty (the
         // window closed) is parked for the next visit, and Quit asks.
@@ -1997,6 +2102,7 @@ private struct ModeEditor: View {
     @State private var bundleIDText = ""
     @State private var showsMissingApps = false
     @State private var showsBundleIDField = false
+    @State private var showsAdvancedRules = false
     @State private var applicationPickerError: String?
     @State private var confirmsDelete = false
     @State private var confirmsReset = false
@@ -2037,6 +2143,7 @@ private struct ModeEditor: View {
                     activationCard
                     vocabularyCard
                     replacementsCard
+                    advancedRulesCard
                 }
                 .padding(.bottom, VeloraSpacing.xl)
             }
@@ -2246,7 +2353,7 @@ private struct ModeEditor: View {
     private func exportRecipe() {
         let panel = NSSavePanel()
         panel.title = "Export Mode Recipe"
-        panel.message = "Shares the current instructions, vocabulary, and replacements. App assignments stay on this Mac."
+        panel.message = "Shares the current instructions and text rules. App and website assignments stay on this Mac."
         panel.allowedContentTypes = [.json]
         panel.nameFieldStringValue = "\(ModesViewModel.slug(vm.draft.name))-recipe.json"
         guard panel.runModal() == .OK, let url = panel.url else { return }
@@ -2272,7 +2379,7 @@ private struct ModeEditor: View {
         return GroupCard(
             header: "Automatic activation",
             headerLink: ("Choose Applications…", { chooseApplications() }),
-            footer: "An explicitly chosen mode wins. Otherwise an app assignment wins over automatic site detection, then the default mode applies. Assigning a browser here uses this mode on every site."
+            footer: vm.effectiveRuleSummary
         ) {
             if assigned.isEmpty {
                 placeholderRow("No apps assigned", symbol: "app.dashed")
@@ -2318,6 +2425,81 @@ private struct ModeEditor: View {
         }
         .padding(.horizontal, ModesMetrics.rowInset)
         .padding(.bottom, VeloraSpacing.s)
+    }
+
+    private var advancedRulesCard: some View {
+        GroupCard(header: "Advanced rules") {
+            disclosureRow("Sites and processing", sub: "Optional rules for this mode.",
+                          symbol: "slider.horizontal.3", isExpanded: $showsAdvancedRules)
+            if showsAdvancedRules {
+                GroupDivider()
+                GroupRow(label: "Custom processing", sub: "Runs only selected text rules, without the writing model or instructions.") {
+                    Toggle("Custom processing", isOn: Binding(
+                        get: { vm.draft.steps != nil },
+                        set: { vm.draft.steps = $0 ? Mode.processingSteps : nil }))
+                        .labelsHidden()
+                        .disabled(!vm.draft.supportsCustomSteps && vm.draft.steps == nil)
+                }
+                if !vm.draft.supportsCustomSteps {
+                    Text("Raw, Code, Terminal, and formatting off use standard processing. Choose a prose mode with light or full formatting to customize steps.")
+                        .font(.caption).foregroundStyle(.secondary)
+                        .padding(ModesMetrics.rowInset)
+                }
+                if let steps = vm.draft.steps {
+                    ForEach(steps, id: \.self) { step in
+                        GroupDivider()
+                        GroupRow(label: Mode.stepTitle(step)) {
+                            HStack(spacing: VeloraSpacing.s) {
+                                Button { vm.moveStep(step, by: -1) } label: { Image(systemName: "arrow.up") }
+                                    .accessibilityLabel("Move \(Mode.stepTitle(step)) earlier")
+                                    .disabled(steps.first == step)
+                                Button { vm.moveStep(step, by: 1) } label: { Image(systemName: "arrow.down") }
+                                    .accessibilityLabel("Move \(Mode.stepTitle(step)) later")
+                                    .disabled(steps.last == step)
+                                Toggle(Mode.stepTitle(step), isOn: Binding(
+                                    get: { vm.draft.steps?.contains(step) == true },
+                                    set: { vm.setStep(step, enabled: $0) }))
+                                    .labelsHidden()
+                            }
+                            .buttonStyle(.capsule)
+                        }
+                    }
+                    ForEach(Mode.processingSteps.filter { !steps.contains($0) }, id: \.self) { step in
+                        GroupDivider()
+                        GroupRow(label: Mode.stepTitle(step)) {
+                            Toggle(Mode.stepTitle(step), isOn: Binding(
+                                get: { false }, set: { vm.setStep(step, enabled: $0) }))
+                                .labelsHidden()
+                        }
+                    }
+                    Text(steps.isEmpty ? "All steps are off. Recognized text stays literal." : "Steps run from top to bottom. Dictionary replacements includes this mode and your personal dictionary.")
+                        .font(.caption).foregroundStyle(.secondary)
+                        .padding(ModesMetrics.rowInset)
+                }
+                GroupDivider()
+                GroupRow(label: "Website assignments", sub: "Uses detected sites in supported browsers. An app assignment takes precedence.") {
+                    Menu("Add Site") {
+                        ForEach(Mode.knownSites.filter { !vm.draft.sites.contains($0) }, id: \.self) { site in
+                            Button(site.capitalized) { vm.draft.sites.append(site) }
+                        }
+                    }
+                    .menuStyle(.borderlessButton)
+                    .fixedSize()
+                }
+                ForEach(vm.draft.sites, id: \.self) { site in
+                    GroupDivider()
+                    GroupRow(label: site.capitalized) {
+                        Button("Remove") { vm.draft.sites.removeAll { $0 == site } }
+                            .buttonStyle(.capsule)
+                    }
+                }
+            }
+            if let error = vm.draftValidationError {
+                Text(error).font(.callout).foregroundStyle(.red)
+                    .padding(ModesMetrics.rowInset)
+                    .accessibilityLabel("Mode needs attention: \(error)")
+            }
+        }
     }
 
     private var vocabularyCard: some View {

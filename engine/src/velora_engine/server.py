@@ -56,7 +56,7 @@ from .native_contract import build_native_context
 from .native_runtime import discover_package
 from .trial_diagnostics import record_trial_run
 from .downloads import DownloadCoordinator, DownloadError, DownloadResult
-from .config import Config, velora_home
+from .config import Config, MAX_MODE_NAME_CHARS, velora_home
 from .formatting import STATIC_SYSTEM_PROMPT
 from .media import (
     MEETING_FAILURE_SUFFIX, MEETING_SLICE_S, MeetingAudio, MeetingTrackTooShort,
@@ -65,6 +65,7 @@ from .media import (
     sweep_meeting_failures, sweep_meeting_temp,
 )
 from .meeting_notes import chunk_transcript, merge_notes, parse_notes_json
+from .meeting_intelligence import chapters_in_chunk, prepare_passages, validate_chapters
 from .stt import (
     SAMPLE_RATE,
     STTBackend,
@@ -739,6 +740,8 @@ class Engine:
         self._reprocess_recovery = False
         self._reprocess_audio: str | None = None
         self._reprocess_id: Any = None
+        self._reprocess_request_id: str | None = None
+        self._reprocess_leases: dict[str, str] = {}
         self._recovery_queue: list[tuple[dict[str, Any], str]] = []
         self._recovery_paused = False
         self._reprocess_preempt = threading.Event()
@@ -1954,6 +1957,8 @@ class Engine:
                 "cleanup_model": self.config.cleanup_model if self.config.cleanup_enabled else None,
                 "version": __version__,
                 "setup_complete": setup_complete_at_ready,
+                "reprocess_jobs": [{"request_id": key, "audio": audio}
+                                   for key, audio in self._reprocess_leases.items()],
             }
         )
         self._ready_client_gen = gen
@@ -2052,6 +2057,8 @@ class Engine:
             return
         if command == "reprocess":
             await self._reprocess_failed(msg, error, "busy")
+            if isinstance(msg.get("request_id"), str):
+                await self._send({"event": "reprocess_activity", "request_id": msg["request_id"], "active": False})
             return
         events = {"transcribe_file": "transcribe_failed", "edit_text": "edit_failed",
                   "action_start": "action_failed", "action_observe": "action_failed",
@@ -6013,6 +6020,23 @@ class Engine:
         return not goes_somewhere
 
     async def _cmd_reprocess(self, msg: dict[str, Any]) -> None:
+        msg = dict(msg)
+        request_id = None
+        try:
+            if isinstance(msg.get("request_id"), str):
+                request_id = str(uuid.UUID(msg["request_id"]))
+        except ValueError:
+            pass
+        if request_id is not None:
+            msg["request_id"] = request_id
+        try:
+            await self._admit_reprocess(msg)
+        finally:
+            if (request_id is not None and self._reprocess_request_id != request_id
+                    and not any(queued.get("request_id") == request_id for queued, _ in self._recovery_queue)):
+                await self._send({"event": "reprocess_activity", "request_id": request_id, "active": False})
+
+    async def _admit_reprocess(self, msg: dict[str, Any]) -> None:
         """Re-transcribe a saved audio clip, optionally with a different model,
         mode, or language. Validates synchronously, then runs the (possibly
         slow) transcription off the dispatch loop so live control frames stay
@@ -6052,16 +6076,25 @@ class Engine:
         if any(audio == name for _queued, audio in self._recovery_queue):
             return
         self._recovery_queue.append((dict(msg), name))
+        if isinstance(msg.get("request_id"), str):
+            self._reprocess_leases[msg["request_id"]] = name
 
     def _start_reprocess(
         self, msg: dict[str, Any], name: str, *, recovery: bool,
     ) -> None:
+        msg = dict(msg)
         self._reprocessing = True
         self._reprocess_recovery = recovery
         self._reprocess_audio = name
         self._reprocess_id = msg.get("id")
+        self._reprocess_request_id = msg.get("request_id")
+        if isinstance(msg.get("request_id"), str):
+            self._reprocess_leases[msg["request_id"]] = name
         self._reprocess_preempt.clear()
         self._reprocess_window_bound_s = None
+        if isinstance(msg.get("request_id"), str):
+            asyncio.create_task(self._send({"event": "reprocess_activity", "request_id": msg["request_id"],
+                                           "audio": name, "active": True}))
         task = asyncio.create_task(self._run_reprocess(dict(msg), name))
         self._reprocess_task = task
 
@@ -6183,8 +6216,13 @@ class Engine:
             self._reprocess_recovery = False
             self._reprocess_audio = None
             self._reprocess_id = None
+            self._reprocess_request_id = None
             with contextlib.suppress(RuntimeError):  # executor gone at shutdown
                 await self._stt_call(self._release_stt_memory)
+            if (isinstance(msg.get("request_id"), str)
+                    and not any(queued.get("request_id") == msg["request_id"] for queued, _ in self._recovery_queue)):
+                self._reprocess_leases.pop(msg["request_id"], None)
+                await self._send({"event": "reprocess_activity", "request_id": msg["request_id"], "active": False})
             # Idle again — without this, a reprocess that landed during the
             # mining delay window left mining dead until the next dictation
             # (review finding).
@@ -6206,7 +6244,7 @@ class Engine:
         if requested_mode is not None and (
             not isinstance(requested_mode, str)
             or not requested_mode.strip()
-            or len(requested_mode) > 128
+            or len(requested_mode) > MAX_MODE_NAME_CHARS
         ):
             await self._send({"event": "transcribe_failed", "id": msg.get("id"),
                               "error": "invalid formatting mode"})
@@ -6883,6 +6921,9 @@ class Engine:
         meeting_id = str(msg["meeting_id"])
         transcript = str(msg["transcript"])
         job_id = msg.get("id")
+        passages = prepare_passages(msg.get("passages"))
+        if passages:
+            transcript = "\n".join(f"[@{p['key']}] {p['text']}" for p in passages)
         # The schema clause is appended outside the editable guidance so a
         # custom prompt can change tone and focus but never break the JSON
         # contract parse_notes_json() enforces.
@@ -6897,15 +6938,31 @@ class Engine:
             "Me and Them are audio channels, not verified identities. If a legacy "
             "transcript contains Speaker-number labels, treat those the same way. "
             "Never guess who a speaker is."
+            " Preserve tentative suggestions and unresolved points as such. "
+            "The word should alone does not establish a decision or commitment."
         )
         # Truncate rather than reject: Swift counts the same Unicode scalars,
         # but a completed meeting must never fail over prompt length skew.
         custom_guidance = str(msg.get("prompt") or "").strip()[:8_000]
         guidance = custom_guidance or default_guidance
+        map_schema = schema_clause if not passages else (
+            "Return JSON only with exact keys summary (string), decisions (array of strings), "
+            "action_items (array of strings), and chapters (array). Use empty arrays when "
+            "the transcript has no explicit decision, action item, or clear topic."
+        )
         map_prompt = (
             f"{guidance} Keep this partial summary to 1-2 concise sentences and each "
-            f"array to at most 4 concise items.\n\n{schema_clause}"
+            f"notes array to at most 4 concise items.\n\n{map_schema}"
         )
+        if passages:
+            map_prompt += (
+                " Propose up to two meaningful "
+                "topic chapters for this chunk, based on changes in subject, never fixed time intervals. "
+                "Each chapter has exact keys title (short descriptive string), start_key and end_key "
+                "(the exact @block keys, without @, enclosing its contiguous transcript range). "
+                "Do not split a block, repeat a range, infer speaker identities, or invent a chapter "
+                "if there is no clear topic. Only cite keys that appear in this chunk."
+            )
         reduce_prompt = (
             "Merge these partial meeting notes without inventing facts or duplicates. "
             + (
@@ -7023,6 +7080,8 @@ class Engine:
                         "the local notes model returned malformed notes",
                         _NotesFailure.section_retryable,
                     )
+                if "chapters" in parsed:
+                    parsed["chapters"] = chapters_in_chunk(parsed["chapters"], user_text)
                 return parsed, None, None
             return None, "cancelled", None
 
@@ -7049,7 +7108,7 @@ class Engine:
                 split_retry = (
                     consecutive_failures < MEETING_NOTES_MAX_CONSECUTIVE_FAILURES)
                 notes, generation_error, failure = await generate(
-                    chunk, map_prompt, MEETING_NOTES_MAP_MAX_TOKENS)
+                    chunk, map_prompt, MEETING_NOTES_MAP_MAX_TOKENS + (256 if passages else 0))
                 # The first attempt decides the streak. A timeout counts
                 # even when the split retry below recovers the section: that
                 # timeout was already paid. An output-limit, malformed or
@@ -7089,7 +7148,7 @@ class Engine:
                             retry_notes, retry_error, retry_failure = await generate(
                                 retry_chunk,
                                 map_prompt,
-                                MEETING_NOTES_MAP_MAX_TOKENS,
+                                MEETING_NOTES_MAP_MAX_TOKENS + (256 if passages else 0),
                             )
                             if retry_notes is None:
                                 # Pieces recovered before this one are real
@@ -7158,6 +7217,7 @@ class Engine:
                 await fail(error + "; retry to generate notes", "generation_failed")
                 return
             merged = merge_notes(partials)
+            chapters = validate_chapters(merged.pop("chapters", []), passages)
             if len(partials) > 1:
                 reduced, reduce_error, _ = await generate(
                     # merge_notes applies global size/item bounds before this
@@ -7189,6 +7249,7 @@ class Engine:
                 "event": "meeting_notes_ready", "id": job_id,
                 "meeting_id": meeting_id, **merged,
                 "partial": skipped_chunks > 0,
+                "chapters": chapters,
             })
             self._restart_if_cleanup_unhealthy()
         except Exception as exc:  # noqa: BLE001

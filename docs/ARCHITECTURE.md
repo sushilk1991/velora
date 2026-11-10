@@ -92,6 +92,25 @@ writing model leaves dictation available and shows its own recovery controls.
 Legacy `loading` events remain telemetry; the app uses `download_status` for
 model acquisition and adoption.
 
+`ready.reprocess_jobs` is an authoritative list of active and queued History
+reprocess leases (`request_id`, `audio`). App requests include a UUID
+`request_id` and receive `reprocess_activity` changes. A job settles only after
+the STT executor has released its work; a preempted job keeps its lease while
+queued. This state belongs to the app, not the lifetime of a History pane.
+Socket reconnects can preserve an engine job, so Ready alone cannot clear its
+recording protection. Clients that omit `request_id` retain the older event
+sequence.
+
+Storage cleanup compares record revisions and file identities against a
+preview before applying changes. Default transcript policies retain text
+indefinitely. A private `cleanup-pending.json` records only owned recording
+basenames/meeting UUIDs and deletion association, so failed unlinks can be
+reviewed and retried after rows have gone. Pending record-associated cleanup
+requires the row to remain absent. Meeting orphan removal rechecks row absence
+under the store's write transaction and never follows directory/track links.
+Trial feedback removal has a recovery receipt so a refused History commit
+restores related correction text and provenance.
+
 ### Model acquisition and recovery
 
 The server accepts `ping`, `status`, `download_status`, model selection and
