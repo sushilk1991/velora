@@ -1,0 +1,43 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "Velora mode recipe version 1",
+  "description": "Declarative writing instructions. Imported app assignments are ignored until the person adds them in Modes.",
+  "oneOf": [
+    { "$ref": "#/$defs/mode" },
+    {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["format", "version", "mode"],
+      "properties": {
+        "format": { "const": "velora-mode" },
+        "version": { "const": 1, "type": "integer" },
+        "mode": { "$ref": "#/$defs/mode" }
+      }
+    }
+  ],
+  "$defs": {
+    "mode": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["name"],
+      "properties": {
+        "name": { "type": "string", "minLength": 1, "maxLength": 100, "pattern": "\\S" },
+        "prompt": { "type": "string", "maxLength": 16000 },
+        "formatting": { "enum": ["off", "light", "full"] },
+        "apps": {
+          "type": "array", "maxItems": 256,
+          "items": { "type": "string", "maxLength": 256 }
+        },
+        "vocabulary": {
+          "type": "array", "maxItems": 256,
+          "items": { "type": "string", "maxLength": 200 }
+        },
+        "replacements": {
+          "type": "object", "maxProperties": 256,
+          "propertyNames": { "minLength": 1, "maxLength": 200, "pattern": "\\S" },
+          "additionalProperties": { "type": "string", "maxLength": 4000 }
+        }
+      }
+    }
+  }
+}

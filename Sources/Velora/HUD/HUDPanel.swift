@@ -30,6 +30,7 @@ final class HUDPanel: NSObject {
         var stopMeeting: () -> Void
         /// Opens the main window on Home.
         var openMain: () -> Void
+        var fixRecent: ((DictationRecord) -> Void)? = nil
     }
 
     let model = HUDModel()
@@ -700,6 +701,12 @@ final class HUDPanel: NSObject {
         let recents = (menuHooks?.recents() ?? []).filter {
             !$0.final.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
         }
+        if let latest = recents.first, menuHooks?.fixRecent != nil {
+            let fix = NSMenuItem(title: "Fix last dictation…", action: #selector(fixRecentAction(_:)), keyEquivalent: "")
+            fix.target = self
+            fix.representedObject = RecordBox(latest)
+            menu.addItem(fix)
+        }
         if !recents.isEmpty {
             let parent = NSMenuItem(
                 title: "Recent Transcriptions", action: nil, keyEquivalent: "")
@@ -756,6 +763,11 @@ final class HUDPanel: NSObject {
 
     @objc private func menuStopMeeting() {
         menuHooks?.stopMeeting()
+    }
+
+    @objc private func fixRecentAction(_ sender: NSMenuItem) {
+        guard let box = sender.representedObject as? RecordBox else { return }
+        menuHooks?.fixRecent?(box.record)
     }
 
     @objc private func copyRecent(_ sender: NSMenuItem) {

@@ -42,6 +42,7 @@ final class HotkeySelftestDelegate: HotkeyMonitorDelegate {
         case .proofread: proofreadHotkeyDownCount += 1
         case .stream: streamHotkeyDownCount += 1
         case .action: actionHotkeyDownCount += 1
+        case .alternateDictation: hotkeyDownCount += 1
         }
     }
 
@@ -51,6 +52,7 @@ final class HotkeySelftestDelegate: HotkeyMonitorDelegate {
         case .proofread: proofreadHotkeyUpCount += 1
         case .stream: streamHotkeyUpCount += 1
         case .action: actionHotkeyUpCount += 1
+        case .alternateDictation: hotkeyUpCount += 1
         }
     }
     func escapePressed() { escapeCount += 1 }
@@ -286,6 +288,10 @@ enum Selftest {
             testLiveSystemAudioCapture()
             testLiveMeetingCapture()
         }
+        testDictationDeliveryPreferences()
+        testModeRecipes()
+        testMeetingReviewFeatures()
+        testWritingRecovery()
         testScratchPreferenceCheck()
         testSelftestIsolation(preferencesBaseline: preferencesBaseline)
         testNothingLeftOnScreen()
@@ -17446,5 +17452,257 @@ private final class RecordingOutputVolume: OutputVolumeControlling {
             "a blocked edit paste restores the pre-edit clipboard")
         pasteboard.clearContents()
     }
+    private static func testDictationDeliveryPreferences() {
+        var document = SettingsDocument.defaults
+        expect(ModelChoiceOrder.downloadBytes("470 MB") < ModelChoiceOrder.downloadBytes("1.6 GB"),
+               "model download sizes sort by units")
+        expect(ModelChoiceOrder.downloadBytes("unknown").isInfinite,
+               "unknown download sizes sort after measured sizes")
+        document.settings.shortcuts.secondDictationEnabled = true
+        document.settings.shortcuts.secondDictation = document.settings.shortcuts.dictation
+        do {
+            try SettingsDocumentCodec.validate(document)
+            expect(false, "second dictation shortcut rejects a collision")
+        } catch { expect(true, "shortcut collision rejected") }
+        document.settings.shortcuts.secondDictationEnabled = false
+        expect(document.settings.dictation.delivery == .pasteAndKeep,
+               "existing dictation defaults keep the final transcript on clipboard")
+        document.settings.dictation.delivery = .copyOnly
+        document.settings.dictation.removeHesitations = true
+        document.settings.dictation.showLiveWords = true
+        do {
+            let encoded = try JSONEncoder().encode(document)
+            let decoded = try JSONDecoder().decode(SettingsDocument.self, from: encoded)
+            expect(decoded == document, "new dictation choices round-trip in portable settings")
+            var object = try JSONSerialization.jsonObject(with: encoded) as! [String: Any]
+            var settings = object["settings"] as! [String: Any]
+            var dictation = settings["dictation"] as! [String: Any]
+            for key in ["delivery", "removeHesitations", "showLiveWords"] { dictation.removeValue(forKey: key) }
+            settings["dictation"] = dictation
+            object["settings"] = settings
+            let legacy = try JSONDecoder().decode(SettingsDocument.self,
+                from: JSONSerialization.data(withJSONObject: object))
+            expect(legacy.settings.dictation.delivery == .pasteAndKeep
+                && !legacy.settings.dictation.removeHesitations && !legacy.settings.dictation.showLiveWords,
+                "older settings retain delivery and preview behavior")
+        } catch { expect(false, "dictation preferences decode: \(error)") }
+
+        let board = NSPasteboard(name: NSPasteboard.Name("VeloraDeliverySelftest-" + UUID().uuidString))
+        defer { board.releaseGlobally() }
+        board.clearContents()
+        board.setString("original", forType: .string)
+        let inserter = TextInserter(pasteboard: board,
+            pasteDeliveryOverride: { _, _ in true }, pasteCommandOverride: { true })
+        inserter.stageFinalOutput("result", restoringPreviousClipboard: true)
+        expect(inserter.insertViaPasteboard(" result"), "restore delivery posts the guarded paste")
+        expect(waitUntil(timeout: 2) { board.string(forType: .string) == "original" },
+               "successful paste restores the clipboard from before staging")
+        inserter.stageFinalOutput("before copy", restoringPreviousClipboard: true)
+        board.clearContents()
+        board.setString("copy before paste", forType: .string)
+        _ = inserter.insertViaPasteboard("before copy")
+        expect(waitUntil(timeout: 2) { board.string(forType: .string) == "copy before paste" },
+               "a user copy between final staging and paste is preserved")
+        inserter.stageFinalOutput("next", restoringPreviousClipboard: true)
+        _ = inserter.insertViaPasteboard("next")
+        board.clearContents()
+        board.setString("user copy", forType: .string)
+        RunLoop.current.run(until: Date().addingTimeInterval(0.9))
+        expect(board.string(forType: .string) == "user copy", "user clipboard changes always win")
+        let blocked = TextInserter(pasteboard: board,
+            pasteDeliveryOverride: { _, _ in false }, pasteCommandOverride: { false })
+        blocked.stageFinalOutput("recoverable", restoringPreviousClipboard: true)
+        expect(!blocked.insertViaPasteboard("recoverable"), "blocked delivery posts nothing")
+        expect(board.string(forType: .string) == "recoverable", "blocked paste retains the recoverable result")
+    }
+
+    // Register testModeRecipes() beside the existing Modes suites.
+    private static func testModeRecipes() {
+        let base = FileManager.default.temporaryDirectory
+            .appendingPathComponent("velora-mode-recipes-\(UUID().uuidString)")
+        let directory = base.appendingPathComponent("modes", isDirectory: true)
+        try! FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: base) }
+        let mode = Mode(name: "Team update", prompt: "Keep the dictated facts.", formatting: "full",
+                        apps: ["com.apple.Notes"], vocabulary: ["Velora"],
+                        replacements: [Mode.Replacement(key: "valora", value: "Velora")])
+        let encoded = try! ModeRecipeDocument.encode(mode)
+        let decoded = try! ModeRecipeDocument.decode(encoded)
+        expect(decoded.name == mode.name && decoded.prompt == mode.prompt
+               && decoded.vocabulary == ["Velora"] && decoded.replacements.first?.value == "Velora",
+               "recipe sharing round-trips instructions, vocabulary, and explicit replacements")
+        expect(decoded.apps.isEmpty, "sharing never imports automatic app assignments")
+        let legacy = Data(#"{"name":"Team update","apps":["com.apple.Notes"],"prompt":"Keep facts"}"#.utf8)
+        expect((try! ModeRecipeDocument.decode(legacy)).apps.isEmpty,
+               "existing mode JSON imports into an unassigned draft")
+        let invalidDocuments = [
+            #"{"name":"Invalid","formatting":"strong"}"#,
+            #"{"name":"Invalid","prompt":null}"#,
+            #"{"name":"Invalid","replacements":{"":"replacement"}}"#,
+            #"{"name":"Invalid","command":"execute"}"#,
+            #"{"format":"velora-mode","version":true,"mode":{"name":"Invalid"}}"#,
+            #"{"format":"velora-mode","version":2,"mode":{"name":"Invalid"}}"#,
+            #"{"name":"   "}"#,
+        ]
+        for document in invalidDocuments {
+            do {
+                _ = try ModeRecipeDocument.decode(Data(document.utf8))
+                expect(false, "invalid recipe rejected: \(document)")
+            } catch { expect(true, "invalid recipe rejected: \(document)") }
+        }
+        do {
+            _ = try ModeRecipeDocument.decode(Data(repeating: 32, count: ModeRecipeDocument.maximumBytes + 1))
+            expect(false, "oversized recipe rejected")
+        } catch { expect(true, "oversized recipe rejected") }
+        let vm = ModesViewModel(supervisor: nil, directory: directory, packagedDirectory: nil)
+        vm.importRecipe(data: legacy)
+        expect(vm.draft.name == "Team update" && vm.draft.apps.isEmpty && vm.isDirty,
+               "import opens an unsaved mode for review")
+        expect((try! FileManager.default.contentsOfDirectory(atPath: directory.path)).isEmpty,
+               "import does not write or overwrite a mode")
+        let before = vm.draft
+        vm.importRecipe(data: Data(#"{"name":"Invalid","prompt":null}"#.utf8))
+        expect(vm.draft == before && vm.recipeError != nil,
+               "invalid import preserves the working draft and reports why")
+        vm.importRecipe(data: Data(#"{"name":"Other","prompt":"Other facts"}"#.utf8))
+        expect(vm.pendingChange != nil && vm.draft == before,
+               "import while editing uses the existing unsaved-change guard")
+        vm.cancelPending()
+        vm.requestRecipe(ModeRecipe.all[0])
+        expect(vm.pendingChange != nil && vm.draft == before,
+               "gallery also preserves an unsaved draft until the user chooses")
+        vm.discardAndContinue()
+        expect(vm.draft.name == "Work update" && vm.draft.apps.isEmpty
+               && vm.previewInput == ModeRecipe.all[0].example,
+               "gallery recipe opens an unassigned draft with a useful example")
+        vm.exportRecipe(to: directory.appendingPathComponent("work-update.json"))
+        expect(vm.recipeError != nil && !FileManager.default.fileExists(
+            atPath: directory.appendingPathComponent("work-update.json").path),
+               "sharing cannot replace an installed mode with a recipe wrapper")
+        let shared = base.appendingPathComponent("shared.json")
+        vm.exportRecipe(to: shared)
+        expect(vm.recipeError == nil && (try? ModeRecipeDocument.read(from: shared))?.name == "Work update",
+               "export saves a valid recipe outside the live modes directory")
+    }
+
+    static func testMeetingReviewFeatures() {
+        let id = UUID().uuidString
+        let start = Date(timeIntervalSince1970: 1_700_000_000)
+        var record = MeetingRecord(id: id, title: "Review", startedAt: start,
+            endedAt: start.addingTimeInterval(130), status: .ready,
+            notes: MeetingNotes(summary: "Approved.", actionItems: ["Send draft", "Review it"]))
+        record.segments = [
+            MeetingSegment(id: 2, meetingID: id, speaker: .them, chunkIndex: 1,
+                startMs: 60_100, endMs: 120_250, text: "Keep <the plan> & ship.\n\nNext."),
+            MeetingSegment(id: 1, meetingID: id, speaker: .me, chunkIndex: 0,
+                startMs: 0, endMs: 60_000, text: "First passage."),
+            MeetingSegment(id: 3, meetingID: id, speaker: .them, chunkIndex: 2,
+                startMs: 120_000, endMs: 120_000, text: "Invalid timing")
+        ]
+        let srt = record.export(format: .srt)
+        expect(srt.hasPrefix("1\n00:00:00,000 --> 00:01:00,000\nMe: First passage."),
+               "SRT sorts real segment ranges and emits comma milliseconds")
+        expect(srt.contains("2\n00:01:00,100 --> 00:02:00,250")
+               && srt.contains("&lt;the plan&gt; &amp; ship. Next.")
+               && !srt.contains("Invalid timing"),
+               "timed export escapes cue markup, removes blank lines, rejects zero-length cues")
+        expect(record.export(format: .vtt).hasPrefix("WEBVTT\n\n1\n00:00:00.000 --> 00:01:00.000"),
+               "VTT emits its header and dot milliseconds")
+        expect(MeetingRecord.cueTime(3_661_007, format: .srt) == "01:01:01,007",
+               "cue clocks retain hours and millisecond precision")
+        record.notes.completedActionItems = ["Send draft"]
+        expect(record.exportText.contains("- [x] Send draft")
+               && record.export(format: .plainText).contains("[x] Send draft")
+               && !record.followUpText.contains("Send draft")
+               && record.followUpText.contains("Review it"),
+               "exports preserve completion and follow-up includes only remaining actions")
+        expect(MeetingAudioPlayback.seekTime(milliseconds: 1_500, duration: 2) == 1.5
+               && MeetingAudioPlayback.seekTime(milliseconds: -1, duration: 2) == nil
+               && MeetingAudioPlayback.seekTime(milliseconds: 2_000, duration: 2) == nil
+               && MeetingAudioPlayback.seekTime(milliseconds: 0, duration: .nan) == nil,
+               "playback rejects invalid and out-of-retained-range timestamp seeks")
+        expect(MeetingAudioTrack.microphone.contains(.me)
+               && !MeetingAudioTrack.microphone.contains(.remote(1))
+               && MeetingAudioTrack.system.contains(.remote(2)),
+               "transcript playback maps legacy remote speakers to the system track")
+        expect(MeetingNotesTemplate.matching(prompt: "") == .general
+               && MeetingNotesTemplate.matching(prompt: MeetingNotesTemplate.standup.prompt) == .standup
+               && MeetingNotesTemplate.matching(prompt: "Custom guidance") == nil,
+               "named notes templates distinguish the built-in default from custom instructions")
+
+        let root = FileManager.default.temporaryDirectory
+            .appendingPathComponent("velora-meeting-actions-\(UUID().uuidString)", isDirectory: true)
+        defer { try? FileManager.default.removeItem(at: root) }
+        let store = MeetingStore(url: root.appendingPathComponent("meetings.sqlite3"), filesRoot: root)
+        store.insertProcessing(record)
+        store.complete(meetingID: id, notes: MeetingNotes(summary: "Notes", actionItems: ["Send draft"]))
+        expect(store.setActionCompleted(meetingID: id, action: "Send draft", completed: true)
+               && store.record(id: id)?.notes.completedActionItems == ["Send draft"],
+               "meeting action completion is durable in the database")
+        expect(!store.setActionCompleted(meetingID: id, action: "Invented action", completed: true),
+               "a stale or invented meeting action cannot be checked off")
+        store.complete(meetingID: id, notes: MeetingNotes(summary: "New notes", actionItems: ["Review it"]))
+        expect(store.record(id: id)?.notes.completedActionItems.isEmpty == true
+               && !store.setActionCompleted(meetingID: id, action: "Send draft", completed: false),
+               "regeneration never transfers a checkmark to a different action")
+        let playback = MeetingAudioPlayback(store: store)
+        playback.configure(record)
+        expect(playback.tracks.isEmpty && !playback.isPlaying,
+               "missing retained files leave playback stopped and unavailable")
+        playback.configure(nil)
+        expect(playback.meetingID == nil && playback.position == 0,
+               "leaving a meeting clears its player identity and position")
+        expect(store.delete(meetingID: id)
+               && !store.setActionCompleted(meetingID: id, action: "Review it", completed: true),
+               "deletion invalidates action mutation as well as audio playback")
+    }
+
+    // Call testWritingRecovery() from the normal Selftest runner.
+    private static func testWritingRecovery() {
+        withHistoryStore { store, _ in
+            store.insert(dictation(daysAgo: 0, words: 3, raw: "um call valora",
+                                   final: "Call Valora", session: "writing-recovery"))
+            guard let original = store.recent(limit: 1).first else {
+                expect(false, "writing recovery fixture is stored")
+                return
+            }
+            expect(store.updateFinal(expected: original, final: "Call Velora."),
+                   "a correction saves against the exact original version")
+            guard let corrected = store.record(id: original.id) else { return }
+            expect(corrected.raw == original.raw && corrected.previousFinal == original.final
+                   && corrected.transcriptRevision == original.transcriptRevision + 1,
+                   "corrections preserve As Heard and store durable latest undo")
+            expect(!store.updateFinal(expected: original, final: "stale editor"),
+                   "an older editor cannot overwrite a correction")
+            expect(!store.updateAfterReprocess(id: original.id, raw: "changed raw", final: "changed final",
+                       mode: "Default", sttMs: 10, cleanupMs: 10, cleanupApplied: true,
+                       cleanupWallMs: 10, expected: original),
+                   "a delayed audio reprocess cannot overwrite a newer correction")
+            expect(store.undoFinal(expected: corrected), "the latest correction can be undone")
+            guard let restored = store.record(id: original.id) else { return }
+            expect(restored.final == original.final && restored.raw == original.raw
+                   && restored.previousFinal == nil,
+                   "undo restores final words without rewriting raw or retaining a second undo")
+            expect(!store.updateFinal(expected: original, final: "ABA stale editor"),
+                   "equal final text after undo does not revive a stale record revision")
+            expect(!store.undoFinal(expected: corrected), "an older Undo cannot reverse later work")
+            store.delete(id: original.id)
+            expect(!store.updateFinal(expected: restored, final: "deleted record"),
+                   "a preview cannot recreate a deleted history record")
+        }
+        let formatted = EngineEvent.parse([
+            "event": "text_formatted", "request_id": "preview-1", "raw": "hello",
+            "text": "Hello.", "mode": "Default", "reason": "short_utterance",
+            "cleanup_ms": 0, "cleanup_applied": false,
+        ])
+        if case .textFormatted(let id, let result) = formatted {
+            expect(id == "preview-1" && result.text == "Hello." && !result.cleanupApplied,
+                   "text-only results retain request identity and honest cleanup outcome")
+        } else { expect(false, "text-only response decodes") }
+        if case .unknown = EngineEvent.parse(["event": "text_formatted", "text": "orphan"]) {
+            expect(true, "an uncorrelated formatting response cannot settle a request")
+        } else { expect(false, "formatting requires request identity") }
+    }
+
 }
 #endif

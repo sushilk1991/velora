@@ -369,17 +369,27 @@ final class ModesViewModel: ObservableObject {
     @Published var selectedID: String?
     /// Editable copy of the selected mode (bound by the detail form).
     @Published var draft = Mode(name: "", prompt: "", formatting: "light",
-                                apps: [], vocabulary: [], replacements: [])
+                                apps: [], vocabulary: [], replacements: []) {
+        didSet { if draft != oldValue { invalidatePreview() } }
+    }
     /// Non-nil when the last `save()` was blocked (e.g. a name collision).
     @Published var saveError: String?
     /// A selection change held back while the draft has unsaved edits; the
     /// pane asks Save / Don't Save / Cancel.
     @Published var pendingChange: PendingChange?
+    @Published var recipeError: String?
+    @Published var previewInput = "" {
+        didSet { if previewInput != oldValue { invalidatePreview() } }
+    }
+    @Published private(set) var previewResult: TextFormattingResult?
+    @Published private(set) var previewError: String?
+    @Published private(set) var isPreviewing = false
 
     enum PendingChange: Equatable {
         case select(String?)
         case newMode
         case duplicate
+        case createFrom(Mode)
         case leave
     }
 
@@ -459,6 +469,9 @@ final class ModesViewModel: ObservableObject {
     }
 
     private weak var supervisor: EngineSupervisor?
+    private let textFormatter: TextFormattingClient
+    private var previewRequestID: String?
+    private var previewGeneration = 0
     private let directory: URL
     private let packagedDirectory: URL?
     /// Velora's own modes by lowercased filename stem ("code"): what Reset to
@@ -516,6 +529,7 @@ final class ModesViewModel: ObservableObject {
         canReadStamp: @escaping (URL) -> Bool = { _ in true }
     ) {
         self.supervisor = supervisor
+        self.textFormatter = TextFormattingClient(supervisor: supervisor)
         self.directory = directory
         self.packagedDirectory = packagedDirectory
         self.writeBytes = writeBytes
@@ -720,6 +734,82 @@ final class ModesViewModel: ObservableObject {
         newMode()
     }
 
+    /// Import and gallery choices follow the same unsaved-edit confirmation
+    /// as New Mode. Nothing is written until the normal Save succeeds.
+    func requestRecipe(_ recipe: ModeRecipe) {
+        requestCreate(from: recipe.mode)
+        if pendingChange == nil { previewInput = recipe.example }
+    }
+
+    func importRecipe(data: Data) {
+        do {
+            let imported = try ModeRecipeDocument.decode(data)
+            recipeError = nil
+            requestCreate(from: imported)
+        } catch {
+            recipeError = error.localizedDescription
+        }
+    }
+
+    func importRecipe(from url: URL) {
+        do {
+            let imported = try ModeRecipeDocument.read(from: url)
+            recipeError = nil
+            requestCreate(from: imported)
+        } catch {
+            recipeError = error.localizedDescription
+        }
+    }
+
+    private func requestCreate(from mode: Mode) {
+        guard !isDirty else {
+            pendingChange = .createFrom(mode)
+            return
+        }
+        create(from: mode)
+    }
+
+    func previewDraft() {
+        let text = previewInput.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !text.isEmpty else { return }
+        invalidatePreview()
+        isPreviewing = true
+        let generation = previewGeneration
+        previewRequestID = textFormatter.format(text, mode: draft) { [weak self] result in
+            guard let self, self.previewGeneration == generation else { return }
+            self.previewRequestID = nil
+            self.isPreviewing = false
+            switch result {
+            case .success(let result): self.previewResult = result
+            case .failure(let error): self.previewError = error.localizedDescription
+            }
+        }
+    }
+
+    func invalidatePreview() {
+        previewGeneration += 1
+        if let previewRequestID { textFormatter.cancel(previewRequestID) }
+        previewRequestID = nil
+        isPreviewing = false
+        previewResult = nil
+        previewError = nil
+    }
+
+    func exportRecipe(to url: URL) {
+        do {
+            guard url.deletingLastPathComponent().resolvingSymlinksInPath().standardizedFileURL
+                    != directory.resolvingSymlinksInPath().standardizedFileURL else {
+                throw ModeRecipeDocument.ValidationError(
+                    message: "Choose a location outside Velora's modes folder. Use Save to update an installed mode.")
+            }
+            let bytes = try ModeRecipeDocument.encode(draft)
+            try bytes.write(to: url, options: .atomic)
+            recipeError = nil
+        } catch {
+            recipeError = error.localizedDescription
+        }
+    }
+
     /// Copies the open mode, or holds the copy while the draft is dirty:
     /// Save copies the saved edit, Don't Save the stored mode.
     func requestDuplicate() {
@@ -779,6 +869,8 @@ final class ModesViewModel: ObservableObject {
             newMode()
         case .duplicate:
             duplicate()
+        case .createFrom(let mode):
+            create(from: mode)
         case .leave:
             let leave = pendingLeave
             pendingLeave = nil
@@ -954,6 +1046,20 @@ final class ModesViewModel: ObservableObject {
         unsavedIDs.insert(mode.id)
         modes.sort(by: Self.listOrder)
         select(mode.id)
+    }
+
+    private func create(from template: Mode) {
+        var mode = template
+        mode.name = uniqueName(template.name)
+        mode.isProtected = false
+        mode.stem = nil
+        mode.unsavedID = Self.unsavedRowID()
+        mode.apps = []
+        modes.append(mode)
+        unsavedIDs.insert(mode.id)
+        modes.sort(by: Self.listOrder)
+        select(mode.id)
+        previewInput = ModeRecipe.all.first(where: { $0.name == template.name })?.example ?? ""
     }
 
     /// Copies how the open mode writes (formatting, instructions,
@@ -1542,6 +1648,7 @@ final class ModesViewModel: ObservableObject {
         var name = base
         var n = 2
         let existing = Set(modes.flatMap { [$0.stem?.lowercased(), Self.slug($0.name)].compactMap { $0 } })
+            .union(Self.shippedStems)
         while existing.contains(Self.slug(name)) {
             name = "\(base) \(n)"
             n += 1
@@ -1613,6 +1720,13 @@ struct ModesSettingsView: View {
         } message: {
             Text("Your edits to this mode aren't saved yet.")
         }
+        .alert("Couldn't share recipe", isPresented: Binding(
+            get: { vm.recipeError != nil }, set: { if !$0 { vm.recipeError = nil } }
+        )) {
+            Button("OK", role: .cancel) { vm.recipeError = nil }
+        } message: {
+            Text(vm.recipeError ?? "")
+        }
         // Every pane switch asks the model first; a dirty draft holds it
         // until the dialog above is answered.
         .onAppear {
@@ -1621,6 +1735,7 @@ struct ModesSettingsView: View {
         // Leaving the pane rebuilds the model. A draft still dirty (the
         // window closed) is parked for the next visit, and Quit asks.
         .onDisappear {
+            vm.invalidatePreview()
             if selection.openModes === vm {
                 selection.openModes = nil
             }
@@ -1689,6 +1804,9 @@ private struct ModeList: View {
         let tabStop = MeetingListKeys.tabStop(lastFocusedID, in: ids)
         VStack(alignment: .leading, spacing: 0) {
             PaneHeader(title: MainPane.modes.title) {
+                Button("Import Recipe…", action: importRecipe)
+                    .buttonStyle(.capsule)
+                    .help("Open a recipe as an unsaved mode without app assignments")
                 Button {
                     vm.requestNewMode()
                 } label: {
@@ -1702,8 +1820,11 @@ private struct ModeList: View {
 
             ScrollViewReader { proxy in
                 ScrollView {
-                    card(ids: ids, tabStop: tabStop)
-                        .padding(.bottom, VeloraSpacing.xl)
+                    VStack(alignment: .leading, spacing: ModesMetrics.sectionSpacing) {
+                        card(ids: ids, tabStop: tabStop)
+                        recipesCard
+                    }
+                    .padding(.bottom, VeloraSpacing.xl)
                 }
                 // Keep the focused row on screen as Tab and the arrows
                 // move, and remember it as the list's Tab stop.
@@ -1717,6 +1838,39 @@ private struct ModeList: View {
             }
         }
         .onAppear { focusReturningRow(ids: ids) }
+    }
+
+    private var recipesCard: some View {
+        GroupCard(
+            header: "Start from a recipe",
+            footer: "Recipes open as unsaved modes with no app assignments. Email and Code are already in your modes above."
+        ) {
+            ForEach(ModeRecipe.all) { recipe in
+                if recipe.id != ModeRecipe.all.first?.id { GroupDivider() }
+                Button {
+                    vm.requestRecipe(recipe)
+                } label: {
+                    GroupRow(label: recipe.name, sub: recipe.summary) {
+                        Image(systemName: "plus.circle")
+                            .foregroundStyle(.secondary)
+                    }
+                    .contentShape(Rectangle())
+                }
+                .buttonStyle(.plain)
+                .accessibilityHint("Creates an unsaved mode you can try before saving")
+            }
+        }
+    }
+
+    private func importRecipe() {
+        let panel = NSOpenPanel()
+        panel.title = "Import Mode Recipe"
+        panel.message = "Open a recipe to review its instructions. Existing modes and app assignments are unchanged until you save."
+        panel.allowedContentTypes = [.json]
+        panel.allowsMultipleSelection = false
+        panel.canChooseDirectories = false
+        guard panel.runModal() == .OK, let url = panel.url else { return }
+        vm.importRecipe(from: url)
     }
 
     private func card(ids: [String], tabStop: String?) -> some View {
@@ -1879,6 +2033,7 @@ private struct ModeEditor: View {
                 VStack(alignment: .leading, spacing: ModesMetrics.sectionSpacing) {
                     generalCard
                     instructionsCard
+                    previewCard
                     activationCard
                     vocabularyCard
                     replacementsCard
@@ -1939,6 +2094,10 @@ private struct ModeEditor: View {
         }
         .buttonStyle(.capsule)
         .help("Make an editable copy of this mode")
+
+        Button("Export…", action: exportRecipe)
+            .buttonStyle(.capsule)
+            .help("Share these instructions without local app assignments")
 
         if vm.resetsToDefault {
             Button(role: .destructive) {
@@ -2031,6 +2190,69 @@ private struct ModeEditor: View {
         }
     }
 
+    private var previewCard: some View {
+        GroupCard(
+            header: "Try it",
+            footer: "Try the current instructions without saving or recording. The result stays here until you copy it."
+        ) {
+            VStack(alignment: .leading, spacing: VeloraSpacing.s) {
+                Text("Sample transcript")
+                    .font(.subheadline.weight(.medium))
+                TextEditor(text: $vm.previewInput)
+                    .font(.body)
+                    .scrollContentBackground(.hidden)
+                    .padding(VeloraSpacing.xs)
+                    .frame(height: 100)
+                    .background(VeloraPanel.card, in: RoundedRectangle(cornerRadius: VeloraRadius.tile))
+                    .overlay(RoundedRectangle(cornerRadius: VeloraRadius.tile).strokeBorder(VeloraPanel.hairline))
+                    .accessibilityLabel("Sample transcript")
+                HStack(spacing: VeloraSpacing.s) {
+                    Button(vm.isPreviewing ? "Trying…" : "Try it") { vm.previewDraft() }
+                        .buttonStyle(.primaryCapsule)
+                        .disabled(vm.isPreviewing || vm.previewInput.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
+                    if vm.isPreviewing {
+                        ProgressView().controlSize(.small)
+                        Button("Cancel") { vm.invalidatePreview() }
+                            .buttonStyle(.capsule)
+                    }
+                    Spacer()
+                    if let result = vm.previewResult {
+                        Button("Copy result") {
+                            NSPasteboard.general.clearContents()
+                            NSPasteboard.general.setString(result.text, forType: .string)
+                        }
+                        .buttonStyle(.capsule)
+                    }
+                }
+                if let error = vm.previewError {
+                    Text(error).foregroundStyle(.red).font(.callout)
+                        .accessibilityLabel("Preview failed: \(error)")
+                }
+                if let result = vm.previewResult {
+                    Divider()
+                    Text("Result").font(.subheadline.weight(.medium))
+                    Text(result.text)
+                        .textSelection(.enabled)
+                        .frame(maxWidth: .infinity, alignment: .leading)
+                        .accessibilityLabel("Preview result")
+                    Text(result.explanation)
+                        .font(.caption).foregroundStyle(.secondary)
+                }
+            }
+            .padding(ModesMetrics.rowInset)
+        }
+    }
+
+    private func exportRecipe() {
+        let panel = NSSavePanel()
+        panel.title = "Export Mode Recipe"
+        panel.message = "Shares the current instructions, vocabulary, and replacements. App assignments stay on this Mac."
+        panel.allowedContentTypes = [.json]
+        panel.nameFieldStringValue = "\(ModesViewModel.slug(vm.draft.name))-recipe.json"
+        guard panel.runModal() == .OK, let url = panel.url else { return }
+        vm.exportRecipe(to: url)
+    }
+
     /// Assigned apps by name: installed ones with their icons, then one
     /// row that folds away the apps not on this Mac. The picker sits in the
     /// header; adding by bundle ID hides behind the last row.
@@ -2050,7 +2272,7 @@ private struct ModeEditor: View {
         return GroupCard(
             header: "Automatic activation",
             headerLink: ("Choose Applications…", { chooseApplications() }),
-            footer: "A browser assigned here uses this mode on every site, instead of each site's own mode."
+            footer: "An explicitly chosen mode wins. Otherwise an app assignment wins over automatic site detection, then the default mode applies. Assigning a browser here uses this mode on every site."
         ) {
             if assigned.isEmpty {
                 placeholderRow("No apps assigned", symbol: "app.dashed")

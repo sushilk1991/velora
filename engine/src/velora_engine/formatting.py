@@ -1036,6 +1036,16 @@ def run_gate(
     # romanization and smart Terminal prose. Keep the recognizer output and
     # explicit dictionary replacements, with no generative rewrite.
     if not getattr(config, "cleanup_enabled", True):
+        if (config.data.get("remove_hesitations") is True
+                and mode.name.casefold() != "raw"
+                and mode.formatting != "off" and category not in ("code", "terminal")):
+            # Leave quoted and code spans literal; the opt-in is not a rewrite.
+            protected = re.split(r"""("[^"\n]*"|`[^`\n]*`|(?<!\w)'[^'\n]*'(?!\w))""", text)
+            for index in range(0, len(protected), 2):
+                protected[index] = re.sub(
+                    r"(?<![\w-])(?:u+m+|u+h+|uhm+|erm+)(?![\w-]),?\s*", "",
+                    protected[index], flags=re.IGNORECASE)
+            text = _tidy_whitespace("".join(protected))
         return GateResult(
             Mode(name="Raw", formatting="off"), category, False,
             "cleanup_disabled", text, replacements=replacements,

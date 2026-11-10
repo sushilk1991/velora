@@ -259,7 +259,8 @@ struct HUDView: View {
     @ViewBuilder private var recordingContent: some View {
         if model.state == .transcribing && model.showsMultiStepProgress {
             transcribeContent
-        } else if model.sessionContext?.livePreview == true {
+        } else if model.sessionContext?.livePreview == true
+                    || !model.liveTranscript.isEmpty {
             livePreviewContent
         } else {
             recordingControls

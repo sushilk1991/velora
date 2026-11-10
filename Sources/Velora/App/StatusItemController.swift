@@ -200,13 +200,13 @@ final class StatusItemController: NSObject, NSMenuDelegate {
             let submenu = NSMenu()
             if !lastRaw.isEmpty {
                 let rawItem = NSMenuItem(
-                    title: "As Heard (Original)", action: #selector(pasteLastRaw),
+                    title: "Copy As Heard (Original)", action: #selector(pasteLastRaw),
                     keyEquivalent: "")
                 rawItem.target = self
-                rawItem.toolTip = "Paste exactly what was transcribed, before any cleanup"
+                rawItem.toolTip = "Copy the original words without replacing text in another app"
                 submenu.addItem(rawItem)
             }
-            if clipExists {
+            if !lastRaw.isEmpty {
                 if !lastRaw.isEmpty { submenu.addItem(.separator()) }
                 for mode in DictationController.reformatModes {
                     let modeItem = NSMenuItem(

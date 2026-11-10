@@ -33,6 +33,7 @@ DEFAULT_CONFIG: dict[str, Any] = {
     "language_scope": "multilingual",
     "cleanup_model": DEFAULT_CLEANUP_MODEL,
     "cleanup_enabled": True,
+    "remove_hesitations": False,
     "experimental_native_cleanup": False,
     "default_mode": "Default",
     "vocabulary": [],

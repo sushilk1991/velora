@@ -69,6 +69,9 @@ struct MeetingNotes: Equatable {
     /// True when the engine had to skip some transcript sections, so these
     /// notes cover only the rest of the meeting.
     var partial = false
+    /// Exact action text keeps completion state attached to an unchanged
+    /// commitment when notes are regenerated, never to a reused row index.
+    var completedActionItems: Set<String> = []
 
     var isEmpty: Bool {
         summary.isEmpty && decisions.isEmpty && actionItems.isEmpty
@@ -156,7 +159,9 @@ struct MeetingRecord: Identifiable, Equatable {
             sections += ["", "## Decisions", ""] + notes.decisions.map { "- \($0)" }
         }
         if !notes.actionItems.isEmpty {
-            sections += ["", "## Action items", ""] + notes.actionItems.map { "- [ ] \($0)" }
+            sections += ["", "## Action items", ""] + notes.actionItems.map {
+                "- [\(notes.completedActionItems.contains($0) ? "x" : " ")] \($0)"
+            }
         }
         let transcript = formattedTranscript
         if !transcript.isEmpty { sections += ["", "## Transcript", "", transcript] }
@@ -297,6 +302,11 @@ final class MeetingStore {
             CREATE INDEX IF NOT EXISTS idx_meeting_reprocess_segments_order
                 ON meeting_reprocess_segments(meeting_id, start_ms, speaker, chunk_index);
             CREATE INDEX IF NOT EXISTS idx_meetings_started ON meetings(started_at DESC);
+            CREATE TABLE IF NOT EXISTS meeting_action_completion (
+                meeting_id TEXT NOT NULL REFERENCES meetings(id) ON DELETE CASCADE,
+                action_text TEXT NOT NULL,
+                PRIMARY KEY(meeting_id, action_text)
+            );
             """
         guard sqlite3_exec(db, sql, nil, nil, nil) == SQLITE_OK else {
             NSLog("Velora: meeting schema failed: %@", lastError)
@@ -1051,6 +1061,51 @@ final class MeetingStore {
         }
     }
 
+    /// Rejects a stale checkbox after the action was removed by regeneration
+    /// or the meeting was deleted. Nothing outside the matching action changes.
+    @discardableResult
+    func setActionCompleted(meetingID: String, action: String, completed: Bool) -> Bool {
+        guard !action.isEmpty, action.utf8.count <= 16_384 else { return false }
+        let saved = queue.sync { [self] in
+            transactionOnQueue {
+                var read: OpaquePointer?
+                guard sqlite3_prepare_v2(db, "SELECT action_items FROM meetings WHERE id = ?;", -1, &read, nil) == SQLITE_OK else { return false }
+                defer { sqlite3_finalize(read) }
+                bindText(read, 1, meetingID)
+                guard sqlite3_step(read) == SQLITE_ROW,
+                      Self.lines(columnText(read, 0)).contains(action) else { return false }
+                let sql = completed
+                    ? "INSERT OR IGNORE INTO meeting_action_completion (meeting_id, action_text) VALUES (?, ?);"
+                    : "DELETE FROM meeting_action_completion WHERE meeting_id = ? AND action_text = ?;"
+                var write: OpaquePointer?
+                guard sqlite3_prepare_v2(db, sql, -1, &write, nil) == SQLITE_OK else { return false }
+                defer { sqlite3_finalize(write) }
+                bindText(write, 1, meetingID)
+                bindText(write, 2, action)
+                return sqlite3_step(write) == SQLITE_DONE
+            }
+        }
+        if saved {
+            DispatchQueue.main.async {
+                NotificationCenter.default.post(name: .veloraMeetingsChanged, object: nil)
+            }
+        }
+        return saved
+    }
+
+    private func completedActionsOnQueue(meetingID: String, actions: [String]) -> Set<String> {
+        var stmt: OpaquePointer?
+        guard sqlite3_prepare_v2(db, "SELECT action_text FROM meeting_action_completion WHERE meeting_id = ?;", -1, &stmt, nil) == SQLITE_OK else { return [] }
+        defer { sqlite3_finalize(stmt) }
+        bindText(stmt, 1, meetingID)
+        let current = Set(actions)
+        var result = Set<String>()
+        while sqlite3_step(stmt) == SQLITE_ROW {
+            if let action = columnText(stmt, 0), current.contains(action) { result.insert(action) }
+        }
+        return result
+    }
+
     func hasCommittedSegments(meetingID: String) -> Bool {
         queue.sync { [self] in
             var stmt: OpaquePointer?
@@ -1306,7 +1361,9 @@ final class MeetingStore {
                     summary: columnText(stmt, 7) ?? "",
                     decisions: Self.lines(columnText(stmt, 8)),
                     actionItems: Self.lines(columnText(stmt, 9)),
-                    partial: sqlite3_column_int(stmt, 15) == 1),
+                    partial: sqlite3_column_int(stmt, 15) == 1,
+                    completedActionItems: completedActionsOnQueue(
+                        meetingID: id, actions: Self.lines(columnText(stmt, 9)))),
                 micPath: columnText(stmt, 10),
                 systemPath: columnText(stmt, 11),
                 error: columnText(stmt, 12),

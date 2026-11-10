@@ -36,6 +36,7 @@ struct MeetingsSettingsView: View {
         self.store = store
         self.openMeetingSettings = openMeetingSettings
         _transcript = StateObject(wrappedValue: MeetingTranscriptLoader(store: store))
+        _playback = StateObject(wrappedValue: MeetingAudioPlayback(store: store))
     }
 
     @State private var records: [MeetingRecord] = []
@@ -58,8 +59,11 @@ struct MeetingsSettingsView: View {
     @State private var selectedHasTranscript = false
     /// The open meeting's Transcript card, as in the notes window.
     @StateObject private var transcript: MeetingTranscriptLoader
+    @StateObject private var playback: MeetingAudioPlayback
     @State private var metadataLoadToken = UUID()
     @State private var searchLoadToken = UUID()
+    @State private var exportRequestToken = UUID()
+    @State private var actionError: String?
 
     /// The header search box, as wide as Dictionary's and History's.
     private static let searchWidth: CGFloat = 240
@@ -155,6 +159,7 @@ struct MeetingsSettingsView: View {
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity)
         .onAppear { reload() }
+        .onDisappear { playback.stop(); exportRequestToken = UUID() }
         .onReceive(NotificationCenter.default.publisher(for: .veloraMeetingsChanged)) { _ in reload() }
     }
 
@@ -320,19 +325,17 @@ struct MeetingsSettingsView: View {
         }
         HeaderMenu(actions: Self.actionsLabel) {
             Button("Copy Notes and Transcript") { copy(recordID: record.id) }
-            Button("Export Markdown…") { export(record) }
+            Button("Copy Follow-up") {
+                NSPasteboard.general.clearContents()
+                NSPasteboard.general.setString(record.followUpText, forType: .string)
+            }
+            ForEach(MeetingExportFormat.allCases) { format in
+                Button("Export \(format.title)…") { export(record, format: format) }
+            }
             if record.status == .ready && selectedCanRecreate
                 && !selectedIsReprocessing && !processing {
                 Divider()
                 Button("Recreate Transcript and Notes…") { reprocess(record) }
-            }
-            if let url = store.audioURL(relativePath: record.micPath),
-               FileManager.default.fileExists(atPath: url.path) {
-                Button("Play Mic Audio") { NSWorkspace.shared.open(url) }
-            }
-            if let url = store.audioURL(relativePath: record.systemPath),
-               FileManager.default.fileExists(atPath: url.path) {
-                Button("Play Mac Audio") { NSWorkspace.shared.open(url) }
             }
             if record.status != .recording {
                 Divider()
@@ -349,10 +352,23 @@ struct MeetingsSettingsView: View {
         VStack(alignment: .leading, spacing: MeetingNotesCards.sectionSpacing) {
             detailStatus(record)
                 .padding(.horizontal, MeetingNotesCards.rowInset)
-            MeetingNotesCards(notes: record.notes)
+            if record.status != .recording { MeetingPlaybackControls(playback: playback) }
+            MeetingNotesCards(notes: record.notes) { action, completed in
+                let store = store
+                DispatchQueue.global(qos: .userInitiated).async {
+                    let saved = store.setActionCompleted(meetingID: record.id, action: action, completed: completed)
+                    DispatchQueue.main.async {
+                        guard selectedID == record.id else { return }
+                        actionError = saved ? nil : "This action changed or could not be saved. Open the meeting again and retry."
+                    }
+                }
+            }
+            if let actionError {
+                Text(actionError).font(.caption).foregroundStyle(VeloraStatus.warningText)
+            }
             if MeetingTranscriptCard.shows(
                 status: record.status, hasTranscript: selectedHasTranscript) {
-                MeetingTranscriptCard(loader: transcript)
+                MeetingPlayableTranscriptCard(loader: transcript, playback: playback)
             }
         }
         .frame(maxWidth: .infinity, alignment: .leading)
@@ -467,6 +483,7 @@ struct MeetingsSettingsView: View {
                 loaded = true
                 selectedID = resolvedID
                 selectedRecord = selected
+                playback.configure(selected)
                 selectedHasRecoverableAudio = recoverable
                 selectedCanRetryNotes = canRetryNotes
                 selectedCanRecreate = canRecreate
@@ -487,6 +504,9 @@ struct MeetingsSettingsView: View {
 
     private func select(_ id: String) {
         guard selectedID != id else { return }
+        playback.configure(nil)
+        exportRequestToken = UUID()
+        actionError = nil
         selectedID = id
         selectedRecord = records.first(where: { $0.id == id })
         selectedHasRecoverableAudio = false
@@ -527,6 +547,7 @@ struct MeetingsSettingsView: View {
                     meetingChanged: false, recordChanged: selectedRecord != selected,
                     readableChanged: transcript.readable != readable)
                 selectedRecord = selected
+                playback.configure(selected)
                 selectedHasRecoverableAudio = recoverable
                 selectedCanRetryNotes = canRetryNotes
                 selectedCanRecreate = canRecreate
@@ -540,6 +561,8 @@ struct MeetingsSettingsView: View {
     }
 
     private func closeDetail() {
+        playback.configure(nil)
+        exportRequestToken = UUID()
         metadataLoadToken = UUID()
         returnFocusID = Self.returnFocus(
             closing: selectedID,
@@ -569,28 +592,36 @@ struct MeetingsSettingsView: View {
     }
 
     private func copy(recordID: String) {
+        let token = UUID()
+        exportRequestToken = token
         let store = store
         DispatchQueue.global(qos: .userInitiated).async {
             let text = store.record(id: recordID)?.exportText ?? ""
             DispatchQueue.main.async {
-                guard !text.isEmpty else { return }
+                guard exportRequestToken == token, selectedID == recordID, !text.isEmpty else { return }
                 NSPasteboard.general.clearContents()
                 NSPasteboard.general.setString(text, forType: .string)
             }
         }
     }
 
-    private func export(_ record: MeetingRecord) {
+    private func export(_ record: MeetingRecord, format: MeetingExportFormat = .markdown) {
+        let token = UUID()
+        exportRequestToken = token
         let store = store
         DispatchQueue.global(qos: .userInitiated).async {
-            let text = store.record(id: record.id)?.exportText ?? ""
+            let text = store.record(id: record.id)?.export(format: format) ?? ""
             DispatchQueue.main.async {
+                guard exportRequestToken == token, selectedID == record.id, !text.isEmpty else { return }
                 let panel = NSSavePanel()
                 panel.nameFieldStringValue =
-                    "\(record.title.replacingOccurrences(of: "/", with: "-")) notes.md"
+                    "\(record.title.replacingOccurrences(of: "/", with: "-")) notes.\(format.fileExtension)"
+                if format.usesCueTiming { panel.message = MeetingExportFormat.timingNotice }
                 panel.begin { response in
-                    guard response == .OK, let url = panel.url else { return }
-                    try? text.write(to: url, atomically: true, encoding: .utf8)
+                    guard response == .OK, exportRequestToken == token,
+                          selectedID == record.id, let url = panel.url else { return }
+                    do { try text.write(to: url, atomically: true, encoding: .utf8) }
+                    catch { NSAlert(error: error).runModal() }
                 }
             }
         }
@@ -620,6 +651,8 @@ struct MeetingsSettingsView: View {
         alert.addButton(withTitle: "Delete")
         alert.addButton(withTitle: "Cancel")
         guard alert.runModal() == .alertFirstButtonReturn else { return }
+        playback.stop()
+        exportRequestToken = UUID()
         if !Self.deleteMeeting(record.id, store: store, processor: processor) {
             deleteFailed()
         }
@@ -842,12 +875,23 @@ struct MeetingNotesPromptEditor: View {
     @ObservedObject var model: SettingsModel
     @Environment(\.dismiss) private var dismiss
 
-    private static let size = CGSize(width: 520, height: 320)
+    private static let size = CGSize(width: 560, height: 380)
 
     var body: some View {
         VStack(alignment: .leading, spacing: VeloraSpacing.m) {
             Text("Notes prompt")
                 .font(.headline)
+            HStack {
+                Menu("Use template") {
+                    ForEach(MeetingNotesTemplate.allCases) { template in
+                        Button(template.title) { model.meetingNotesPrompt = template.prompt }
+                    }
+                }
+                .fixedSize()
+                Text(MeetingNotesTemplate.matching(prompt: model.meetingNotesPrompt)?.title ?? "Custom")
+                    .font(.caption).foregroundStyle(.secondary)
+                Spacer()
+            }
             ZStack(alignment: .topLeading) {
                 if model.meetingNotesPrompt.isEmpty {
                     Text(MeetingNotesPrompt.builtinGuidance)

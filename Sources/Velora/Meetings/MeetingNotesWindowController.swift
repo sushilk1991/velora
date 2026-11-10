@@ -13,13 +13,16 @@ final class MeetingNotesWindowModel: ObservableObject {
     /// when it would only offer "Show" over nothing.
     @Published private(set) var hasTranscript = false
     @Published private(set) var loading = false
+    @Published private(set) var actionError: String?
     /// The Transcript card: whether it is open, and its lines.
     let transcript: MeetingTranscriptLoader
+    let playback: MeetingAudioPlayback
 
     private let store: MeetingStore
     private var meetingID: String?
     private var metadataToken = UUID()
     private var exportToken = UUID()
+    private var presented = false
     /// `show` asked for the lines to be read again. The reload that lands
     /// reads them and clears this: a notification's reload can replace the
     /// one `show` started, and must not lose that read.
@@ -28,6 +31,7 @@ final class MeetingNotesWindowModel: ObservableObject {
     init(store: MeetingStore) {
         self.store = store
         transcript = MeetingTranscriptLoader(store: store)
+        playback = MeetingAudioPlayback(store: store)
     }
 
     /// Opens a meeting. Another meeting's Transcript card starts closed. The
@@ -36,7 +40,10 @@ final class MeetingNotesWindowModel: ObservableObject {
     /// notes match the old ones changes only the lines, which the metadata
     /// `reload` compares leaves out.
     func show(meetingID: String) {
+        presented = true
+        actionError = nil
         if self.meetingID != meetingID {
+            playback.configure(nil)
             self.meetingID = meetingID
             record = nil
             pendingForcedRead = false
@@ -67,6 +74,7 @@ final class MeetingNotesWindowModel: ObservableObject {
                     meetingChanged: false, recordChanged: self.record != fresh,
                     readableChanged: self.transcript.readable != readable)
                 self.record = fresh
+                self.playback.configure(fresh)
                 self.recreating = recreating
                 self.hasTranscript = hasTranscript
                 self.loading = false
@@ -84,16 +92,33 @@ final class MeetingNotesWindowModel: ObservableObject {
     /// The window closed: its meeting reopens with the Transcript card
     /// closed, as it did in 0.25.0.
     func windowClosed() {
+        presented = false
+        playback.stop()
+        exportToken = UUID()
         transcript.reset()
     }
 
-    func loadExport(completion: @escaping (String) -> Void) {
+    func setAction(_ action: String, completed: Bool) {
+        guard let meetingID else { return }
+        let store = store
+        DispatchQueue.global(qos: .userInitiated).async { [weak self] in
+            let saved = store.setActionCompleted(meetingID: meetingID, action: action, completed: completed)
+            DispatchQueue.main.async {
+                guard let self, self.isShowing(meetingID) else { return }
+                self.actionError = saved ? nil : "This action changed or could not be saved. Open the meeting again and retry."
+            }
+        }
+    }
+
+    func isShowing(_ id: String) -> Bool { presented && meetingID == id && record?.id == id }
+
+    func loadExport(format: MeetingExportFormat = .markdown, completion: @escaping (String) -> Void) {
         guard let meetingID else { return }
         let token = UUID()
         exportToken = token
         DispatchQueue.global(qos: .userInitiated).async { [weak self] in
             guard let self else { return }
-            let text = self.store.record(id: meetingID)?.exportText ?? ""
+            let text = self.store.record(id: meetingID)?.export(format: format) ?? ""
             DispatchQueue.main.async {
                 guard self.exportToken == token, self.meetingID == meetingID else { return }
                 completion(text)
@@ -125,10 +150,14 @@ struct MeetingNotesWindowView: View {
                     ScrollView {
                         VStack(alignment: .leading, spacing: MeetingNotesCards.sectionSpacing) {
                             status(record)
-                            MeetingNotesCards(notes: record.notes)
+                            MeetingPlaybackControls(playback: model.playback)
+                            MeetingNotesCards(notes: record.notes, onToggleAction: model.setAction)
+                            if let error = model.actionError {
+                                Text(error).font(.caption).foregroundStyle(VeloraStatus.warningText)
+                            }
                             if MeetingTranscriptCard.shows(
                                 status: record.status, hasTranscript: model.hasTranscript) {
-                                MeetingTranscriptCard(loader: model.transcript)
+                                MeetingPlayableTranscriptCard(loader: model.transcript, playback: model.playback)
                             }
                         }
                         .padding(.bottom, VeloraSpacing.xl)
@@ -180,6 +209,35 @@ struct MeetingNotesWindowView: View {
                 Label("Copy All", systemImage: "doc.on.doc")
             }
             .buttonStyle(.capsule)
+            Menu {
+                Button("Copy Follow-up") {
+                    NSPasteboard.general.clearContents()
+                    NSPasteboard.general.setString(record.followUpText, forType: .string)
+                }
+                Divider()
+                ForEach(MeetingExportFormat.allCases) { format in
+                    Button("Export \(format.title)…") { export(record, format: format) }
+                }
+            } label: {
+                Image(systemName: "ellipsis")
+            }
+            .menuStyle(.borderlessButton)
+            .fixedSize()
+            .accessibilityLabel("Meeting export and follow-up")
+        }
+    }
+
+    private func export(_ record: MeetingRecord, format: MeetingExportFormat) {
+        model.loadExport(format: format) { text in
+            guard !text.isEmpty, model.isShowing(record.id) else { return }
+            let panel = NSSavePanel()
+            panel.nameFieldStringValue = "\(record.title.replacingOccurrences(of: "/", with: "-")) notes.\(format.fileExtension)"
+            if format.usesCueTiming { panel.message = MeetingExportFormat.timingNotice }
+            panel.begin { response in
+                guard response == .OK, model.isShowing(record.id), let url = panel.url else { return }
+                do { try text.write(to: url, atomically: true, encoding: .utf8) }
+                catch { NSAlert(error: error).runModal() }
+            }
         }
     }
 
@@ -211,8 +269,8 @@ struct MeetingNotesWindowView: View {
 }
 
 /// A meeting's notes as grouped cards, shared by the Meetings pane and the
-/// notes window. Decisions and action items are plain bullets: nothing here
-/// can be checked off, so no checkbox glyph pretends it can.
+/// notes window. Action checkboxes persist through the supplied store callback;
+/// read-only callers keep the same plain-bullet presentation.
 ///
 ///     Summary
 ///     ┌──────────────────────────────────────┐
@@ -224,6 +282,7 @@ struct MeetingNotesWindowView: View {
 ///     └──────────────────────────────────────┘
 struct MeetingNotesCards: View {
     let notes: MeetingNotes
+    var onToggleAction: ((String, Bool) -> Void)? = nil
 
     /// Space between cards, as on Home and Modes.
     static let sectionSpacing: CGFloat = 18
@@ -243,7 +302,22 @@ struct MeetingNotesCards: View {
             GroupCard(header: "Decisions") { bullets(notes.decisions) }
         }
         if !notes.actionItems.isEmpty {
-            GroupCard(header: "Action items") { bullets(notes.actionItems) }
+            GroupCard(header: "Action items") {
+                if let onToggleAction {
+                    VStack(alignment: .leading, spacing: VeloraSpacing.s) {
+                        ForEach(Array(notes.actionItems.enumerated()), id: \.offset) { _, item in
+                            Toggle(item, isOn: Binding(
+                                get: { notes.completedActionItems.contains(item) },
+                                set: { onToggleAction(item, $0) }))
+                                .toggleStyle(.checkbox)
+                                .fixedSize(horizontal: false, vertical: true)
+                        }
+                    }
+                    .modifier(MeetingCardText())
+                } else {
+                    bullets(notes.actionItems)
+                }
+            }
         }
     }
 
@@ -268,6 +342,8 @@ struct MeetingNotesCards: View {
 /// Its open state and lines come from `MeetingTranscriptLoader`.
 struct MeetingTranscriptCard: View {
     @ObservedObject var loader: MeetingTranscriptLoader
+    var onSeek: ((MeetingSegment) -> Void)? = nil
+    var activeSegmentID: Int64? = nil
 
     // Test seam: internal so Selftest can reach it.
     /// Whether a meeting gets the card: always while processing, whose
@@ -328,10 +404,21 @@ struct MeetingTranscriptCard: View {
 
     private func row(_ segment: MeetingSegment) -> some View {
         HStack(alignment: .top, spacing: VeloraSpacing.m) {
-            Text(Self.clock(segment.startMs))
-                .font(.caption.monospacedDigit())
-                .foregroundStyle(.tertiary)
+            if let onSeek {
+                Button { onSeek(segment) } label: {
+                    Text(Self.clock(segment.startMs))
+                        .font(.caption.monospacedDigit())
+                }
+                .buttonStyle(.plain)
+                .foregroundStyle(Color.accentColor)
                 .frame(width: 44, alignment: .leading)
+                .accessibilityLabel("Play \(segment.speaker.displayName) at \(Self.clock(segment.startMs))")
+            } else {
+                Text(Self.clock(segment.startMs))
+                    .font(.caption.monospacedDigit())
+                    .foregroundStyle(.tertiary)
+                    .frame(width: 44, alignment: .leading)
+            }
             VStack(alignment: .leading, spacing: VeloraSpacing.xs) {
                 Text(segment.speaker.displayName)
                     .font(.caption.weight(.semibold))
@@ -342,6 +429,9 @@ struct MeetingTranscriptCard: View {
             }
         }
         .frame(maxWidth: .infinity, alignment: .leading)
+        .padding(4)
+        .background(activeSegmentID == segment.id ? Color.accentColor.opacity(0.10) : Color.clear,
+                    in: RoundedRectangle(cornerRadius: 5))
     }
 
     private static func clock(_ milliseconds: Int) -> String {

@@ -65,6 +65,10 @@ enum EngineEvent {
         cleanupWallMs: Int?)
     case reprocessFailed(id: Int64?, error: String, code: String)
 
+    /// Text-only formatting is preview-only: it never enters live insertion.
+    case textFormatted(requestID: String, result: TextFormattingResult)
+    case textFormatFailed(requestID: String, error: String, code: String)
+
     /// Safe Voice Edit result: the transformed selection (or the original
     /// text when `applied` is false — a guard tripped or the model declined).
     case edited(id: String?, text: String, applied: Bool, ms: Int, reason: String?)
@@ -233,6 +237,22 @@ enum EngineEvent {
             return .reprocessFailed(
                 id: (object["id"] as? NSNumber)?.int64Value,
                 error: object["error"] as? String ?? "reprocess failed",
+                code: object["code"] as? String ?? "failed")
+        case "text_formatted":
+            guard let requestID = object["request_id"] as? String, !requestID.isEmpty,
+                  let raw = object["raw"] as? String,
+                  let text = object["text"] as? String,
+                  let mode = object["mode"] as? String else { return .unknown(object) }
+            return .textFormatted(requestID: requestID, result: TextFormattingResult(
+                raw: raw, text: text, mode: mode,
+                reason: object["reason"] as? String ?? "unknown",
+                cleanupApplied: object["cleanup_applied"] as? Bool ?? false,
+                cleanupMs: object["cleanup_ms"] as? Int ?? 0))
+        case "text_format_failed":
+            guard let requestID = object["request_id"] as? String, !requestID.isEmpty
+            else { return .unknown(object) }
+            return .textFormatFailed(requestID: requestID,
+                error: object["error"] as? String ?? "Could not format this text.",
                 code: object["code"] as? String ?? "failed")
         case "edited":
             return .edited(

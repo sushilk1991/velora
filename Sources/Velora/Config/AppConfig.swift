@@ -906,12 +906,38 @@ final class AppConfig {
            action != table[.stream] {
             table[.action] = action
         }
+        if secondDictationEnabled, secondDictationHotkey != dictation,
+           !table.values.contains(secondDictationHotkey) {
+            table[.alternateDictation] = secondDictationHotkey
+        }
         return table
+    }
+
+    var secondDictationHotkey: Hotkey {
+        get { readSetting(\.shortcuts.secondDictation) }
+        set { updateSettings { $0.shortcuts.secondDictation = newValue } }
+    }
+    var secondDictationEnabled: Bool {
+        get { readSetting(\.shortcuts.secondDictationEnabled) }
+        set { updateSettings { $0.shortcuts.secondDictationEnabled = newValue } }
     }
 
     var hotkeyMode: HotkeyMode {
         get { readSetting(\.shortcuts.behavior) }
         set { updateSettings { $0.shortcuts.behavior = newValue } }
+    }
+
+    var dictationDelivery: DictationDelivery {
+        get { readSetting(\.dictation.delivery) }
+        set { updateSettings { $0.dictation.delivery = newValue } }
+    }
+    var removeHesitations: Bool {
+        get { readSetting(\.dictation.removeHesitations) }
+        set { updateSettings { $0.dictation.removeHesitations = newValue }; writeEngineConfig() }
+    }
+    var showLiveWords: Bool {
+        get { readSetting(\.dictation.showLiveWords) }
+        set { updateSettings { $0.dictation.showLiveWords = newValue } }
     }
 
     var soundsEnabled: Bool {
@@ -1431,6 +1457,7 @@ final class AppConfig {
             payload["stt_model"] = self.sttModel
             payload["language_scope"] = self.languageScope
             payload["language"] = self.language
+            payload["remove_hesitations"] = self.removeHesitations
             payload["auto_punctuation"] = self.autoPunctuation
             payload["save_audio"] = self.saveAudio
             payload["romanize_output"] = self.romanizeOutput

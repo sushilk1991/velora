@@ -656,7 +656,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             recents: { [weak self] in self?.history.recent(limit: 10) ?? [] },
             toggleDictation: { [weak self] in self?.dictation.toggleFromMenu() },
             stopMeeting: { [weak self] in self?.meetingCoordinator.stopRecording() },
-            openMain: { [weak self] in self?.showMain(selecting: .home) })
+            openMain: { [weak self] in self?.showMain(selecting: .home) },
+            fixRecent: { [weak self] record in
+                HistoryViewModel.requestReveal(record.id)
+                self?.showMain(selecting: .history)
+            })
         hudPrefsObserver = NotificationCenter.default.addObserver(
             forName: .veloraHUDPrefsChanged, object: nil, queue: .main
         ) { [weak self] _ in self?.hud.applyPreferences() }
@@ -1162,7 +1166,9 @@ extension AppDelegate: StatusItemControllerDelegate {
     }
 
     func statusItemReformatLast(mode: String) {
-        dictation.reformatLast(mode: mode)
+        guard let record = history.recent(limit: 1).first else { return }
+        HistoryViewModel.requestReformat(record.id, mode: mode)
+        showMain(selecting: .history)
     }
 
     func statusItemTranscribeFile() {

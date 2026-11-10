@@ -46,6 +46,9 @@ struct DictationRecord {
     var cleanupApplied: Bool? = nil
     var failedWindowCount = 0
     var failedWindowS = 0.0
+    /// Incremented by every transcript rewrite; protects delayed editors and previews.
+    var transcriptRevision: Int64 = 0
+    var previousFinal: String? = nil
 }
 
 /// Velora's own rows. A Home take has no target app, so History files it
@@ -190,6 +193,8 @@ final class HistoryStore {
             ("cleanup_wall_ms", "INTEGER"),
             ("failed_window_count", "INTEGER"),
             ("failed_window_s", "REAL"),
+            ("transcript_revision", "INTEGER NOT NULL DEFAULT 0"),
+            ("previous_final", "TEXT"),
         ]
         for (name, declaration) in additions where !existing.contains(name) {
             if sqlite3_exec(
@@ -332,7 +337,8 @@ final class HistoryStore {
                 mode = ?, duration_ms = ?, cleanup_ms = ?, audio_path = ?,
                 stt_ms = ?, cleanup_applied = ?, finalization_ms = ?,
                 cleanup_wall_ms = ?, failed_window_count = ?,
-                failed_window_s = ? WHERE session_id = ?;
+                failed_window_s = ?, transcript_revision = transcript_revision + 1,
+                previous_final = NULL WHERE session_id = ? AND transcript_revision = 0;
             """
         var stmt: OpaquePointer?
         guard sqlite3_prepare_v2(db, sql, -1, &stmt, nil) == SQLITE_OK else {
@@ -460,10 +466,11 @@ final class HistoryStore {
     @discardableResult
     func updateAfterReprocess(
         id: Int64, raw: String, final: String, mode: String?,
-        sttMs: Int, cleanupMs: Int, cleanupApplied: Bool, cleanupWallMs: Int?
+        sttMs: Int, cleanupMs: Int, cleanupApplied: Bool, cleanupWallMs: Int?,
+        expected: DictationRecord? = nil
     ) -> Bool {
         queue.sync { [self] in
-            guard db != nil else { return false }
+            guard db != nil, expected == nil || expected?.id == id else { return false }
             return updateTranscriptOnQueue(id: id) {
                 // A reprocess replaces the measured output, so its latency and
                 // cleanup fields replace the old run too. Any prior edit-quality
@@ -473,8 +480,9 @@ final class HistoryStore {
                     SET raw = ?, final = ?, mode = ?, stt_ms = ?, cleanup_ms = ?,
                         cleanup_applied = ?, cleanup_wall_ms = ?,
                         finalization_ms = NULL, quality_state = NULL,
-                        failed_window_count = 0, failed_window_s = 0
-                    WHERE id = ?;
+                        failed_window_count = 0, failed_window_s = 0,
+                        transcript_revision = transcript_revision + 1, previous_final = NULL
+                    WHERE id = ? AND (? IS NULL OR transcript_revision = ?);
                     """
                 var stmt: OpaquePointer?
                 guard sqlite3_prepare_v2(db, sql, -1, &stmt, nil) == SQLITE_OK else {
@@ -493,6 +501,10 @@ final class HistoryStore {
                     sqlite3_bind_null(stmt, 7)
                 }
                 sqlite3_bind_int64(stmt, 8, id)
+                if let expected {
+                    sqlite3_bind_int64(stmt, 9, expected.transcriptRevision)
+                    sqlite3_bind_int64(stmt, 10, expected.transcriptRevision)
+                } else { sqlite3_bind_null(stmt, 9); sqlite3_bind_null(stmt, 10) }
                 if sqlite3_step(stmt) != SQLITE_DONE {
                     NSLog("Velora: history update failed: %@", lastError)
                     return false
@@ -502,25 +514,73 @@ final class HistoryStore {
         }
     }
 
-    /// Replaces a row's final text after a manual edit in the History tab.
-    /// The stored quality verdict described the old text and must not survive.
+    /// Legacy programmatic edit. Interactive editors use the snapshot overload.
     @discardableResult
     func updateFinal(id: Int64, final: String) -> Bool {
+        queue.sync { [self] in updateFinalOnQueue(id: id, final: final, expected: nil) }
+    }
+
+    /// Compare-and-swap edit: a stale sheet cannot replace a newer edit, an
+    /// audio reprocess, a reconnect completion, or a deleted/recreated record.
+    @discardableResult
+    func updateFinal(expected: DictationRecord, final: String) -> Bool {
+        queue.sync { [self] in updateFinalOnQueue(id: expected.id, final: final, expected: expected) }
+    }
+
+    private func updateFinalOnQueue(id: Int64, final: String, expected: DictationRecord?) -> Bool {
+        guard db != nil, !final.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else { return false }
+        return updateTranscriptOnQueue(id: id) {
+            let sql = """
+                UPDATE dictations SET previous_final = final, final = ?, quality_state = NULL,
+                    transcript_revision = transcript_revision + 1
+                WHERE id = ? AND (? IS NULL OR (transcript_revision = ? AND raw = ? AND final = ?));
+                """
+            var stmt: OpaquePointer?
+            guard sqlite3_prepare_v2(db, sql, -1, &stmt, nil) == SQLITE_OK else { return false }
+            defer { sqlite3_finalize(stmt) }
+            bindText(stmt, 1, final)
+            sqlite3_bind_int64(stmt, 2, id)
+            if let expected {
+                sqlite3_bind_int64(stmt, 3, expected.transcriptRevision)
+                sqlite3_bind_int64(stmt, 4, expected.transcriptRevision)
+                bindText(stmt, 5, expected.raw)
+                bindText(stmt, 6, expected.final)
+            } else {
+                for index in Int32(3)...Int32(6) { sqlite3_bind_null(stmt, index) }
+            }
+            return sqlite3_step(stmt) == SQLITE_DONE && sqlite3_changes(db) == 1
+        }
+    }
+
+    @discardableResult
+    func undoFinal(expected: DictationRecord) -> Bool {
         queue.sync { [self] in
-            guard db != nil else { return false }
-            return updateTranscriptOnQueue(id: id) {
-                let sql = "UPDATE dictations SET final = ?, quality_state = NULL WHERE id = ?;"
+            guard db != nil, expected.previousFinal != nil else { return false }
+            return updateTranscriptOnQueue(id: expected.id) {
+                let sql = """
+                    UPDATE dictations SET final = previous_final, previous_final = NULL,
+                        transcript_revision = transcript_revision + 1, quality_state = NULL
+                    WHERE id = ? AND transcript_revision = ? AND previous_final IS NOT NULL;
+                    """
                 var stmt: OpaquePointer?
                 guard sqlite3_prepare_v2(db, sql, -1, &stmt, nil) == SQLITE_OK else { return false }
                 defer { sqlite3_finalize(stmt) }
-                bindText(stmt, 1, final)
-                sqlite3_bind_int64(stmt, 2, id)
-                if sqlite3_step(stmt) != SQLITE_DONE {
-                    NSLog("Velora: history edit failed: %@", lastError)
-                    return false
-                }
-                return sqlite3_changes(db) == 1
+                sqlite3_bind_int64(stmt, 1, expected.id)
+                sqlite3_bind_int64(stmt, 2, expected.transcriptRevision)
+                return sqlite3_step(stmt) == SQLITE_DONE && sqlite3_changes(db) == 1
             }
+        }
+    }
+
+    func record(id: Int64) -> DictationRecord? {
+        queue.sync { [self] in
+            guard db != nil else { return nil }
+            var stmt: OpaquePointer?
+            guard sqlite3_prepare_v2(db, "SELECT \(Self.selectColumns) FROM dictations WHERE id = ?;",
+                                    -1, &stmt, nil) == SQLITE_OK else { return nil }
+            defer { sqlite3_finalize(stmt) }
+            sqlite3_bind_int64(stmt, 1, id)
+            return decodeRows(stmt).first
         }
     }
 
@@ -621,7 +681,7 @@ final class HistoryStore {
     private static let selectColumns =
         "id, ts, bundle_id, app_name, raw, final, mode, duration_ms, cleanup_ms, audio_path, " +
         "session_id, stt_ms, cleanup_applied, finalization_ms, cleanup_wall_ms, " +
-        "failed_window_count, failed_window_s"
+        "failed_window_count, failed_window_s, transcript_revision, previous_final"
 
     /// Most recent dictations, newest first. Synchronous — called on menu
     /// open with tiny result sets.
@@ -1251,6 +1311,8 @@ final class HistoryStore {
                     ? nil : sqlite3_column_int(stmt, 12) != 0)
             record.failedWindowCount = Int(sqlite3_column_int64(stmt, 15))
             record.failedWindowS = sqlite3_column_double(stmt, 16)
+            record.transcriptRevision = sqlite3_column_int64(stmt, 17)
+            record.previousFinal = columnText(stmt, 18)
             record.id = sqlite3_column_int64(stmt, 0)
             records.append(record)
         }

@@ -141,6 +141,7 @@ struct SettingsSearchBox: View {
 /// first-day user reaches for. Everything operational moved to Advanced.
 struct GeneralSettingsView: View {
     @ObservedObject var model: SettingsModel
+    private let previewSounds = SoundPlayer()
 
     var body: some View {
         Form {
@@ -154,6 +155,13 @@ struct GeneralSettingsView: View {
                 .pickerStyle(.segmented)
                 Toggle("Launch Velora at login", isOn: $model.launchAtLogin)
                 Toggle("Play sounds", isOn: $model.soundsEnabled)
+                if model.soundsEnabled {
+                    LabeledContent("Sound volume") {
+                        Slider(value: $model.soundVolume, in: 0...100)
+                            .frame(maxWidth: 180).accessibilityLabel("Sound volume")
+                    }
+                    Button("Preview sound") { previewSounds.play(.start) }
+                }
             }
             Section {
                 Picker("Show pill", selection: pillVisibility) {
@@ -344,6 +352,14 @@ struct DictationSettingsView: View {
             } footer: {
                 SettingsFooter("Velora keeps using this microphone when AirPods or another input connect.")
             }
+            Section("Delivery") {
+                Picker("Result", selection: $model.dictationDelivery) {
+                    ForEach(DictationDelivery.allCases) { choice in Text(choice.title).tag(choice) }
+                }
+                Text("If insertion is blocked, your words stay on the clipboard. A copy you make during delivery always wins.")
+                    .font(.caption).foregroundStyle(.secondary)
+                Toggle("Show provisional words while speaking", isOn: $model.showLiveWords)
+            }
             Section("Writing") {
                 Toggle(isOn: Binding(
                     get: { !model.cleanupEnabled },
@@ -355,6 +371,8 @@ struct DictationSettingsView: View {
                             .foregroundStyle(.secondary)
                     }
                 }
+                Toggle("Remove hesitation sounds without AI rewriting", isOn: $model.removeHesitations)
+                    .help("Removes standalone um and uh in Fast dictation. As Heard, quoted text, and technical modes keep their words.")
                 Toggle("Automatic punctuation", isOn: $model.autoPunctuation)
                     .disabled(!model.cleanupEnabled)
                 Toggle(isOn: $model.voiceCommands) {
@@ -448,6 +466,9 @@ struct ModelSettingsView: View {
     @State private var cachedModels: [ModelStorage.CachedModel] = []
     @State private var changing: Slot?
     @State private var removalCandidate: String?
+    @State private var modelSearch = ""
+    @State private var installedOnly = false
+    @State private var modelSort = "recommended"
 
     /// Which "Change…" is unfolded (at most one at a time).
     private enum Slot { case speech, cleanup }
@@ -667,7 +688,21 @@ struct ModelSettingsView: View {
             }
         }
         if changing == slot {
-            ForEach(choices) { choice in
+            TextField("Search models or languages", text: $modelSearch)
+                .textFieldStyle(.roundedBorder)
+            HStack {
+                Toggle("Installed only", isOn: $installedOnly)
+                Picker("Sort", selection: $modelSort) {
+                    Text("Recommended").tag("recommended")
+                    Text("Name").tag("name")
+                    Text("Download size").tag("size")
+                }.frame(maxWidth: 220)
+            }
+            let visibleChoices = filteredChoices(choices, selection: selection.wrappedValue, slot: slot)
+            if visibleChoices.isEmpty {
+                Text("No models match. Clear the search or show all models.").foregroundStyle(.secondary)
+            }
+            ForEach(visibleChoices) { choice in
                 Button {
                     selection.wrappedValue = choice.id
                 } label: {
@@ -696,6 +731,25 @@ struct ModelSettingsView: View {
                 .disabled(!model.downloads.isCurrent)
                 .padding(.leading, VeloraSpacing.l)
             }
+        }
+    }
+
+    private func filteredChoices(_ choices: [Choice], selection: String, slot: Slot) -> [Choice] {
+        let cached = Set(cachedModels.map(\.id))
+        let query = modelSearch.trimmingCharacters(in: .whitespacesAndNewlines)
+        let recommended = slot == .speech ? model.recommendedSTTModel : model.recommendedCleanupModel
+        return choices.filter { choice in
+            (!installedOnly || cached.contains(choice.id) || choice.id == selection)
+                && (query.isEmpty || (choice.name + " " + choice.detail).localizedCaseInsensitiveContains(query))
+        }.sorted { lhs, rhs in
+            if modelSort == "size" {
+                let left = ModelChoiceOrder.downloadBytes(lhs.size)
+                let right = ModelChoiceOrder.downloadBytes(rhs.size)
+                if left != right { return left < right }
+            } else if modelSort == "recommended", (lhs.id == recommended) != (rhs.id == recommended) {
+                return lhs.id == recommended
+            }
+            return lhs.name.localizedStandardCompare(rhs.name) == .orderedAscending
         }
     }
 
@@ -926,6 +980,19 @@ struct ShortcutsSettingsView: View {
                 featureLabel(
                     "Dictation",
                     caption: "Press your shortcut and speak, anywhere you can type. Esc cancels.")
+            }
+            Toggle("Use a second dictation shortcut", isOn: $model.secondDictationEnabled)
+            if model.secondDictationEnabled {
+                shortcutRow(for: "Second dictation shortcut", hotkey: $model.secondDictationHotkey)
+                if model.secondDictationConflict {
+                    conflictLabel("Choose a shortcut that is not assigned to another feature.")
+                }
+            }
+            Button("Restore dictation shortcut defaults") {
+                model.hotkey = .rightOption
+                model.secondDictationEnabled = false
+                model.secondDictationHotkey = .f19
+                model.hotkeyMode = .hold
             }
             Picker("When pressed", selection: $model.hotkeyMode) {
                 ForEach(HotkeyMode.allCases) { mode in

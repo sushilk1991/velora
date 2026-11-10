@@ -468,6 +468,8 @@ final class SettingsModel: ObservableObject {
         actionsEnabled = config.actionsEnabled
         backgroundActions = config.backgroundActions
         voiceEdit = config.voiceEdit
+        secondDictationHotkey = config.secondDictationHotkey
+        secondDictationEnabled = config.secondDictationEnabled
         hotkeyMode = config.hotkeyMode
         inputDeviceUID = config.inputDeviceUID
         soundsEnabled = config.soundsEnabled
@@ -476,6 +478,9 @@ final class SettingsModel: ObservableObject {
         hudAlwaysVisible = config.hudAlwaysVisible
         hudVisible = config.hudVisible
         appearance = config.appearance
+        dictationDelivery = config.dictationDelivery
+        removeHesitations = config.removeHesitations
+        showLiveWords = config.showLiveWords
         language = config.language
         cleanupEnabled = config.cleanupEnabled
         languageScope = config.languageScope
@@ -659,8 +664,13 @@ final class SettingsModel: ObservableObject {
         actionsEnabled = imported.shortcuts.actionsEnabled
         backgroundActions = imported.shortcuts.backgroundActions
         voiceEdit = imported.shortcuts.voiceEdit
+        secondDictationHotkey = imported.shortcuts.secondDictation
+        secondDictationEnabled = imported.shortcuts.secondDictationEnabled
         hotkeyMode = imported.shortcuts.behavior
 
+        dictationDelivery = imported.dictation.delivery
+        removeHesitations = imported.dictation.removeHesitations
+        showLiveWords = imported.dictation.showLiveWords
         language = imported.dictation.language
         cleanupEnabled = imported.engine.cleanupEnabled
         autoPunctuation = imported.dictation.autoPunctuation
@@ -836,6 +846,39 @@ final class SettingsModel: ObservableObject {
             guard inputDeviceUID != oldValue else { return }
             config.inputDeviceUID = inputDeviceUID
         }
+    }
+
+    @Published var secondDictationHotkey: Hotkey = .f19 {
+        didSet {
+            guard !applyingImportedSettings else { return }
+            config.secondDictationHotkey = secondDictationHotkey
+            NotificationCenter.default.post(name: .veloraHotkeyChanged, object: nil)
+        }
+    }
+    @Published var secondDictationEnabled: Bool = false {
+        didSet {
+            guard !applyingImportedSettings else { return }
+            config.secondDictationEnabled = secondDictationEnabled
+            NotificationCenter.default.post(name: .veloraHotkeyChanged, object: nil)
+        }
+    }
+    var secondDictationConflict: Bool {
+        secondDictationEnabled && ([hotkey, editHotkey, proofreadHotkey, streamTypingHotkey, actionHotkey]
+            .contains(secondDictationHotkey))
+    }
+
+    @Published var dictationDelivery: DictationDelivery = .pasteAndKeep {
+        didSet { if !applyingImportedSettings { config.dictationDelivery = dictationDelivery } }
+    }
+    @Published var removeHesitations: Bool = false {
+        didSet {
+            guard !applyingImportedSettings else { return }
+            config.removeHesitations = removeHesitations
+            supervisor?.send(["cmd": "reload_config"])
+        }
+    }
+    @Published var showLiveWords: Bool = false {
+        didSet { if !applyingImportedSettings { config.showLiveWords = showLiveWords } }
     }
 
     @Published var language: String {

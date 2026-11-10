@@ -8,6 +8,7 @@ extension Notification.Name {
     static let veloraEngineStatus = Notification.Name("VeloraEngineStatus")
     /// A `reprocessed` reply arrived. `object` is the `EngineEvent.reprocessed`.
     static let veloraEngineReprocessed = Notification.Name("VeloraEngineReprocessed")
+    static let veloraEngineTextFormatted = Notification.Name("VeloraEngineTextFormatted")
     /// First-run setup progress changed. `userInfo["status"]` is the display
     /// string ("Downloading the speech model (1.6 GB): 42%") and
     /// `userInfo["fraction"]` is a typed 0…1 value when measurable. Both are
@@ -755,6 +756,8 @@ final class EngineSupervisor: NSObject, EngineClientDelegate {
                 name: .veloraEngineStatus, object: nil, userInfo: ["payload": payload])
         case .reprocessed, .reprocessFailed:
             NotificationCenter.default.post(name: .veloraEngineReprocessed, object: event)
+        case .textFormatted, .textFormatFailed:
+            NotificationCenter.default.post(name: .veloraEngineTextFormatted, object: event)
         default:
             break
         }

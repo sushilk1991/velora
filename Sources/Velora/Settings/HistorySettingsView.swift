@@ -3,6 +3,10 @@ import AVFoundation
 import Combine
 import SwiftUI
 
+extension Notification.Name {
+    static let veloraHistoryRevealRequested = Notification.Name("VeloraHistoryRevealRequested")
+}
+
 enum HistoryClearPolicy {
     static let confirmationMessage =
         "This permanently deletes every saved transcript and its archived audio. This can't be undone."
@@ -37,6 +41,8 @@ final class HistoryViewModel: ObservableObject {
 
     private let history: HistoryStore
     private weak var supervisor: EngineSupervisor?
+    private let textFormatter: TextFormattingClient
+    private var reprocessSnapshots: [Int64: DictationRecord] = [:]
     private var reprocessObserver: NSObjectProtocol?
     private var searchObserver: AnyCancellable?
     private var player: AVAudioPlayer?
@@ -51,6 +57,18 @@ final class HistoryViewModel: ObservableObject {
     /// rebuilds this model on every visit, so the request is static and
     /// one-shot.
     private static var pendingReveal: Int64?
+    private static var pendingReformat: (Int64, String)?
+
+    static func requestReformat(_ id: Int64, mode: String) {
+        pendingReformat = (id, mode)
+        requestReveal(id)
+    }
+
+    static func consumeReformat(_ id: Int64) -> String? {
+        guard pendingReformat?.0 == id else { return nil }
+        defer { pendingReformat = nil }
+        return pendingReformat?.1
+    }
 
     private static let pageSize = 50
     /// Most rows the app-name / month-count scan reads (newest first) so a
@@ -68,6 +86,7 @@ final class HistoryViewModel: ObservableObject {
     ) {
         self.history = history
         self.supervisor = supervisor
+        textFormatter = TextFormattingClient(supervisor: supervisor)
         modeNames = Self.modeNames(in: modesDirectory)
         reprocessObserver = NotificationCenter.default.addObserver(
             forName: .veloraEngineReprocessed, object: nil, queue: .main
@@ -116,6 +135,9 @@ final class HistoryViewModel: ObservableObject {
     /// Asks the next History pane to open `id` expanded.
     static func requestReveal(_ id: Int64) {
         pendingReveal = id
+        DispatchQueue.main.async {
+            NotificationCenter.default.post(name: .veloraHistoryRevealRequested, object: nil)
+        }
     }
 
     /// Opens the requested entry once, after the pane's first reload (which
@@ -254,29 +276,44 @@ final class HistoryViewModel: ObservableObject {
     func saveEdit(_ record: DictationRecord, newText: String, completion: @escaping (Bool) -> Void) {
         let trimmed = newText.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !trimmed.isEmpty else { completion(false); return }
-        guard trimmed != record.final else { completion(true); return }
+        guard trimmed != record.final else {
+            completion(history.record(id: record.id)?.transcriptRevision == record.transcriptRevision)
+            return
+        }
         let store = history
         DispatchQueue.global(qos: .userInitiated).async { [weak self] in
-            let saved = store.updateFinal(id: record.id, final: trimmed)
+            let saved = store.updateFinal(expected: record, final: trimmed)
+            let refreshed = saved ? store.record(id: record.id) : nil
             DispatchQueue.main.async {
-                if saved, let self, let index = self.records.firstIndex(where: { $0.id == record.id }) {
-                    let old = self.records[index]
-                    self.records[index] = DictationRecord(
-                        id: old.id, timestamp: old.timestamp, bundleID: old.bundleID,
-                        appName: old.appName, raw: old.raw, final: trimmed,
-                        mode: old.mode, durationMs: old.durationMs,
-                        cleanupMs: old.cleanupMs, cleanupWallMs: old.cleanupWallMs,
-                        finalizationMs: old.finalizationMs,
-                        audioPath: old.audioPath,
-                        sessionID: old.sessionID, sttMs: old.sttMs,
-                        cleanupApplied: old.cleanupApplied)
+                if let refreshed, let self,
+                   let index = self.records.firstIndex(where: { $0.id == record.id }) {
+                    self.records[index] = refreshed
                 }
                 completion(saved)
             }
         }
     }
 
+    @discardableResult
+    func formatText(_ record: DictationRecord, mode: String,
+                    completion: @escaping (Result<TextFormattingResult, TextFormattingFailure>) -> Void) -> String? {
+        textFormatter.format(record.raw.isEmpty ? record.final : record.raw,
+            modeName: mode, bundleID: record.targetBundleID, appName: record.targetAppName,
+            completion: completion)
+    }
+
+    func cancelFormat(_ id: String) { textFormatter.cancel(id) }
+
+    func undoEdit(_ record: DictationRecord) {
+        guard history.undoFinal(expected: record), let refreshed = history.record(id: record.id),
+              let index = records.firstIndex(where: { $0.id == record.id }) else { return }
+        records[index] = refreshed
+    }
+
     func delete(_ record: DictationRecord) {
+        reprocessSnapshots.removeValue(forKey: record.id)
+        inFlight.remove(record.id)
+        reprocessGen[record.id] = (reprocessGen[record.id] ?? 0) + 1
         history.delete(id: record.id)
         records.removeAll { $0.id == record.id }
         isEmpty = records.isEmpty
@@ -286,6 +323,8 @@ final class HistoryViewModel: ObservableObject {
 
     func clearAll() {
         stopPlayback()
+        reprocessSnapshots.removeAll()
+        inFlight.removeAll()
         history.deleteAll()
         records = []
         hasMore = false
@@ -307,6 +346,7 @@ final class HistoryViewModel: ObservableObject {
         reprocessGen[id] = gen
         failed.remove(id)
         inFlight.insert(id)
+        reprocessSnapshots[id] = record
         supervisor?.send(reprocessCommand(record: record, audio: audio, sttModel: sttModel, mode: mode))
 
         // A stable failure normally clears this immediately; retain a timeout
@@ -314,6 +354,7 @@ final class HistoryViewModel: ObservableObject {
         DispatchQueue.main.asyncAfter(deadline: .now() + Self.reprocessTimeout) { [weak self] in
             guard let self, self.reprocessGen[id] == gen, self.inFlight.contains(id) else { return }
             self.inFlight.remove(id)
+            self.reprocessSnapshots.removeValue(forKey: id)
             self.failed.insert(id)
         }
     }
@@ -335,31 +376,25 @@ final class HistoryViewModel: ObservableObject {
         id: Int64?, raw: String, text: String, mode: String?,
         sttMs: Int, cleanupMs: Int, cleanupApplied: Bool, cleanupWallMs: Int?
     ) {
-        guard let id else { return }
-        history.updateAfterReprocess(
+        guard let id, inFlight.contains(id), let snapshot = reprocessSnapshots.removeValue(forKey: id)
+        else { return }
+        let saved = history.updateAfterReprocess(
             id: id, raw: raw, final: text, mode: mode,
             sttMs: sttMs, cleanupMs: cleanupMs, cleanupApplied: cleanupApplied,
-            cleanupWallMs: cleanupWallMs)
-        if let index = records.firstIndex(where: { $0.id == id }) {
-            let old = records[index]
-            records[index] = DictationRecord(
-                id: old.id, timestamp: old.timestamp, bundleID: old.bundleID,
-                appName: old.appName, raw: raw, final: text,
-                mode: mode ?? old.mode, durationMs: old.durationMs,
-                cleanupMs: cleanupMs, cleanupWallMs: cleanupWallMs,
-                finalizationMs: nil,
-                audioPath: old.audioPath,
-                sessionID: old.sessionID, sttMs: sttMs,
-                cleanupApplied: cleanupApplied)
+            cleanupWallMs: cleanupWallMs, expected: snapshot)
+        if let refreshed = history.record(id: id),
+           let index = records.firstIndex(where: { $0.id == id }) {
+            records[index] = refreshed
         }
         // A later request supersedes this reply's pending timeout.
         reprocessGen[id] = (reprocessGen[id] ?? 0) + 1
         inFlight.remove(id)
-        failed.remove(id)
+        if saved { failed.remove(id) } else { failed.insert(id) }
     }
 
     private func applyReprocessFailed(id: Int64?) {
-        guard let id else { return }
+        guard let id, inFlight.contains(id) else { return }
+        reprocessSnapshots.removeValue(forKey: id)
         reprocessGen[id] = (reprocessGen[id] ?? 0) + 1
         inFlight.remove(id)
         failed.insert(id)
@@ -636,6 +671,7 @@ struct HistoryHeaderControls: View {
 ///     Yesterday.    …
 struct HistorySettingsView: View {
     @ObservedObject var model: SettingsModel
+    private let onEditStyle: () -> Void
     @StateObject private var vm: HistoryViewModel
     @State private var showClearConfirm = false
 
@@ -647,14 +683,17 @@ struct HistorySettingsView: View {
     /// the gap between them stays tight.
     private static let entrySpacing: CGFloat = 8
 
-    init(model: SettingsModel, history: HistoryStore, supervisor: EngineSupervisor?) {
+    init(model: SettingsModel, history: HistoryStore, supervisor: EngineSupervisor?,
+         onEditStyle: @escaping () -> Void = {}) {
+        self.onEditStyle = onEditStyle
         self.model = model
         _vm = StateObject(wrappedValue: HistoryViewModel(history: history, supervisor: supervisor))
     }
 
     /// Shell entry point: the window owns one view model shared with
     /// `HistoryHeaderControls`.
-    init(model: SettingsModel, viewModel: HistoryViewModel) {
+    init(model: SettingsModel, viewModel: HistoryViewModel, onEditStyle: @escaping () -> Void = {}) {
+        self.onEditStyle = onEditStyle
         self.model = model
         _vm = StateObject(wrappedValue: viewModel)
     }
@@ -662,6 +701,9 @@ struct HistorySettingsView: View {
     var body: some View {
         content
             .frame(maxWidth: .infinity, maxHeight: .infinity)
+            .onReceive(NotificationCenter.default.publisher(for: .veloraHistoryRevealRequested)) { _ in
+                vm.revealPending()
+            }
             .onAppear {
                 model.requestStatus()
                 vm.reload()  // fresh rows every time the tab appears
@@ -749,7 +791,12 @@ struct HistorySettingsView: View {
                     onToggle: { toggle(record) },
                     onCopy: { vm.copy(record) },
                     onPaste: { vm.pasteAgain(record) },
-                    onEdit: { text, completion in vm.saveEdit(record, newText: text, completion: completion) },
+                    onEdit: { snapshot, text, completion in vm.saveEdit(snapshot, newText: text, completion: completion) },
+                    onUndo: { vm.undoEdit(record) },
+                    onFormat: { snapshot, mode, completion in vm.formatText(snapshot, mode: mode, completion: completion) },
+                    onCancelFormat: vm.cancelFormat,
+                    onEditStyle: onEditStyle,
+                    dictionary: model.dictionary,
                     onReprocess: { stt, mode in vm.reprocess(record, sttModel: stt, mode: mode) },
                     onPlay: { vm.togglePlayback(record) },
                     onDelete: { vm.delete(record) },
@@ -849,7 +896,12 @@ private struct JournalEntry: View {
     let onToggle: () -> Void
     let onCopy: () -> Void
     let onPaste: () -> Void
-    let onEdit: (String, @escaping (Bool) -> Void) -> Void
+    let onEdit: (DictationRecord, String, @escaping (Bool) -> Void) -> Void
+    let onUndo: () -> Void
+    let onFormat: (DictationRecord, String, @escaping (Result<TextFormattingResult, TextFormattingFailure>) -> Void) -> String?
+    let onCancelFormat: (String) -> Void
+    let onEditStyle: () -> Void
+    let dictionary: DictionaryRepository
     let onReprocess: (_ sttModel: String?, _ mode: String?) -> Void
     let onPlay: () -> Void
     let onDelete: () -> Void
@@ -858,6 +910,12 @@ private struct JournalEntry: View {
 
     @State private var copied = false
     @State private var editing = false
+    @State private var editSnapshot: DictationRecord?
+    @State private var reformatting = false
+    @State private var reformatModeOverride: String?
+    @State private var reformatSnapshot: DictationRecord?
+    @State private var rememberedSpellings: [DictionaryRow] = []
+    @State private var spellingMessage: String?
     @State private var editDraft = ""
     @State private var editError: String?
     @State private var editSaving = false
@@ -920,9 +978,35 @@ private struct JournalEntry: View {
             }
         }
         .sheet(isPresented: $editing) { editSheet }
+        .sheet(isPresented: $reformatting) {
+            HistoryReformatSheet(record: reformatSnapshot ?? record, modeNames: modeNames, initialMode: reformatModeOverride,
+                format: onFormat, cancel: onCancelFormat,
+                save: { snapshot, text, completion in onEdit(snapshot, text, completion) })
+        }
         .onAppear(perform: loadTrial)
         .onDisappear { trialLoadGeneration += 1 }
         .onChange(of: trialLookupKey) { _ in loadTrial() }
+        .onReceive(NotificationCenter.default.publisher(for: .veloraHistoryRevealRequested)) { _ in
+            if expanded, let mode = HistoryViewModel.consumeReformat(record.id) {
+                reformatModeOverride = mode
+                reformatSnapshot = record
+                reformatting = true
+            }
+        }
+        .onChange(of: expanded) { isExpanded in
+            if isExpanded, let mode = HistoryViewModel.consumeReformat(record.id) {
+                reformatModeOverride = mode
+                reformatSnapshot = record
+                reformatting = true
+            }
+        }
+        .onAppear {
+            if expanded, let mode = HistoryViewModel.consumeReformat(record.id) {
+                reformatModeOverride = mode
+                reformatSnapshot = record
+                reformatting = true
+            }
+        }
     }
 
     private func loadTrial() {
@@ -1120,11 +1204,34 @@ private struct JournalEntry: View {
                 Button("Insert Again", action: onPaste)
                     .buttonStyle(.capsule)
                     .help("Copy; if the original app is open, switch there and try to paste")
-                Button("Edit") {
+                Button("Fix this") {
+                    editSnapshot = record
                     editDraft = record.final
+                    editError = nil
+                    spellingMessage = nil
+                    rememberedSpellings = []
                     editing = true
                 }
                 .buttonStyle(.capsule)
+                Menu {
+                    Button("Reformat saved text…") {
+                        reformatModeOverride = nil
+                        reformatSnapshot = record
+                        reformatting = true
+                    }
+                    Button("Copy As Heard") {
+                        let pb = NSPasteboard.general
+                        pb.clearContents()
+                        pb.setString(record.raw.isEmpty ? record.final : record.raw, forType: .string)
+                    }
+                    if record.previousFinal != nil {
+                        Button("Undo last correction", action: onUndo)
+                    }
+                    Divider()
+                    Button("Adjust app style in Modes…", action: onEditStyle)
+                } label: { Text("More") }
+                .menuStyle(.borderlessButton)
+                .fixedSize()
             }
             reprocessMenu
             if hasAudio {
@@ -1196,12 +1303,48 @@ private struct JournalEntry: View {
               : "Reprocessing unavailable: no saved audio for this dictation")
     }
 
+    private var spellingSuggestions: some View {
+        VStack(alignment: .leading, spacing: VeloraSpacing.xs) {
+            ForEach(Array(CorrectionDiff.corrections(
+                baseline: (editSnapshot ?? record).final, edited: editDraft).prefix(3).enumerated()), id: \.offset) { _, pair in
+                Button("Remember spelling: \(pair.wrong) → \(pair.right)") {
+                    do {
+                        let row = try dictionary.add(writeAs: pair.right, heardAs: pair.wrong)
+                        rememberedSpellings.append(row)
+                        spellingMessage = "Remembered. You can undo this here or remove it in Dictionary."
+                    } catch { spellingMessage = error.localizedDescription }
+                }
+                .buttonStyle(.link)
+            }
+            if let spellingMessage {
+                HStack {
+                    Text(spellingMessage).font(.caption).foregroundStyle(.secondary)
+                    if let last = rememberedSpellings.last {
+                        Button("Undo") {
+                            do {
+                                try dictionary.remove(id: last.id)
+                                rememberedSpellings.removeLast()
+                                self.spellingMessage = "Spelling removed."
+                            } catch { self.spellingMessage = error.localizedDescription }
+                        }.buttonStyle(.link)
+                    }
+                }
+            }
+        }
+    }
+
     // MARK: Edit sheet
 
     private var editSheet: some View {
         VStack(alignment: .leading, spacing: VeloraSpacing.m) {
-            Text("Edit Transcript")
+            Text("Fix this result")
                 .font(.headline)
+            Text("Save changes to this result. Remembering a spelling is a separate choice.")
+                .font(.caption).foregroundStyle(.secondary)
+            DisclosureGroup("As heard") {
+                Text((editSnapshot ?? record).raw).font(.caption).textSelection(.enabled)
+                    .frame(maxHeight: 80, alignment: .topLeading)
+            }
             if let editError {
                 Text(editError).font(.caption).foregroundStyle(.red)
             }
@@ -1217,6 +1360,7 @@ private struct JournalEntry: View {
                     RoundedRectangle(cornerRadius: VeloraRadius.tile, style: .continuous)
                         .strokeBorder(Color(.separatorColor)))
                 .frame(minHeight: 160)
+            spellingSuggestions
             HStack {
                 Spacer()
                 Button("Cancel") { editing = false }
@@ -1225,13 +1369,13 @@ private struct JournalEntry: View {
                 Button(editSaving ? "Saving…" : "Save") {
                     guard !editSaving else { return }
                     editSaving = true
-                    onEdit(editDraft) { saved in
+                    onEdit(editSnapshot ?? record, editDraft) { saved in
                         editSaving = false
                         if saved {
                             editError = nil
                             editing = false
                         } else {
-                            editError = "Couldn’t save this edit. Your draft is still here; try again."
+                            editError = "This result may have changed or been deleted. Your draft is still here; copy it or reopen the latest result."
                         }
                     }
                 }
@@ -1242,7 +1386,7 @@ private struct JournalEntry: View {
             }
         }
         .padding(VeloraSpacing.xl)
-        .frame(width: 460, height: 280)
+        .frame(width: 560, height: 560)
         .interactiveDismissDisabled(editSaving)
     }
 }

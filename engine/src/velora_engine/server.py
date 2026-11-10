@@ -37,7 +37,7 @@ import numpy as np
 
 from . import (
     __version__, action_fastpath, action_skills, actions, batch_priority,
-    diarization, editing, formatting, models, protocol,
+    diarization, editing, formatting, models, protocol, text_formatting,
 )
 from .audio_store import ActiveAudioSpool, AudioStore
 from .cleanup import (
@@ -651,7 +651,8 @@ class Session:
         self.last_raw_partial = ""
         # Capture the consumer's start-time choice; ordinary sessions retain
         # raw text for cleanup warm-up without projecting or sending drafts.
-        self._partials_enabled = self.context.get("stream_typing") is True
+        self._partials_enabled = (self.context.get("stream_typing") is True
+                                  or self.context.get("preview_only") is True)
         self.cancelled = False
         self.samples = 0
         self.stt_time_s = 0.0
@@ -757,6 +758,8 @@ class Engine:
         # than being refused — the hotkey always wins.
         self._editing = False
         self._edit_cancel = threading.Event()
+        self._format_request_id: str | None = None
+        self._format_task: asyncio.Task[None] | None = None
         # Action Mode planning: same model, same preemption contract as an edit
         # — the user is waiting on it, and a dictation hotkey outranks it.
         self._planning = False
@@ -1783,7 +1786,7 @@ class Engine:
             # Every socket recovery and in-flight abort belongs to this
             # engine. Join them before the audio store and models close.
             pending_jobs = [task for task in (
-                self._cancel_active_task, self._reprocess_task,
+                self._cancel_active_task, self._reprocess_task, self._format_task,
                 *self._interrupted_tasks, *self._cancel_confirm_tasks,
             ) if task is not None]
             for task in pending_jobs:
@@ -2196,6 +2199,12 @@ class Engine:
                 ):
                     self._meeting_transcribe_cancel = True
                     self._meeting_convert_cancel.set()
+            elif cmd == "format_text":
+                await self._cmd_format_text(msg)
+            elif cmd == "format_text_cancel":
+                if (self._format_request_id is not None
+                        and msg.get("request_id") == self._format_request_id):
+                    self._edit_cancel.set()
             elif cmd == "edit_text":
                 await self._cmd_edit_text(msg)
             elif cmd == "edit_cancel":
@@ -2387,7 +2396,8 @@ class Engine:
             # model time. Ordinary dictation keeps the existing final-first
             # latency; Stream Typing alone asks for progressive cursor text.
             if hasattr(self.stt, "preview_enabled"):
-                self.stt.preview_enabled = context.get("stream_typing") is True
+                self.stt.preview_enabled = (context.get("stream_typing") is True
+                                            or context.get("preview_only") is True)
             await self._stt_call(self.stt.start_session)
             if self._start_spool is not None:
                 session.spool = self._start_spool
@@ -3995,19 +4005,22 @@ class Engine:
         entities: list[dict[str, str]] | None = None,
         cancel_event: threading.Event | None = None,
         session: Session | None = None,
+        config_snapshot: Config | None = None,
     ) -> tuple[str, str, int, bool, str]:
         """Run the gate + optional LLM cleanup. Returns
         (text, mode_name, cleanup_ms, cleanup_applied, reason). Shared by live
         finalize and history reprocessing; `session` is the live dictation,
         whose stop-time warm-up the cleanup waits for."""
+        config = config_snapshot or self.config
         gate = formatting.run_gate(
             raw,
-            self.config,
+            config,
             bundle_id=bundle_id,
             app_name=app_name,
             explicit_mode=explicit_mode,
             entities=entities,
         )
+        allowed_terms = list(dict.fromkeys(config.global_vocabulary + list(gate.mode.vocabulary)))
         if not raw.strip():
             return "", gate.mode.name, 0, False, "empty_transcript"
         native_context = None
@@ -4016,7 +4029,7 @@ class Engine:
                 and _cleanup_units(gate.text) <= CLEANUP_SINGLE_CALL_UNITS
                 and not (session is not None and session.chunk_tasks)):
             native_context = build_native_context(
-                gate, self.config, raw, app_name=app_name, entities=entities)
+                gate, config, raw, app_name=app_name, entities=entities)
         desired_loaded = (
             router.native_loaded if router is not None and native_context is not None
             else router.standard.loaded if router is not None
@@ -4045,7 +4058,7 @@ class Engine:
             })
         if gate.use_llm and self.cleanup is not None and cleanup_ready:
             prefix_candidates = formatting.build_prefill_prompt_candidates(
-                self.config,
+                config,
                 bundle_id=bundle_id,
                 app_name=app_name,
                 explicit_mode=explicit_mode,
@@ -4072,7 +4085,7 @@ class Engine:
             if long_text:
                 context = _CleanupContext(
                     gate.system_prompt or STATIC_SYSTEM_PROMPT,
-                    self._allowed_terms(gate.mode),
+                    allowed_terms,
                     prefix_candidates,
                 )
                 result = await self._clean_piece_sequence(
@@ -4104,7 +4117,7 @@ class Engine:
                 )
             else:
                 kwargs = dict(timeout_ms=timeout_ms, cancel_event=cancel_event,
-                    allowed_terms=self._allowed_terms(gate.mode), prefix_candidates=prefix_candidates,
+                    allowed_terms=allowed_terms, prefix_candidates=prefix_candidates,
                     copy_draft=True, queue_timeout_s=queue_timeout_s)
                 if native_context is not None:
                     result = await router.cleanup_dictation(
@@ -4118,7 +4131,7 @@ class Engine:
                 session.cleanup_trial_usage = {
                     "backend": getattr(result, "backend", "standard" if result.applied else "raw"),
                     "attempted_backend": getattr(result, "attempted_backend", "standard"),
-                    "model_identity": getattr(result, "model_identity", self.config.cleanup_model),
+                    "model_identity": getattr(result, "model_identity", config.cleanup_model),
                 }
                 # A one-piece dictation uses the unchanged model call above;
                 # its completion still advances the same app stall detector.
@@ -4613,6 +4626,70 @@ class Engine:
         if old is not None:
             await self._close_stt_backend(old)
         return backend
+
+    # ---------------- saved-text formatting and mode previews ----------------
+
+    async def _text_format_failed(self, request_id: Any, error: str, code: str) -> None:
+        await self._send({"event": "text_format_failed", "request_id": request_id,
+                          "error": error, "code": code})
+
+    async def _cmd_format_text(self, msg: dict[str, Any]) -> None:
+        try:
+            raw, snapshot, mode = text_formatting.preview_input(msg, self.config)
+        except ValueError as exc:
+            await self._text_format_failed(msg.get("request_id"), str(exc), "invalid_arguments")
+            return
+        if (self._adopting or self.session is not None or self._starting or self._finalizing
+                or self._reprocessing or self._transcribing or self._meeting_notes_running
+                or self._editing or self._planning or self._action_session is not None):
+            await self._text_format_failed(msg["request_id"],
+                                           "Velora is busy. Try the preview again shortly.", "busy")
+            return
+        if self._miner_task is not None:
+            self._miner_task.cancel()
+        self._mine_cancel.set()
+        self._cancel_action_cleanup()
+        # Reuse editing's arbitration and preemption: the dictation hotkey
+        # cancels a preview between tokens and continues to own the foreground.
+        self._editing = True
+        self._edit_cancel.clear()
+        self._format_request_id = msg["request_id"]
+        self._format_task = asyncio.create_task(
+            self._run_format_text(dict(msg), raw, snapshot, mode, self._client_gen))
+
+    async def _run_format_text(
+        self, msg: dict[str, Any], raw: str, snapshot: Config, mode: str | None,
+        client_generation: int,
+    ) -> None:
+        request_id = msg["request_id"]
+        try:
+            text, mode_name, cleanup_ms, applied, reason = await self._apply_formatting(
+                raw, bundle_id=msg.get("bundle_id"), app_name=msg.get("app_name"),
+                explicit_mode=mode, cancel_event=self._edit_cancel, config_snapshot=snapshot)
+            if client_generation != self._client_gen:
+                return
+            if self._edit_cancel.is_set() or self.shutdown.is_set():
+                await self._text_format_failed(request_id, "Preview cancelled.", "cancelled")
+                return
+            await self._send({
+                "event": "text_formatted", "request_id": request_id, "raw": raw,
+                "text": text, "mode": mode_name, "cleanup_ms": cleanup_ms,
+                "cleanup_applied": applied, "reason": reason,
+            })
+            self._restart_if_cleanup_unhealthy()
+        except asyncio.CancelledError:
+            self._edit_cancel.set()
+            raise
+        except Exception:
+            log.exception("text formatting failed")
+            if client_generation == self._client_gen:
+                await self._text_format_failed(request_id, "Could not format this text. Try again.", "failed")
+        finally:
+            if self._format_request_id == request_id:
+                self._format_request_id = None
+                self._format_task = None
+                self._editing = False
+            self._schedule_mining()
 
     # ---------------- safe voice edit ----------------
 

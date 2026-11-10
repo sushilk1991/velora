@@ -519,6 +519,8 @@ final class DictationController: NSObject {
     /// Captured by `startRecording`; the final reads this, never the apps
     /// in front at the time.
     private var sessionIntent = DictationIntent(delivery: .frontApp, startedInVelora: false)
+    private var sessionDeliveryPreference: DictationDelivery = .pasteAndKeep
+    private var sessionShowsLiveWords = false
     /// The delivery Retry replays: the last start asked for, set before the
     /// refusals that offer Retry. `sessionIntent` is set only once a take
     /// passes them, so a refused Home start would otherwise retry into the
@@ -2057,26 +2059,8 @@ final class DictationController: NSObject {
             return
         }
         inserter.copyToClipboard(raw)
-        NSLog("Velora: paste last as-heard id=%lld (%d chars)", record.id, raw.count)
-        guard let bundleID = record.targetBundleID,
-              let app = NSRunningApplication.runningApplications(
-                withBundleIdentifier: bundleID).first
-        else { return }
-        app.activate(options: [.activateAllWindows])
-        DispatchQueue.main.asyncAfter(deadline: .now() + 0.2) { [weak self] in
-            guard let self else { return }
-            // Same rails as a live insertion: never synthesize input without
-            // the grant, into a secure field, or into a different app. The
-            // text is already on the clipboard for a manual paste either way.
-            guard Permissions.accessibilityGranted, TextInserter.canPostEvents,
-                  !secureInputActive(),
-                  NSWorkspace.shared.frontmostApplication?.bundleIdentifier == bundleID
-            else {
-                NSLog("Velora: as-heard paste skipped — target not ready (text on clipboard)")
-                return
-            }
-            self.inserter.insert(raw, targetBundleID: bundleID, mode: "Raw")
-        }
+        showNotice(symbol: "doc.on.clipboard.fill", message: "Original words copied")
+
     }
 
     /// Pastes a completed "Reformat Last as…" result back into its origin app.
@@ -2363,6 +2347,8 @@ final class DictationController: NSObject {
         delivery: DictationIntent.Delivery = .frontApp
     ) -> Bool {
         guard !terminating, phase == .idle else { return false }
+        let ordinaryTake = !external && !streamTyping && hudLabel == nil && explicitMode == nil
+        let delivery = ordinaryTake && config.dictationDelivery == .copyOnly ? .clipboardOnly : delivery
         if graceSessionID != nil || cancelGraceSessionID != nil {
             showNotice(symbol: "hourglass", message: "Finishing dictation…")
             return false
@@ -2460,6 +2446,8 @@ final class DictationController: NSObject {
             != ProcessInfo.processInfo.processIdentifier
         let liveExternalApp = liveAppIsExternal ? liveApp : nil
         sessionIntent = DictationIntent(delivery: delivery, startedInVelora: !liveAppIsExternal)
+        sessionDeliveryPreference = ordinaryTake ? config.dictationDelivery : .pasteAndKeep
+        sessionShowsLiveWords = ordinaryTake && config.showLiveWords
         let targetApp = external
             ? nil
             : sessionIntent.targetApp(
@@ -2501,7 +2489,7 @@ final class DictationController: NSObject {
                     // Detected web app (Gmail, Notion…): the chip mirrors the
                     // engine's site→mode refinement instead of saying "Browser".
                     siteSlug: enriched.entities.first { $0.type == "site" }?.value),
-            livePreview: livePreview))
+            livePreview: livePreview || sessionShowsLiveWords))
 
         NSLog(
             "Velora: engine start session=%@ target=%@",
@@ -2514,6 +2502,11 @@ final class DictationController: NSObject {
         if let explicitMode {
             var payload = startCommand["context"] as? [String: Any] ?? [:]
             payload["mode"] = explicitMode
+            startCommand["context"] = payload
+        }
+        if sessionShowsLiveWords {
+            var payload = startCommand["context"] as? [String: Any] ?? [:]
+            payload["preview_only"] = true
             startCommand["context"] = payload
         }
         if streamTyping {
@@ -2950,6 +2943,8 @@ final class DictationController: NSObject {
             // may replace it; the authoritative final still wins below.
             if let stream = streamSession, stream.session == session {
                 stream.draft.update(text, mode: stream.mode)
+            } else if sessionShowsLiveWords {
+                hud.model.liveTranscript = text
             }
 
         case .transcript(let session, let raw, let ms):
@@ -3443,7 +3438,8 @@ final class DictationController: NSObject {
         // rather than copied prose.
         StreamFinalOutputStagingPolicy.stage(
             text, alreadyStaged: finalOutputAlreadyStaged,
-            write: inserter.stageFinalOutput)
+            write: { inserter.stageFinalOutput(
+                $0, restoringPreviousClipboard: sessionDeliveryPreference == .pasteAndRestore) })
         if !finalOutputAlreadyStaged {
             logStopStage(.clipboardStaged, session: sessionID)
         }
@@ -3475,6 +3471,7 @@ final class DictationController: NSObject {
                     finalizationMs: finalizationMs, audio: audio)
             },
             typed: {
+                inserter.restoreClipboardAfterSuccessfulDelivery()
                 logStopStage(.inserted, session: sessionID)
                 NSLog("Velora: insert method=own-window session=%@ chars=%ld", sessionID, text.count)
                 errorRetryAction = nil
@@ -3580,6 +3577,7 @@ final class DictationController: NSObject {
                     message: self.finalNotice("Interrupted. Copied"))
                 return
             }
+            self.inserter.restoreClipboardAfterSuccessfulDelivery()
             self.logStopStage(.inserted, session: session)
             if self.failedWindowCount > 0 {
                 self.showNotice(
@@ -4210,6 +4208,7 @@ extension DictationController: HotkeyMonitorDelegate {
         case .proofread: beginProofreadSession()
         case .stream: streamHotkeyDown()
         case .action: actionHotkeyDown()
+        case .alternateDictation: hotkeyDown()
         }
     }
 
@@ -4219,6 +4218,7 @@ extension DictationController: HotkeyMonitorDelegate {
         case .proofread: break
         case .stream: streamHotkeyUp()
         case .action: actionHotkeyUp()
+        case .alternateDictation: hotkeyUp()
         }
     }
 

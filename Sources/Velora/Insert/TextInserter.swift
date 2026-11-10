@@ -58,6 +58,8 @@ final class TextInserter {
     private static let concealedType = NSPasteboard.PasteboardType("org.nspasteboard.ConcealedType")
 
     private let pasteboard: NSPasteboard
+    private var stagedPreviousClipboard: [NSPasteboardItem]?
+    private var stagedChangeCount: Int?
     private let pasteDeliveryOverride: ((String?, AXUIElement?) -> Bool)?
     private let pasteCommandOverride: (() -> Bool)?
     private let copyCommandOverride: (() -> Bool)?
@@ -325,8 +327,11 @@ final class TextInserter {
     /// best-effort insertion is attempted. The synthesized Command-V path then
     /// snapshots this item and restores the final transcript, not the user's
     /// older clipboard contents.
-    func stageFinalOutput(_ text: String) {
+    func stageFinalOutput(_ text: String, restoringPreviousClipboard: Bool = false) {
+        settlePendingRestore()
+        stagedPreviousClipboard = restoringPreviousClipboard ? Self.snapshotItems(from: pasteboard) : nil
         let changeCount = writeDictation(text, to: pasteboard)
+        stagedChangeCount = changeCount
         NSLog(
             "Velora: staged final output chars=%ld changeCount=%ld",
             text.count, changeCount)
@@ -393,19 +398,38 @@ final class TextInserter {
             return false
         }
 
+        let restoreItems = stagedChangeCount == changeCountBefore
+            ? (stagedPreviousClipboard ?? saved) : saved
+        stagedPreviousClipboard = nil
+        stagedChangeCount = nil
         let work = DispatchWorkItem { [weak self] in
             // Only restore if the pasteboard still holds our write. If the
             // user (or anything else) wrote to it during the window, restoring
             // would clobber their copy — skip entirely.
-            _ = Self.restore(saved, to: pasteboard, ifUnchanged: ourChangeCount)
+            _ = Self.restore(restoreItems, to: pasteboard, ifUnchanged: ourChangeCount)
             if self?.pendingRestore?.changeCount == ourChangeCount {
                 self?.pendingRestore = nil
             }
         }
-        pendingRestore = (saved: saved, changeCount: ourChangeCount, work: work)
+        pendingRestore = (saved: restoreItems, changeCount: ourChangeCount, work: work)
         DispatchQueue.main.asyncAfter(
             deadline: .now() + Self.restoreDelay, execute: work)
         return true
+    }
+
+    /// Own-window and Unicode typing do not use the paste helper's restore.
+    /// A failed delivery never calls this, leaving the result available to paste.
+    func restoreClipboardAfterSuccessfulDelivery() {
+        guard let saved = stagedPreviousClipboard, let count = stagedChangeCount else { return }
+        stagedPreviousClipboard = nil
+        stagedChangeCount = nil
+        let work = DispatchWorkItem { [weak self] in
+            guard let self else { return }
+            _ = Self.restore(saved, to: self.pasteboard, ifUnchanged: count)
+            if self.pendingRestore?.changeCount == count { self.pendingRestore = nil }
+        }
+        pendingRestore = (saved: saved, changeCount: count, work: work)
+        DispatchQueue.main.asyncAfter(deadline: .now() + Self.restoreDelay, execute: work)
     }
 
     /// Runs the last paste's deferred restore now, if it is still waiting.

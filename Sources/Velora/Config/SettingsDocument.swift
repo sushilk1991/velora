@@ -87,6 +87,9 @@ extension SettingsDocument {
 
     struct Dictation: Codable, Equatable {
         var language: String
+        var delivery: DictationDelivery = .pasteAndKeep
+        var removeHesitations: Bool = false
+        var showLiveWords: Bool = false
         var autoPunctuation: Bool
         var saveAudio: Bool
         var romanizeOutput: Bool
@@ -144,6 +147,9 @@ extension SettingsDocument {
         init(from decoder: Decoder) throws {
             let container = try decoder.container(keyedBy: CodingKeys.self)
             language = try container.decode(String.self, forKey: .language)
+            delivery = try container.decodeIfPresent(DictationDelivery.self, forKey: .delivery) ?? .pasteAndKeep
+            removeHesitations = try container.decodeIfPresent(Bool.self, forKey: .removeHesitations) ?? false
+            showLiveWords = try container.decodeIfPresent(Bool.self, forKey: .showLiveWords) ?? false
             autoPunctuation = try container.decode(Bool.self, forKey: .autoPunctuation)
             saveAudio = try container.decode(Bool.self, forKey: .saveAudio)
             romanizeOutput = try container.decode(Bool.self, forKey: .romanizeOutput)
@@ -232,6 +238,8 @@ extension SettingsDocument {
 
     struct Shortcuts: Codable, Equatable {
         var dictation: Hotkey
+        var secondDictation: Hotkey = .f19
+        var secondDictationEnabled: Bool = false
         var editSelection: Hotkey
         var voiceEdit: Bool
         /// One-shot selected-text spelling, punctuation, and grammar repair.
@@ -284,6 +292,8 @@ extension SettingsDocument {
         init(from decoder: Decoder) throws {
             let container = try decoder.container(keyedBy: CodingKeys.self)
             dictation = try container.decode(Hotkey.self, forKey: .dictation)
+            secondDictation = try container.decodeIfPresent(Hotkey.self, forKey: .secondDictation) ?? .f19
+            secondDictationEnabled = try container.decodeIfPresent(Bool.self, forKey: .secondDictationEnabled) ?? false
             editSelection = try container.decode(Hotkey.self, forKey: .editSelection)
             voiceEdit = try container.decode(Bool.self, forKey: .voiceEdit)
             behavior = try container.decode(HotkeyMode.self, forKey: .behavior)
@@ -561,9 +571,15 @@ enum SettingsDocumentCodec {
         // Every binding must differ. The monitor resolves a collision by
         // first-match, so a duplicate binding is not an error the user would
         // ever see — it is a shortcut that silently does something else.
-        let bindings = [value.shortcuts.dictation, value.shortcuts.editSelection,
+        var bindings = [value.shortcuts.dictation, value.shortcuts.editSelection,
                         value.shortcuts.proofreadSelection,
                         value.shortcuts.streamTyping, value.shortcuts.action]
+        if value.shortcuts.secondDictationEnabled {
+            guard value.shortcuts.secondDictation.isValidSettingsHotkey else {
+                throw SettingsDocumentError.invalidValue("second dictation shortcut")
+            }
+            bindings.append(value.shortcuts.secondDictation)
+        }
         for (index, binding) in bindings.enumerated()
         where bindings[(index + 1)...].contains(binding) {
             throw SettingsDocumentError.invalidValue("keyboard shortcuts")
@@ -575,5 +591,20 @@ enum SettingsDocumentCodec {
             && value.unicodeScalars.allSatisfy {
                 !CharacterSet.controlCharacters.contains($0)
             }
+    }
+}
+
+/// Delivery is frozen for each take; old settings keep the existing clipboard behavior.
+enum DictationDelivery: String, Codable, CaseIterable, Identifiable {
+    case pasteAndKeep = "paste_keep"
+    case pasteAndRestore = "paste_restore"
+    case copyOnly = "copy_only"
+    var id: Self { self }
+    var title: String {
+        switch self {
+        case .pasteAndKeep: return "Paste and keep on clipboard"
+        case .pasteAndRestore: return "Paste and restore clipboard"
+        case .copyOnly: return "Copy only"
+        }
     }
 }

@@ -379,7 +379,8 @@ struct MainRootView: View {
                 model: model, selection: selection, history: history,
                 meetings: meetings, actions: actions)
         case .history:
-            HistoryPane(model: model, history: history, supervisor: supervisor)
+            HistoryPane(model: model, history: history, supervisor: supervisor,
+                        onEditStyle: { selection.request(.modes) })
         case .stats:
             StatsPane(model: model, history: history)
         case .meetings:
@@ -404,10 +405,13 @@ struct MainRootView: View {
 /// over the journal. One view model, owned here, feeds both.
 struct HistoryPane: View {
     @ObservedObject var model: SettingsModel
+    var onEditStyle: () -> Void
     @StateObject private var viewModel: HistoryViewModel
 
-    init(model: SettingsModel, history: HistoryStore, supervisor: EngineSupervisor?) {
+    init(model: SettingsModel, history: HistoryStore, supervisor: EngineSupervisor?,
+         onEditStyle: @escaping () -> Void = {}) {
         self.model = model
+        self.onEditStyle = onEditStyle
         _viewModel = StateObject(wrappedValue: HistoryViewModel(history: history, supervisor: supervisor))
     }
 
@@ -416,7 +420,7 @@ struct HistoryPane: View {
             PaneHeader(title: MainPane.history.title) {
                 HistoryHeaderControls(viewModel: viewModel)
             }
-            HistorySettingsView(model: model, viewModel: viewModel)
+            HistorySettingsView(model: model, viewModel: viewModel, onEditStyle: onEditStyle)
         }
     }
 }
