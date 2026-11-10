@@ -4,7 +4,7 @@ import Foundation
 /// runs equivalent to a packaged app without changing Bundle.main's language.
 enum L10n {
     private static let languageLock = NSLock()
-    private static var selectedLanguage: InterfaceLanguage = .system
+    private static var selectedLanguage: InterfaceLanguage = .english
 
     /// Keep text lookup independent of AppConfig's locks and initialization:
     /// even a settings-load error can safely ask for its localized message.
@@ -24,7 +24,7 @@ enum L10n {
         let roots = [Bundle.main.resourceURL,
                      ResourceLocator.repoRoot?.appendingPathComponent("Resources")].compactMap { $0 }
         var result: [String: Bundle] = [:]
-        for language in ["en", "hi", "es"] {
+        for language in ["en", "es"] {
             for root in roots {
                 if let bundle = Bundle(path: root.appendingPathComponent("\(language).lproj").path) {
                     result[language] = bundle

@@ -18318,22 +18318,21 @@ static func testMeetingIntelligence() {
     // Call testInterfacePreferences() from Selftest.run(). No real preferences,
     // microphone, permission probes or sound playback are used here.
     private static func testInterfacePreferences() {
-        expect(InterfaceLanguage.system.resolvedIdentifier(preferredLanguages: ["es-MX", "en-US"]) == "es",
-               "system interface language resolves Spanish regions")
-        expect(InterfaceLanguage.system.resolvedIdentifier(preferredLanguages: ["hi_IN"]) == "hi",
-               "system interface language resolves Hindi regions")
-        expect(InterfaceLanguage.system.resolvedIdentifier(preferredLanguages: ["de-DE"]) == "en",
-               "unsupported system interface language falls back to English")
-        expect(InterfaceLanguage.english.resolvedIdentifier(preferredLanguages: ["hi-IN"]) == "en",
-               "explicit interface language overrides the system language")
-        expect(L10n.text("Settings", language: .hindi) == "सेटिंग्स"
-               && L10n.text("Settings", language: .spanish) == "Ajustes",
-               "Hindi and Spanish catalogs load through actual resource lookup")
+        expect(InterfaceLanguage.allCases == [.english, .spanish],
+               "interface choices are English and Spanish only")
+        expect(InterfaceLanguage.english.resolvedIdentifier() == "en"
+               && InterfaceLanguage.spanish.resolvedIdentifier() == "es",
+               "interface choices do not change the Mac system language")
+        expect(L10n.text("Settings", language: .spanish) == "Ajustes",
+               "Spanish catalog loads through actual resource lookup")
+        expect((try? JSONDecoder().decode(InterfaceLanguage.self, from: Data("\"hi\"".utf8))) == .english
+               && (try? JSONDecoder().decode(InterfaceLanguage.self, from: Data("\"system\"".utf8))) == .english,
+               "removed interface choices migrate to English without blocking saved settings")
         expect(L10n.text("Uncatalogued technical detail", language: .spanish) == "Uncatalogued technical detail",
                "missing translations retain the English source")
         expect(L10n.formatted("Version %@", arguments: ["100% %@"], language: .spanish) == "Versión 100% %@",
                "localized interpolation treats argument percent signs as text")
-        expect(L10n.formatted("Version %@", arguments: ["1", "2"], language: .hindi) == "Version %@",
+        expect(L10n.formatted("Version %@", arguments: ["1", "2"], language: .spanish) == "Version %@",
                "placeholder mismatches safely retain the source format")
         expect(SoundSet.classic.assetName(for: "start") == "start"
                && SoundSet.soft.assetName(for: "stop") == "soft-stop"
@@ -18350,9 +18349,9 @@ static func testMeetingIntelligence() {
             decoder.keyDecodingStrategy = .convertFromSnakeCase
             let legacy = Data(#"{"appearance":"dark","sounds_enabled":true,"sound_volume":73}"#.utf8)
             let general = try decoder.decode(SettingsDocument.General.self, from: legacy)
-            expect(general.interfaceLanguage == .system && general.soundSet == .classic
+            expect(general.interfaceLanguage == .english && general.soundSet == .classic
                    && general.appearance == "dark" && general.soundVolume == 73,
-                   "older settings preserve their values and gain system language plus Classic sounds")
+                   "older settings preserve their values and gain English interface plus Classic sounds")
             var portable = SettingsDocument.defaults
             portable.settings.general.interfaceLanguage = .spanish
             portable.settings.general.soundSet = .chime

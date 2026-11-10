@@ -27,7 +27,7 @@ Generated notes still require review. In this example, a suggestion to add a mic
 
 ## Interface and resource checks
 
-English, Hindi and Spanish have independent interface choices and English fallback. The catalogs cover the selected settings, onboarding, menu, HUD and accessibility surfaces; other panes and some dynamic engine/updater text retain English fallback. Permission descriptions have separate localized InfoPlist strings. All catalogs pass property-list parsing, and translated placeholder counts match.
+English and Spanish have independent interface choices and English fallback. Hindi was removed from the interface at the user's request; this does not remove Hindi speech recognition or the translation capability checked above. The catalogs cover the selected settings, onboarding, menu, HUD and accessibility surfaces; other panes and some dynamic engine/updater text retain English fallback. Permission descriptions have separate localized InfoPlist strings. Catalogs pass property-list parsing, and translated placeholder counts match.
 
 Classic cue files are unchanged. Soft and Chime add six distinct, reproducible local PCM sounds. Preview does not start recording.
 

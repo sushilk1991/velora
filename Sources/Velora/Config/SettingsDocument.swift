@@ -44,14 +44,14 @@ extension SettingsDocument {
         var appearance: String
         var soundsEnabled: Bool
         var soundVolume: Double
-        var interfaceLanguage: InterfaceLanguage = .system
+        var interfaceLanguage: InterfaceLanguage = .english
         var soundSet: SoundSet = .classic
 
         static let defaults = General(
             appearance: "system", soundsEnabled: true, soundVolume: 40)
 
         init(appearance: String, soundsEnabled: Bool, soundVolume: Double,
-             interfaceLanguage: InterfaceLanguage = .system, soundSet: SoundSet = .classic) {
+             interfaceLanguage: InterfaceLanguage = .english, soundSet: SoundSet = .classic) {
             self.appearance = appearance
             self.soundsEnabled = soundsEnabled
             self.soundVolume = soundVolume
@@ -64,7 +64,7 @@ extension SettingsDocument {
             appearance = try container.decode(String.self, forKey: .appearance)
             soundsEnabled = try container.decode(Bool.self, forKey: .soundsEnabled)
             soundVolume = try container.decode(Double.self, forKey: .soundVolume)
-            interfaceLanguage = try container.decodeIfPresent(InterfaceLanguage.self, forKey: .interfaceLanguage) ?? .system
+            interfaceLanguage = try container.decodeIfPresent(InterfaceLanguage.self, forKey: .interfaceLanguage) ?? .english
             soundSet = try container.decodeIfPresent(SoundSet.self, forKey: .soundSet) ?? .classic
         }
     }

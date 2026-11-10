@@ -5,7 +5,7 @@
 	<key>CFBundleDevelopmentRegion</key>
 	<string>en</string>
 	<key>CFBundleLocalizations</key>
-	<array><string>en</string><string>hi</string><string>es</string></array>
+	<array><string>en</string><string>es</string></array>
 	<key>CFBundleDisplayName</key>
 	<string>Velora</string>
 	<key>CFBundleDocumentTypes</key>

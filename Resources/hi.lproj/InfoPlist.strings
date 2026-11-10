@@ -1,5 +1,0 @@
-"CFBundleDisplayName" = "Velora";
-"NSMicrophoneUsageDescription" = "Velora आपकी आवाज़ को टेक्स्ट में बदलने के लिए माइक्रोफ़ोन का उपयोग करता है। ऑडियो इस Mac से बाहर नहीं जाता।";
-"NSAudioCaptureUsageDescription" = "मीटिंग की रिकॉर्डिंग की पुष्टि करने के बाद ही Velora कंप्यूटर का ऑडियो रिकॉर्ड करता है, ताकि इसी Mac पर उसका टेक्स्ट और नोट्स बना सके।";
-"NSCalendarsFullAccessUsageDescription" = "आपकी अनुमति से Velora आने वाले कैलेंडर इवेंट पढ़कर सही समय पर मीटिंग रिकॉर्ड करने का सुझाव देता है। कैलेंडर का डेटा इसी Mac पर रहता है।";
-"NSAppleEventsUsageDescription" = "जब आप ब्राउज़र का संदर्भ पढ़ने या प्लेबैक नियंत्रित करने के लिए कहते हैं, तभी Velora ऐप ऑटोमेशन का उपयोग करता है। सारा काम इसी Mac पर होता है।";

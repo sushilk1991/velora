@@ -2,26 +2,32 @@ import Foundation
 
 /// Interface language is independent of speech recognition and model choice.
 enum InterfaceLanguage: String, Codable, CaseIterable, Identifiable {
-    case system, english = "en", hindi = "hi", spanish = "es"
+    case english = "en", spanish = "es"
 
     var id: String { rawValue }
     var title: String {
         switch self {
-        case .system: return L10n.text("System")
         case .english: return "English"
-        case .hindi: return "हिन्दी"
         case .spanish: return "Español"
         }
     }
 
-    func resolvedIdentifier(preferredLanguages: [String] = Locale.preferredLanguages) -> String {
-        guard self == .system else { return rawValue }
-        for language in preferredLanguages {
-            let base = language.replacingOccurrences(of: "_", with: "-")
-                .split(separator: "-").first.map(String.init)?.lowercased() ?? ""
-            if ["en", "hi", "es"].contains(base) { return base }
+    func resolvedIdentifier() -> String { rawValue }
+
+    init(from decoder: Decoder) throws {
+        let container = try decoder.singleValueContainer()
+        let value = try container.decode(String.self)
+        switch value {
+        case "en", "system", "hi": self = .english
+        case "es": self = .spanish
+        default:
+            throw DecodingError.dataCorruptedError(in: container, debugDescription: "Choose English or Spanish for the interface.")
         }
-        return "en"
+    }
+
+    func encode(to encoder: Encoder) throws {
+        var container = encoder.singleValueContainer()
+        try container.encode(rawValue)
     }
 }
 

@@ -143,6 +143,7 @@ struct SettingsSidebar: View {
 /// One rail row: coloured `IconTile` in the shared `SidebarRowFrame`.
 /// Internal so `--snapshot` renders the real row, selection included.
 struct SettingsSidebarRow: View {
+    @ObservedObject private var interfaceLocale = InterfaceLocale.shared
     let tab: SettingsTab
     @ObservedObject var selection: SettingsWindowSelection
 

@@ -87,7 +87,7 @@ or updates change:
 | Local integrations after revoking a grant | Active requests cancel; final reads recheck access; supplied-only text/file formatting cannot expand private snippets or use personal vocabulary |
 | Mac Shortcuts action catalog in the signed app | Get Last Velora Result, Reformat Text with Velora, Transcribe File with Velora, and Export Velora Meeting appear; cold launch waits for readiness; cancellation releases work; disabled grants remain disabled |
 | Cleanup after a correction, a personal-note save, failed unlink, or socket reconnect | Stale previews preserve newer content; failures retain retry targets; reconnect snapshots preserve active jobs; choosing Forever invalidates an older automatic cleanup preview |
-| Hindi/Spanish interface and each sound set | Speech language stays unchanged; long labels remain usable; English fallback covers missing keys; cue previews never start capture |
+| Spanish interface and each sound set | Speech language stays unchanged; long labels remain usable; English fallback covers missing keys; cue previews never start capture |
 | Proofread a selection in TextEdit, Notes, a Chrome textarea, Gmail compose, Slack, and VS Code | The selection is replaced in place and the HUD shows struck and inserted words; in Terminal or on a static webpage nothing is pasted and the HUD says the text is on the clipboard; a click or key press before the result lands leaves it on the clipboard |
 | Quit during dictation or meeting capture | Capture stops, media state is restored, and recoverable meeting audio is finalized or retained |
 | Signed release DMG | Signature, notarization, staple, Gatekeeper, bundle identity, stripped harness-free executable, and packaged engine/CLI/MCP runtime checks all pass |
