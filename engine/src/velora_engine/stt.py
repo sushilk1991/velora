@@ -1484,6 +1484,32 @@ class WhisperBackend:
                 **options,
             )
 
+    def transcribe_timed(self, audio: np.ndarray, language: str = "auto") -> dict[str, Any]:
+        """One bounded subtitle decode on the existing STT executor.
+
+        Never load/switch/download a model here. The caller owns scheduling
+        and validates the actual aligned words before publishing cues.
+        """
+        from .meeting_subtitles import SUPPORTED_MODELS, SubtitleError
+        if self.model_id not in SUPPORTED_MODELS or not self._loaded:
+            raise SubtitleError("Subtitles currently require the installed full Whisper Turbo speech model. Select it in Models, or export a timed transcript.")
+        if not Path(self._model_path).is_dir():
+            raise SubtitleError("The selected speech model is not available locally. Reopen Models, or export a timed transcript.")
+        import mlx_whisper
+        from mlx_whisper.transcribe import ModelHolder
+        if ModelHolder.model is None or ModelHolder.model_path != self._model_path:
+            raise SubtitleError("The selected Whisper model is not warm. Restart the speech engine and try again, or export a timed transcript.")
+        # The matching warmed holder bypasses even mlx-whisper's internal
+        # model loader, so cache deletion cannot enter its Hub fallback.
+        # Keep translation off: aligned source words
+        # are not timing for a separately translated sentence.
+        return mlx_whisper.transcribe(
+            audio, path_or_hf_repo=self._model_path,
+            condition_on_previous_text=False, language=whisper_language(language),
+            task="transcribe", fp16=True, word_timestamps=True,
+            temperature=0.0, hallucination_silence_threshold=1.0,
+        )
+
     def _decode(
         self,
         audio: np.ndarray,

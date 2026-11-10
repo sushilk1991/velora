@@ -763,6 +763,9 @@ class Engine:
         self._meeting_transcribe_cancel = False
         self._meeting_convert_cancel = threading.Event()
         self._meeting_transcribe_job_id: Any = None
+        self._subtitle_task: asyncio.Task[None] | None = None
+        self._subtitle_job_id: str | None = None
+        self._subtitle_cancel = threading.Event()
         # Safe Voice Edit: sub-second cleanup-model job. A dictation start
         # PREEMPTS it (cancel event → cleanup returns between tokens) rather
         # than being refused — the hotkey always wins.
@@ -1803,6 +1806,11 @@ class Engine:
                     await self._finalize_task
             # Every socket recovery and in-flight abort belongs to this
             # engine. Join them before the audio store and models close.
+            if self._subtitle_task is not None:
+                self._subtitle_cancel.set()
+                # Do not cancel the executor-backed job: storage leases must
+                # outlive its actual native decoder and converted-file reader.
+                await asyncio.gather(self._subtitle_task, return_exceptions=True)
             pending_jobs = [task for task in (
                 self._cancel_active_task, self._reprocess_task, self._format_task,
                 *self._interrupted_tasks, *self._cancel_confirm_tasks,
@@ -2060,6 +2068,12 @@ class Engine:
             if isinstance(msg.get("request_id"), str):
                 await self._send({"event": "reprocess_activity", "request_id": msg["request_id"], "active": False})
             return
+        if command == "meeting_subtitles":
+            await self._send({"event": "meeting_subtitles_failed", "id": msg.get("id"),
+                "meeting_id": msg.get("meeting_id"), "error": error, "code": "busy"})
+            if isinstance(msg.get("id"), str) and msg["id"] not in self._reprocess_leases:
+                await self._send({"event": "reprocess_activity", "request_id": msg["id"], "active": False})
+            return
         events = {"transcribe_file": "transcribe_failed", "edit_text": "edit_failed",
                   "action_start": "action_failed", "action_observe": "action_failed",
                   "meeting_transcribe": "meeting_transcribe_failed",
@@ -2119,7 +2133,7 @@ class Engine:
             return
         if self._adopting and cmd in (
                 "start", "reprocess", "transcribe_file", "meeting_transcribe",
-                "edit_text", "action_start", "action_observe", "meeting_notes"):
+                "edit_text", "action_start", "action_observe", "meeting_notes", "meeting_subtitles"):
             await self._reject_adoption(msg)
             return
         try:
@@ -2217,6 +2231,11 @@ class Engine:
                 ):
                     self._transcribe_cancel = True
                     self._transcribe_preempt.set()
+            elif cmd == "meeting_subtitles":
+                await self._cmd_meeting_subtitles(msg)
+            elif cmd == "meeting_subtitles_cancel":
+                if msg.get("id") == self._subtitle_job_id:
+                    self._subtitle_cancel.set()
             elif cmd == "meeting_transcribe":
                 await self._cmd_meeting_transcribe(msg)
             elif cmd == "meeting_transcribe_cancel":
@@ -6429,6 +6448,173 @@ class Engine:
             self._schedule_mining()
 
     # ---------------- resumable meeting transcription + notes ----------------
+
+    async def _subtitle_await(self, operation):
+        """Cancellation retains audio until the actual reader/decoder settles."""
+        task = asyncio.ensure_future(operation)
+        try:
+            return await asyncio.shield(task)
+        except asyncio.CancelledError:
+            self._subtitle_cancel.set()
+            with contextlib.suppress(Exception):
+                await task
+            raise
+
+    async def _cmd_meeting_subtitles(self, msg: dict[str, Any]) -> None:
+        from .meeting_subtitles import SUPPORTED_MODELS, SubtitleError, validate_track
+        job_id = msg.get("id")
+        meeting_id = msg.get("meeting_id")
+        # Release a pre-registered app lease on EVERY admission rejection.
+        async def reject(error: str, code: str = "invalid_arguments") -> None:
+            await self._send({"event": "meeting_subtitles_failed", "id": job_id,
+                "meeting_id": meeting_id, "error": error, "code": code})
+            if isinstance(job_id, str) and job_id not in self._reprocess_leases:
+                await self._send({"event": "reprocess_activity", "request_id": job_id, "active": False})
+        try:
+            if not isinstance(job_id, str): raise ValueError()
+            uuid.UUID(job_id)
+            if not isinstance(meeting_id, str): raise ValueError()
+            uuid.UUID(meeting_id)
+            revision = msg.get("revision")
+            if not isinstance(revision, int) or isinstance(revision, bool) or revision < 0: raise ValueError()
+            tracks = msg.get("tracks")
+            if not isinstance(tracks, list) or not 1 <= len(tracks) <= 2: raise ValueError()
+            seen: set[str] = set()
+            for track in tracks:
+                if not isinstance(track, dict) or track.get("speaker") not in {"me", "them", "recording"}: raise ValueError()
+                if not isinstance(track.get("path"), str): raise ValueError()
+                source = validate_track(track["path"], meeting_id=meeting_id, root=velora_home() / "meetings")
+                expected = "me" if source.name == "me.caf" else "them"
+                if track["speaker"] not in ({"me"} if expected == "me" else {"them", "recording"}): raise ValueError()
+                if expected in seen: raise ValueError()
+                seen.add(expected)
+            if any(t["speaker"] == "recording" for t in tracks) and len(tracks) != 1: raise ValueError()
+        except (ValueError, SubtitleError):
+            await reject("The finalized meeting audio is unavailable or the subtitle request is invalid.")
+            return
+        if (self._adopting or not self.stt_ready.is_set() or self._stt_quarantined
+                or self._reprocessing or self._transcribing or self._meeting_notes_running
+                or self._editing or self._planning):
+            await reject("The speech engine is busy. Try again when the current job finishes.", "busy")
+            return
+        if (self.stt.model_id not in SUPPORTED_MODELS
+                or not callable(getattr(self.stt, "transcribe_timed", None))):
+            await reject("Subtitles currently require the installed full Whisper Turbo speech model. Select it in Models, or export a timed transcript.", "unsupported_model")
+            return
+        # Reserve synchronously before any await; all admission checks share
+        # _transcribing, so another file/meeting job cannot enter this gap.
+        self._transcribing = True
+        self._subtitle_cancel = threading.Event()
+        self._subtitle_job_id = job_id
+        self._reprocess_leases[job_id] = "meeting:" + meeting_id
+        self._subtitle_task = asyncio.create_task(self._run_meeting_subtitles(dict(msg)))
+        await self._send({"event": "reprocess_activity", "request_id": job_id,
+            "audio": "meeting:" + meeting_id, "active": True})
+        await self._send({"event": "meeting_subtitles_progress", "id": job_id,
+            "meeting_id": meeting_id, "fraction": 0.0})
+
+    async def _run_meeting_subtitles(self, msg: dict[str, Any]) -> None:
+        from .meeting_subtitles import SubtitleError, build_cues, source_fingerprint, validate_track, validate_words, MAX_CUES
+        job_id, meeting_id = msg["id"], msg["meeting_id"]
+        cancelled = lambda: self._subtitle_cancel.is_set() or self.shutdown.is_set()
+        fingerprints: list[tuple[Path, str]] = []
+        cues: list[dict[str, Any]] = []
+        pcm: MeetingAudio | None = None
+        completed = None
+        failure = None
+        # Snapshot language; subtitle ASR is source-language, never translation
+        # of a stored transcript. No cleanup/writing model is involved.
+        language = self.config.language
+        self._begin_batch_job(lower_priority=False)
+        try:
+            await self._cancel_idle_mining()
+            for track_index, track in enumerate(msg["tracks"]):
+                if cancelled(): raise SubtitleError("cancelled")
+                path = validate_track(track["path"], meeting_id=meeting_id, root=velora_home() / "meetings")
+                fingerprint = await self._subtitle_await(asyncio.to_thread(source_fingerprint, path, cancel=cancelled))
+                fingerprints.append((path, fingerprint))
+                pcm = await self._subtitle_await(asyncio.to_thread(load_meeting_media, str(path),
+                    meeting_root=velora_home() / "meetings", cancel=cancelled))
+                start = 0
+                total = len(pcm)
+                while start < total:
+                    while self.session is not None or self._starting or self._finalizing:
+                        if cancelled(): raise SubtitleError("cancelled")
+                        await asyncio.sleep(.1)
+                    if cancelled(): raise SubtitleError("cancelled")
+                    self._refresh_batch_priority()
+                    # Bounded <30 s windows keep DTW memory and hotkey wait
+                    # finite. Prefer a low-energy seam in the last 8 s.
+                    end = min(start + 28 * SAMPLE_RATE, total)
+                    audio = await self._subtitle_await(asyncio.to_thread(pcm.read, start, end, cancel=cancelled))
+                    if end < total:
+                        from .media import quietest_cut
+                        cut = quietest_cut(len(audio), lambda a, b: audio[a:b], 8., SAMPLE_RATE)
+                        audio = audio[:cut]
+                        end = start + cut
+                    if cancelled(): raise SubtitleError("cancelled")
+                    if len(audio) and float(np.max(np.abs(audio))) > MEETING_SILENT_TRACK_MAX_PEAK and speech_window_fraction(audio) > 0:
+                        # File read yielded the event loop: a dictation may
+                        # have started meanwhile. Recheck ON the owning STT
+                        # thread before touching its shared backend.
+                        def decode():
+                            if self.session is not None or self._starting or self._finalizing or cancelled():
+                                return None
+                            return self.stt.transcribe_timed(audio, language)
+                        result = await self._subtitle_await(self._stt_call(decode))
+                        if result is None:
+                            if cancelled(): raise SubtitleError("cancelled")
+                            continue
+                        if cancelled(): raise SubtitleError("cancelled")
+                        words = validate_words(result, duration_s=len(audio) / SAMPLE_RATE, offset_s=start / SAMPLE_RATE)
+                        cues.extend(build_cues(words, speaker=track["speaker"]))
+                        if len(cues) > MAX_CUES: raise SubtitleError("too many subtitle cues")
+                    start = end
+                    await self._send({"event": "meeting_subtitles_progress", "id": job_id,
+                        "meeting_id": meeting_id,
+                        "fraction": (track_index + start / max(1, total)) / len(msg["tracks"])})
+                await self._subtitle_await(asyncio.to_thread(pcm.close))
+                pcm = None
+            for path, fingerprint in fingerprints:
+                validate_track(str(path), meeting_id=meeting_id, root=velora_home() / "meetings")
+                latest = await self._subtitle_await(asyncio.to_thread(source_fingerprint, path, cancel=cancelled))
+                if latest != fingerprint: raise SubtitleError("The meeting audio changed. Generate subtitles again.")
+            if cancelled(): raise SubtitleError("cancelled")
+            cues.sort(key=lambda cue: (cue["start_ms"], cue["speaker"], cue["end_ms"]))
+            completed = {"event": "meeting_subtitles_ready", "id": job_id,
+                "meeting_id": meeting_id, "revision": msg["revision"],
+                "model": self.stt.model_id, "cues": cues,
+                "fingerprints": [{"path": str(path), "value": value} for path, value in fingerprints]}
+        except asyncio.CancelledError:
+            failure = {"error": "Subtitle generation cancelled.", "code": "cancelled"}
+        except Exception as exc:
+            log.warning("meeting subtitles failed: %s", exc)
+            failure = {"error": "Subtitle generation cancelled." if cancelled() else str(exc),
+                       "code": "cancelled" if cancelled() else "failed"}
+        finally:
+            if pcm is not None:
+                with contextlib.suppress(Exception):
+                    await asyncio.to_thread(pcm.close)
+            # Clear DTW/decoder scratch on its owning executor only while
+            # no foreground session is using the shared model.
+            if self.session is None and not self._starting and not self._finalizing:
+                with contextlib.suppress(Exception):
+                    await self._stt_call(lambda: self._release_stt_memory()
+                        if self.session is None and not self._starting and not self._finalizing else None)
+            self._end_batch_job(lower_priority=False)
+            self._transcribing = False
+            self._subtitle_job_id = None
+            self._subtitle_task = None
+            # The authoritative completion releases the lease, even if its
+            # sheet disappeared or the client reconnected during decoding.
+            self._reprocess_leases.pop(job_id, None)
+            await self._send({"event": "reprocess_activity", "request_id": job_id, "active": False})
+            if completed is not None and not cancelled():
+                await self._send(completed)
+            else:
+                await self._send({"event": "meeting_subtitles_failed", "id": job_id,
+                    "meeting_id": meeting_id, **(failure or {"error": "Subtitle generation cancelled.", "code": "cancelled"})})
+            self._schedule_mining()
 
     async def _cmd_meeting_transcribe(self, msg: dict[str, Any]) -> None:
         path = msg.get("path")

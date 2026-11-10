@@ -190,6 +190,13 @@ final class MeetingProcessor: ObservableObject {
     }
     var onStateChange: ((State) -> Void)?
     var onNotesReady: ((String) -> Void)?
+    /// Auxiliary scoped jobs own no committed meeting state.
+    var onLiveEvent: ((EngineEvent) -> Void)?
+    var onLiveEngineState: ((EngineSupervisor.State) -> Void)?
+    var liveEngineReady: Bool { engineIsReady() }
+    var canProcessLibraryAudio: Bool { engineIsReady() }
+    func sendLibraryRequest(_ message: [String: Any]) { sendToEngine(message) }
+    func sendLiveMessage(_ message: [String: Any]) { sendToEngine(message) }
 
     init(supervisor: EngineSupervisor, store: MeetingStore) {
         self.store = store
@@ -224,6 +231,8 @@ final class MeetingProcessor: ObservableObject {
             failUnqueued(meetingID: meetingID, message: "Meeting could not be found")
             return
         }
+        guard record.status != .recording else { return }
+        store.discardAbandonedLivePreview(meetingID: meetingID)
         let notesOnly = !reprocessing && store.canRetryNotes(meetingID: meetingID)
         guard notesOnly || (reprocessing
                 ? store.hasAllCapturedAudio(for: record)
@@ -411,6 +420,7 @@ final class MeetingProcessor: ObservableObject {
     }
 
     func handle(_ event: EngineEvent) {
+        onLiveEvent?(event)
         guard var work else { return }
         switch event {
         case .meetingTranscribeStarted(
@@ -519,6 +529,7 @@ final class MeetingProcessor: ObservableObject {
     }
 
     func handleEngineStateChange(_ engineState: EngineSupervisor.State) {
+        onLiveEngineState?(engineState)
         switch engineState {
         case .ready:
             if work == nil {

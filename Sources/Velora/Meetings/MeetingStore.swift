@@ -234,6 +234,7 @@ final class MeetingStore {
     private let actionWrites = DispatchQueue(label: "com.velora.meetings.actions", qos: .userInitiated)
     private let databaseURL: URL
     private let filesRoot: URL
+    private var livePreviewOwners: Set<String> = []
     private var ftsAvailable = false
     private static let transient = unsafeBitCast(-1, to: sqlite3_destructor_type.self)
 
@@ -267,6 +268,51 @@ final class MeetingStore {
             attributes: [.posixPermissions: 0o700])
         try? FileManager.default.setAttributes(
             [.posixPermissions: 0o700], ofItemAtPath: url.path)
+    }
+
+    /// A live engine job pins its recording directory until its terminal event.
+    /// Retention and explicit deletion cannot remove a CAF being decoded.
+    func acquireLivePreview(meetingID: String) -> URL? {
+        queue.sync { [self] in
+            guard recordsOnQueue(whereClause: "WHERE id = ? AND status = 'recording'",
+                    bindings: [meetingID], limit: 1, includeSegments: false).first != nil,
+                  let parent = meetingDirectoryURL(id: meetingID),
+                  MeetingLiveWindowWriter.safeDirectory(parent, create: false) else { return nil }
+            let directory = parent.appendingPathComponent(".live-preview", isDirectory: true)
+            guard MeetingLiveWindowWriter.safeDirectory(directory, create: true) else { return nil }
+            livePreviewOwners.insert(meetingID)
+            return directory
+        }
+    }
+
+    func releaseLivePreview(meetingID: String) {
+        queue.sync { [self] in
+            guard let parent = meetingDirectoryURL(id: meetingID),
+                  MeetingLiveWindowWriter.safeDirectory(parent, create: false) else {
+                livePreviewOwners.remove(meetingID); return
+            }
+            let directory = parent.appendingPathComponent(".live-preview", isDirectory: true)
+            if MeetingLiveWindowWriter.safeDirectory(directory, create: false) {
+                try? FileManager.default.removeItem(at: directory)
+            }
+            livePreviewOwners.remove(meetingID)
+        }
+    }
+
+    /// Recovery on a later launch uses the full main CAF. Abandoned live
+    /// material is retired before retry, without changing committed sources.
+    func discardAbandonedLivePreview(meetingID: String) {
+        queue.sync { [self] in
+            guard !livePreviewOwners.contains(meetingID),
+                  recordsOnQueue(whereClause: "WHERE id = ? AND status != 'recording'",
+                    bindings: [meetingID], limit: 1, includeSegments: false).first != nil,
+                  let parent = meetingDirectoryURL(id: meetingID),
+                  MeetingLiveWindowWriter.safeDirectory(parent, create: false) else { return }
+            let directory = parent.appendingPathComponent(".live-preview", isDirectory: true)
+            if MeetingLiveWindowWriter.safeDirectory(directory, create: false) {
+                try? FileManager.default.removeItem(at: directory)
+            }
+        }
     }
 
     private func createSchema() {
@@ -993,6 +1039,7 @@ final class MeetingStore {
     @discardableResult
     func delete(meetingID: String) -> Bool {
         queue.sync { [self] in
+            guard !livePreviewOwners.contains(meetingID) else { return false }
             var stmt: OpaquePointer?
             guard sqlite3_prepare_v2(db, "DELETE FROM meetings WHERE id = ?;", -1, &stmt, nil)
                     == SQLITE_OK else {
@@ -1044,6 +1091,7 @@ final class MeetingStore {
     func deleteForRetention(expected: MeetingRecord) -> Bool {
         guard expected.segments.isEmpty else { return false }
         return queue.sync { [self] in
+            guard !livePreviewOwners.contains(expected.id) else { return false }
             let committed = transactionOnQueue {
                 guard let current = recordsOnQueue(whereClause: """
                     WHERE id = ? AND status IN ('ready', 'failed') AND notes_pending = 0
@@ -1077,6 +1125,7 @@ final class MeetingStore {
     /// that names no meeting directory or a removal the file system refused.
     func removeAudioDirectory(meetingID: String) -> Bool {
         queue.sync { [self] in
+            guard !livePreviewOwners.contains(meetingID) else { return false }
             guard let directory = meetingDirectoryURL(id: meetingID) else {
                 return false
             }
@@ -1211,6 +1260,7 @@ final class MeetingStore {
     }
 
     private func expireAudioOnQueue(expected: MeetingRecord) -> Bool {
+        guard !livePreviewOwners.contains(expected.id) else { return false }
         guard expected.segments.isEmpty, expected.micPath != nil || expected.systemPath != nil else { return false }
         return transactionOnQueue {
             guard let current = recordsOnQueue(whereClause: """

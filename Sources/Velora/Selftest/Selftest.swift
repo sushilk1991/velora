@@ -291,6 +291,10 @@ enum Selftest {
         testDictationDeliveryPreferences()
         testModeRecipes()
         testMeetingReviewFeatures()
+        testMeetingFineSubtitles()
+        testLiveMeetingWindowSealing()
+        testLiveMeetingPreviewPipeline()
+        testLiveSystemWriterIsolation()
         testWritingRecovery()
         testSnippetsAndActivity()
         testMeetingLibraryImport()
@@ -18778,4 +18782,228 @@ static func testMeetingRetentionOrphans() {
         }
     }
 }
+extension Selftest {
+    static func testMeetingFineSubtitles() {
+        let meeting = UUID().uuidString, request = UUID().uuidString
+        let cue: [String: Any] = ["start_ms": 1_200, "end_ms": 3_500,
+            "text": "Review <draft> & send it.\nThe deadline is Friday.", "speaker": "recording"]
+        var payload: [String: Any] = ["event": "meeting_subtitles_ready", "id": request,
+            "meeting_id": meeting, "revision": Int64(3), "model": "mlx-community/whisper-large-v3-turbo",
+            "cues": [cue], "fingerprints": [["path": "/private/\(meeting)/them.caf", "value": String(repeating: "a", count: 64) + ":1:2:3:4:5"]]]
+        // Use the real JSON shape, not Swift-only dictionary coercions.
+        let wire = try! JSONSerialization.jsonObject(with: JSONSerialization.data(withJSONObject: payload)) as! [String: Any]
+        guard case .meetingSubtitlesReady(let id, let result) = EngineEvent.parse(wire) else {
+            expect(false, "valid word-aligned subtitle wire result parses"); return
+        }
+        expect(id == request && result.revision == 3 && result.cues[0].startMs == 1_200,
+               "subtitle result keeps job, source revision and observed offsets")
+        let srt = result.export(format: .srt)
+        let vtt = result.export(format: .vtt)
+        expect(srt.contains("00:00:01,200 --> 00:00:03,500")
+               && srt.contains("Recording: Review &lt;draft&gt; &amp; send it."),
+               "fine SRT keeps genuine word offsets and honest imported-recording labels")
+        expect(vtt.hasPrefix("WEBVTT\n\n1\n00:00:01.200 --> 00:00:03.500"),
+               "fine WebVTT emits independently parseable header and timing separator")
+        // Parse the generated cue structure independently of its formatter.
+        let blocks = srt.trimmingCharacters(in: .whitespacesAndNewlines).components(separatedBy: "\n\n")
+        expect(blocks.count == 1 && blocks[0].components(separatedBy: "\n").count == 4,
+               "SRT blocks have an index, timing line and at most two readable lines")
+        expect(blocks[0].components(separatedBy: "\n").dropFirst(2).allSatisfy { $0.replacingOccurrences(of: "&lt;", with: "<").replacingOccurrences(of: "&gt;", with: ">").replacingOccurrences(of: "&amp;", with: "&").count <= 42 },
+               "speaker labels and escaped markup remain a reasonable subtitle width")
+        var invalid = cue; invalid["start_ms"] = 4_000
+        payload["cues"] = [invalid]
+        if case .meetingSubtitlesFailed(let invalidID, _, _, let code) = EngineEvent.parse(payload) {
+            expect(invalidID == request && code == "invalid_result", "invalid alignment settles its own pending preview")
+        } else { expect(false, "reversed subtitle timing is rejected") }
+        invalid = cue; invalid["text"] = "one\ntwo\nthree"; payload["cues"] = [invalid]
+        expect(MeetingSubtitleResult.parse(payload) == nil, "three-line cues are rejected")
+        invalid = cue; invalid["end_ms"] = 70_000; payload["cues"] = [invalid]
+        expect(MeetingSubtitleResult.parse(payload) == nil, "unreadable long cues are rejected")
+        invalid = cue; invalid["speaker"] = "identified-person"; payload["cues"] = [invalid]
+        expect(MeetingSubtitleResult.parse(payload) == nil, "subtitle channels cannot invent participant identity")
+        var overlapping = cue; overlapping["start_ms"] = 2_000; overlapping["end_ms"] = 4_000
+        payload["cues"] = [cue, overlapping]
+        expect(MeetingSubtitleResult.parse(payload) == nil, "same-channel overlapping alignment is rejected")
+        overlapping["speaker"] = "me"; payload["cues"] = [cue, overlapping]
+        expect(MeetingSubtitleResult.parse(payload) != nil, "real simultaneous microphone and system cues retain their source labels")
+    }
+}
+
+extension Selftest {
+private static func testLiveMeetingWindowSealing() {
+    let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString).resolvingSymlinksInPath()
+    defer { try? FileManager.default.removeItem(at: root) }
+    let id = UUID().uuidString
+    let writer = MeetingLiveWindowWriter(directory: root, meetingID: id, speaker: .me,
+        windowSeconds: 0.25, maxPendingWindows: 2)
+    let format = AVAudioFormat(standardFormatWithSampleRate: 16_000, channels: 1)!
+    let pcm = AVAudioPCMBuffer(pcmFormat: format, frameCapacity: 10_000)!
+    pcm.frameLength = 10_000
+    for frame in 0..<10_000 { pcm.floatChannelData![0][frame] = Float(frame % 100) / 100 }
+    writer.append(pcm)
+    writer.finish()
+    let windows = MeetingLiveWindowWriter.pending(in: root)
+    expect(windows.count == 2, "live spool enforces its pending-window cap")
+    expect(windows.map(\.startFrame) == [0, 4_000], "sealed live windows use actual sample cursors")
+    for window in windows {
+        let file = try? AVAudioFile(forReading: window.audioURL(in: root))
+        expect(file?.length == 4_000, "a live window is closed and readable before publication")
+    }
+    expect(writer.totalFrames == 10_000 && writer.skippedFrames == 2_000,
+           "spool pressure skips only preview audio while advancing the capture cursor")
+    if let first = windows.first { MeetingLiveWindowWriter.retire(first, in: root) }
+    let resumed = MeetingLiveWindowWriter(directory: root, meetingID: id, speaker: .me,
+        windowSeconds: 0.25, maxPendingWindows: 2)
+    let tail = AVAudioPCMBuffer(pcmFormat: format, frameCapacity: 1_000)!
+    tail.frameLength = 1_000
+    resumed.append(tail); resumed.finish()
+    let replayed = MeetingLiveWindowWriter.pending(in: root)
+    expect(replayed.map(\.startFrame) == [4_000, 10_000], "durable per-track cursor resumes after skipped audio")
+    expect(replayed.last?.frameCount == 1_000, "stop seals the final partial window")
+    expect(!FileManager.default.fileExists(atPath: root.appendingPathComponent("me-10000.open.caf").path),
+           "a finished live window has no open CAF alias")
+}
+
+private static func testLiveMeetingPreviewPipeline() {
+    let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString).resolvingSymlinksInPath()
+    MeetingStore.ensurePrivateDirectory(root)
+    defer { try? FileManager.default.removeItem(at: root) }
+    let store = MeetingStore(url: root.appendingPathComponent("meetings.sqlite3"), filesRoot: root)
+    let id = UUID().uuidString
+    let parent = root.appendingPathComponent(id)
+    MeetingStore.ensurePrivateDirectory(parent)
+    let date = Date()
+    store.insertRecording(MeetingRecord(id: id, title: "Live proof", startedAt: date,
+        endedAt: date, status: .recording, micPath: id + "/me.caf"))
+    let directory = parent.appendingPathComponent(".live-preview")
+    let writer = MeetingLiveWindowWriter(directory: directory, meetingID: id, speaker: .me, windowSeconds: 0.25)
+    let format = AVAudioFormat(standardFormatWithSampleRate: 16_000, channels: 1)!
+    let pcm = AVAudioPCMBuffer(pcmFormat: format, frameCapacity: 8_000)!
+    pcm.frameLength = 8_000
+    writer.append(pcm); writer.finish()
+    var messages: [[String: Any]] = []
+    var clock: TimeInterval = 0
+    var preview: MeetingLivePreview? = MeetingLivePreview(store: store, engineReady: { true },
+        send: { messages.append($0) }, defaults: nil, now: { clock })
+    expect(preview?.enabled == false, "live meeting preview defaults off")
+    preview?.enabled = true; preview?.begin(meetingID: id)
+    guard let first = messages.last, let firstID = first["id"] as? String,
+          let firstWire = first["meeting_id"] as? String else {
+        expect(false, "live preview begins a sealed-window job"); return
+    }
+    expect(first["path"] as? String == directory.appendingPathComponent("me-0.caf").path,
+           "live inference receives only a sealed CAF, never the growing main track")
+    preview?.handle(.meetingSegment(id: "stale", segment: MeetingSegment(meetingID: firstWire,
+        speaker: .me, chunkIndex: 0, startMs: 0, endMs: 250, text: "stale")))
+    preview?.handle(.meetingTranscribeFailed(id: firstID, meetingID: firstWire, speaker: .me,
+        error: "busy", code: "busy"))
+    let before = messages.count
+    preview?.pump()
+    expect(messages.count == before && preview?.passages.isEmpty == true,
+           "busy preview retries back off without failing or changing the recording")
+    clock = 5; preview?.pump()
+    guard let retry = messages.last, let retryID = retry["id"] as? String,
+          let retryWire = retry["meeting_id"] as? String else { return }
+    expect(retryID != firstID, "live retries use fresh scoped job IDs")
+    preview?.handle(.meetingSegment(id: retryID, segment: MeetingSegment(meetingID: retryWire,
+        speaker: .me, chunkIndex: 0, startMs: 0, endMs: 250, text: "Plan the release")))
+    preview?.handle(.meetingTranscribed(id: retryID, meetingID: retryWire,
+        speaker: .me, durationS: 0.25, chunks: 1))
+    guard let second = messages.last, let secondID = second["id"] as? String,
+          let secondWire = second["meeting_id"] as? String else { return }
+    preview?.handle(.meetingSegment(id: secondID, segment: MeetingSegment(meetingID: secondWire,
+        speaker: .me, chunkIndex: 0, startMs: 0, endMs: 250, text: "Review the release")))
+    preview?.handle(.meetingTranscribed(id: secondID, meetingID: secondWire,
+        speaker: .me, durationS: 0.25, chunks: 1))
+    expect(preview?.passages.map(\.startMs) == [0, 250],
+           "live passage offsets add real sealed-window sample times")
+    expect(preview?.passages.map(\.text) == ["Plan the release", "Review the release"],
+           "stale job events cannot duplicate or inject live passages")
+    guard let notes = messages.last, let notesID = notes["id"] as? String,
+          let notesWire = notes["meeting_id"] as? String,
+          let inputs = notes["passages"] as? [[String: Any]], inputs.count == 2,
+          let startKey = inputs[0]["key"] as? String, let endKey = inputs[1]["key"] as? String else {
+        expect(false, "live semantic topics receive bounded real source passages"); return
+    }
+    expect(notes["cmd"] as? String == "meeting_notes", "live topics use the semantic notes model")
+    preview?.handle(.meetingNotesReady(id: notesID, meetingID: notesWire, notes: MeetingNotes(chapters: [
+        MeetingChapter(title: "Release plan", startKey: startKey, endKey: endKey,
+            startText: "Plan the release", endText: "Review the release"),
+        MeetingChapter(title: "Invented", startKey: "me:999", endKey: "me:999", startText: "fake", endText: "fake")
+    ])))
+    expect(preview?.chapters.count == 1 && store.record(id: id)?.segments.isEmpty == true
+           && store.recordMetadata(id: id)?.status == .recording,
+           "semantic preview rejects invented boundaries and never commits final source revisions")
+    preview = nil // Simulate a consumer restart, preserving the durable spool/result checkpoint.
+    preview = MeetingLivePreview(store: store, engineReady: { true }, send: { messages.append($0) },
+        defaults: nil, now: { clock })
+    preview?.enabled = true; preview?.begin(meetingID: id)
+    expect(preview?.passages.count == 2 && preview?.chapters.count == 1,
+           "a consumer restart restores provisional results without decoding completed windows again")
+    let tail = AVAudioPCMBuffer(pcmFormat: format, frameCapacity: 4_000)!
+    tail.frameLength = 4_000; writer.append(tail); writer.finish(); preview?.pump()
+    guard let third = messages.last, let thirdID = third["id"] as? String else { return }
+    preview?.handleEngineState(.launching)
+    preview?.handleEngineState(.ready)
+    guard let fence = messages.last, let fenceID = fence["id"] as? String,
+          let fenceWire = fence["meeting_id"] as? String else { return }
+    expect(fenceID != thirdID && FileManager.default.fileExists(atPath: directory.path),
+           "socket reconnect pins windows and uses a fresh mutex-fence job")
+    preview?.handle(.meetingTranscribeFailed(id: fenceID, meetingID: fenceWire, speaker: .me,
+        error: "busy", code: "busy"))
+    clock = 10; preview?.pump()
+    guard let finalFence = messages.last, let finalID = finalFence["id"] as? String,
+          let finalWire = finalFence["meeting_id"] as? String else { return }
+    preview?.handle(.meetingTranscribeAccepted(id: finalID, meetingID: finalWire, speaker: .me))
+    var drained = false
+    preview?.stopAndDrain { drained = true }
+    expect(!drained && !store.delete(meetingID: id)
+           && messages.last?["cmd"] as? String == "meeting_transcribe_cancel",
+           "cancel drains the exact active preview and prevents source deletion while in use")
+    preview?.handle(.meetingTranscribeFailed(id: finalID, meetingID: finalWire, speaker: .me,
+        error: "cancelled", code: "cancelled"))
+    expect(drained && preview?.passages.isEmpty == true
+           && !FileManager.default.fileExists(atPath: directory.path),
+           "terminal cancellation clears provisional passages, chapters, checkpoints, and spool")
+    expect(store.delete(meetingID: id), "drained preview releases the recording for explicit deletion")
+}
+
+private static func testLiveSystemWriterIsolation() {
+    guard #available(macOS 14.2, *) else { return }
+    let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString).resolvingSymlinksInPath()
+    MeetingStore.ensurePrivateDirectory(root)
+    defer { try? FileManager.default.removeItem(at: root) }
+    let id = UUID().uuidString
+    let format = AVAudioFormat(commonFormat: .pcmFormatFloat32, sampleRate: 16_000, channels: 2, interleaved: true)!
+    let pcm = AVAudioPCMBuffer(pcmFormat: format, frameCapacity: 8_000)!
+    pcm.frameLength = 8_000
+    let previewRoot = root.appendingPathComponent("windows")
+    let preview = MeetingLiveWindowWriter(directory: previewRoot, meetingID: id, speaker: .them, windowSeconds: 0.25)
+    do {
+        let url = root.appendingPathComponent("main.caf")
+        let writer = try SystemAudioFileWriter(url: url, format: format, livePreview: preview)
+        let accepted = writer.enqueue(pcm.audioBufferList, frames: pcm.frameLength)
+        writer.finish()
+        let main = try AVAudioFile(forReading: url)
+        let windows = MeetingLiveWindowWriter.pending(in: previewRoot)
+        expect(accepted && main.length == 8_000 && windows.map(\.startFrame) == [0, 4_000],
+               "the real system disk queue writes full capture and exactly-once bounded preview windows")
+        let first = try AVAudioFile(forReading: windows[0].audioURL(in: previewRoot))
+        expect(first.length == 4_000 && first.processingFormat.channelCount == 2,
+               "sealed windows preserve the real tap's interleaved PCM layout")
+        let blocked = root.appendingPathComponent("blocked")
+        try Data("not a directory".utf8).write(to: blocked)
+        let disabledPreview = MeetingLiveWindowWriter(directory: blocked, meetingID: id, speaker: .them)
+        let surviving = root.appendingPathComponent("surviving.caf")
+        let second = try SystemAudioFileWriter(url: surviving, format: format, livePreview: disabledPreview)
+        let stillAccepted = second.enqueue(pcm.audioBufferList, frames: pcm.frameLength)
+        second.finish()
+        let saved = try AVAudioFile(forReading: surviving)
+        expect(stillAccepted && saved.length == 8_000 && disabledPreview.skippedFrames == 8_000,
+               "preview storage failure cannot fail or truncate the full system recording")
+    } catch { expect(false, "live system writer proof: \(error)") }
+}
+
+}
+
 #endif

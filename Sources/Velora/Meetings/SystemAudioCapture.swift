@@ -85,6 +85,7 @@ final class SystemAudioFileWriter {
     private let onWritten: (UInt32) -> Void
     private let onFailure: (String) -> Void
     private var file: AVAudioFile?
+    private let livePreview: MeetingLiveWindowWriter?
     private var slots: [Slot] = []
     private var freeIndices: [Int] = []
     private var pendingIndices: [Int] = []
@@ -100,6 +101,7 @@ final class SystemAudioFileWriter {
     init(
         url: URL,
         format: AVAudioFormat,
+        livePreview: MeetingLiveWindowWriter? = nil,
         maxPendingBuffers: Int = 64,
         maxPendingBytes: Int = 32 * 1_024 * 1_024,
         bufferFrameCapacity: AVAudioFrameCount = 32_768,
@@ -118,6 +120,7 @@ final class SystemAudioFileWriter {
             throw WriterError.unsupportedFormat
         }
         self.format = format
+        self.livePreview = livePreview
         self.maxPendingBytes = maxPendingBytes
         self.onWritten = onWritten
         self.onFailure = onFailure
@@ -290,6 +293,7 @@ final class SystemAudioFileWriter {
             do {
                 guard let file else { throw WriterError.unsupportedFormat }
                 try file.write(from: slot.buffer)
+                livePreview?.append(slot.buffer)
                 onWritten(slot.frames)
             } catch {
                 stateLock.lock()
@@ -308,6 +312,7 @@ final class SystemAudioFileWriter {
             stateLock.unlock()
         }
         file = nil
+        livePreview?.finish()
         workerFinished.signal()
     }
 
@@ -371,7 +376,7 @@ final class CoreAudioSystemAudioCapture {
     private var failureReported = false
     private var stopping = false
 
-    func start(to url: URL) throws {
+    func start(to url: URL, livePreview: MeetingLiveWindowWriter? = nil) throws {
         _ = stop()
         resetHealth()
 
@@ -415,6 +420,7 @@ final class CoreAudioSystemAudioCapture {
             fileWriter = try SystemAudioFileWriter(
                 url: url,
                 format: audioFormat,
+                livePreview: livePreview,
                 onWritten: { [weak self] written in
                     guard let self else { return }
                     self.healthLock.lock()

@@ -77,6 +77,7 @@ struct HistoryReformatSheet: View {
                         pb.clearContents()
                         pb.setString(draft, forType: .string)
                     }.disabled(saving)
+                    ResultShareButton(text: draft).disabled(saving)
                 }
                 Spacer()
                 Button("Cancel") { dismiss() }

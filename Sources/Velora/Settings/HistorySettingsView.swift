@@ -1211,6 +1211,7 @@ private struct JournalEntry: View {
                     DispatchQueue.main.asyncAfter(deadline: .now() + Self.copiedFlash) { copied = false }
                 }
                 .buttonStyle(.capsule)
+                ResultShareButton(text: record.final).buttonStyle(.capsule)
                 Button("Insert Again", action: onPaste)
                     .buttonStyle(.capsule)
                     .help("Copy; if the original app is open, switch there and try to paste")

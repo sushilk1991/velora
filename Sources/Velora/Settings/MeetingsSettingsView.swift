@@ -21,6 +21,7 @@ struct MeetingsSettingsView: View {
     @ObservedObject var model: SettingsModel
     @ObservedObject var coordinator: MeetingCoordinator
     @ObservedObject var processor: MeetingProcessor
+    @ObservedObject private var livePreview: MeetingLivePreview
     let store: MeetingStore
     /// Opens Settings › Advanced, where the meeting preferences live.
     var openMeetingSettings: () -> Void = {}
@@ -32,6 +33,7 @@ struct MeetingsSettingsView: View {
     ) {
         self.model = model
         self.coordinator = coordinator
+        self.livePreview = coordinator.livePreview
         self.processor = processor
         self.store = store
         self.openMeetingSettings = openMeetingSettings
@@ -69,6 +71,7 @@ struct MeetingsSettingsView: View {
     @State private var searchLoadToken = UUID()
     @State private var exportRequestToken = UUID()
     @State private var actionError: String?
+    @State private var subtitleRecord: MeetingRecord?
 
     /// The header search box, as wide as Dictionary's and History's.
     private static let searchWidth: CGFloat = 240
@@ -124,6 +127,16 @@ struct MeetingsSettingsView: View {
             }
             .padding(.bottom, VeloraSpacing.m)
 
+            if coordinator.state == .idle {
+                Toggle(L10n.text("Live meeting preview (experimental)"), isOn: $livePreview.enabled)
+                    .font(.callout)
+                    .help(L10n.text("Preview recent transcript and topics while recording. Uses local models; final notes may change."))
+                    .padding(.bottom, VeloraSpacing.m)
+            }
+            if coordinator.state.isRecording && livePreview.meetingID != nil {
+                MeetingLivePreviewView(model: livePreview)
+                    .padding(.bottom, MeetingNotesCards.sectionSpacing)
+            }
             if importer.importing {
                 HStack {
                     ProgressView(value: importer.fraction).frame(maxWidth: 160)
@@ -176,6 +189,11 @@ struct MeetingsSettingsView: View {
             .frame(maxWidth: .infinity, maxHeight: .infinity)
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity)
+        .sheet(item: $subtitleRecord) { record in
+            MeetingSubtitleSheet(record: record, store: store,
+                isReady: { processor.canProcessLibraryAudio },
+                send: { processor.sendLibraryRequest($0) })
+        }
         .onAppear { reload() }
         .onDisappear { importer.cancel(); playback.stop(); exportRequestToken = UUID() }
         .onReceive(NotificationCenter.default.publisher(for: .veloraMeetingsChanged)) { _ in reload() }
@@ -345,6 +363,7 @@ struct MeetingsSettingsView: View {
             .buttonStyle(.capsule)
             .help("Stop processing this meeting")
         }
+        MeetingRecapDraftButton(text: record.followUpText).buttonStyle(.capsule)
         HeaderMenu(actions: Self.actionsLabel) {
             Button("Copy Notes and Transcript") { copy(recordID: record.id) }
             Button("Copy Follow-up") {
@@ -353,6 +372,10 @@ struct MeetingsSettingsView: View {
             }
             ForEach(MeetingExportFormat.allCases) { format in
                 Button("Export \(format.title)…") { export(record, format: format) }
+            }
+            if record.status != .recording {
+                Button(L10n.text("Generate subtitles…")) { subtitleRecord = record }
+                    .disabled(!selectedHasRecoverableAudio || processing)
             }
             if record.status == .ready && selectedCanRecreate
                 && !selectedIsReprocessing && !processing {

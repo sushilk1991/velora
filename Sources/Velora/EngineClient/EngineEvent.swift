@@ -133,6 +133,9 @@ enum EngineEvent {
     case meetingTranscribeFailed(
         id: String?, meetingID: String, speaker: MeetingSpeaker?,
         error: String, code: String?)
+    case meetingSubtitlesProgress(id: String, meetingID: String, fraction: Double)
+    case meetingSubtitlesReady(id: String, result: MeetingSubtitleResult)
+    case meetingSubtitlesFailed(id: String, meetingID: String, error: String, code: String)
     case meetingNotesAccepted(id: String?, meetingID: String)
     case meetingNotesProgress(id: String?, meetingID: String, fraction: Double)
     case meetingNotesReady(id: String?, meetingID: String, notes: MeetingNotes)
@@ -378,6 +381,24 @@ enum EngineEvent {
                 speaker: (object["speaker"] as? String).flatMap(MeetingSpeaker.init(rawValue:)),
                 error: object["error"] as? String ?? "meeting transcription failed",
                 code: object["code"] as? String)
+        case "meeting_subtitles_progress":
+            guard let id = object["id"] as? String, UUID(uuidString: id) != nil,
+                  let meetingID = object["meeting_id"] as? String,
+                  let fraction = object["fraction"] as? Double, fraction.isFinite,
+                  (0...1).contains(fraction) else { return .unknown(object) }
+            return .meetingSubtitlesProgress(id: id, meetingID: meetingID, fraction: fraction)
+        case "meeting_subtitles_ready":
+            guard let id = object["id"] as? String, UUID(uuidString: id) != nil else { return .unknown(object) }
+            guard let result = MeetingSubtitleResult.parse(object) else {
+                return .meetingSubtitlesFailed(id: id, meetingID: object["meeting_id"] as? String ?? "",
+                    error: "The engine returned invalid subtitle timing. Generate again or use the timed transcript.", code: "invalid_result")
+            }
+            return .meetingSubtitlesReady(id: id, result: result)
+        case "meeting_subtitles_failed":
+            guard let id = object["id"] as? String, UUID(uuidString: id) != nil else { return .unknown(object) }
+            return .meetingSubtitlesFailed(id: id, meetingID: object["meeting_id"] as? String ?? "",
+                error: object["error"] as? String ?? "Subtitle generation failed.",
+                code: object["code"] as? String ?? "failed")
         case "meeting_notes_accepted":
             return .meetingNotesAccepted(
                 id: object["id"] as? String,

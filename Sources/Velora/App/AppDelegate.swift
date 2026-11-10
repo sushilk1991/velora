@@ -1071,7 +1071,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
     private func showMeetingNotes(meetingID: String) {
         if meetingNotesController == nil {
-            meetingNotesController = MeetingNotesWindowController(store: meetings)
+            meetingNotesController = MeetingNotesWindowController(store: meetings, processor: meetingProcessor)
         }
         meetingNotesController?.show(meetingID: meetingID)
         veloraLog("Velora: opened focused meeting notes id=\(meetingID)")

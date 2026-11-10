@@ -2329,6 +2329,7 @@ private struct ModeEditor: View {
                             NSPasteboard.general.setString(result.text, forType: .string)
                         }
                         .buttonStyle(.capsule)
+                        ResultShareButton(text: result.text).buttonStyle(.capsule)
                     }
                 }
                 if let error = vm.previewError {

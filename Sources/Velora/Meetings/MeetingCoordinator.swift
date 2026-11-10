@@ -50,6 +50,7 @@ final class MeetingCoordinator: ObservableObject {
 
     private let config = AppConfig.shared
     private let capture = MeetingAudioCapture()
+    let livePreview: MeetingLivePreview
     private let detector: MeetingDetector
     private let store: MeetingStore
     private let processor: MeetingProcessor
@@ -107,6 +108,12 @@ final class MeetingCoordinator: ObservableObject {
         self.processor = processor
         self.sounds = sounds
         self.foregroundBusy = foregroundBusy
+        let livePreview = MeetingLivePreview(store: store,
+            engineReady: { [weak processor] in processor?.liveEngineReady ?? false },
+            send: { [weak processor] in processor?.sendLiveMessage($0) })
+        self.livePreview = livePreview
+        processor.onLiveEvent = { [weak livePreview] in livePreview?.handle($0) }
+        processor.onLiveEngineState = { [weak livePreview] in livePreview?.handleEngineState($0) }
         detector = MeetingDetector(
             calendarEnabled: { AppConfig.shared.meetingCalendar },
             suggestionsEnabled: { AppConfig.shared.meetingSuggestions })
@@ -247,44 +254,47 @@ final class MeetingCoordinator: ObservableObject {
         state = .preparing(title: "Saving \(title)…")
         capture.stop(cancelled: false) { [weak self] files in
             guard let self else { return }
-            let metadata = self.pendingMetadata
-            self.pendingMetadata = nil
-            self.pendingMeetingID = nil
-            self.finishingMeetingID = nil
-            defer {
-                let callbacks = self.finishCallbacks
-                self.finishCallbacks.removeAll()
-                callbacks.forEach { $0() }
-            }
-            guard let files else {
-                veloraLog("Velora: meeting \(id) recording could not be finalized")
-                self.store.markFailed(
-                    meetingID: id, error: "Recording could not be finalized")
+            self.livePreview.stopAndDrain { [weak self] in
+                guard let self else { return }
+                let metadata = self.pendingMetadata
+                self.pendingMetadata = nil
+                self.pendingMeetingID = nil
+                self.finishingMeetingID = nil
+                defer {
+                    let callbacks = self.finishCallbacks
+                    self.finishCallbacks.removeAll()
+                    callbacks.forEach { $0() }
+                }
+                guard let files else {
+                    veloraLog("Velora: meeting \(id) recording could not be finalized")
+                    self.store.markFailed(
+                        meetingID: id, error: "Recording could not be finalized")
+                    NotificationCenter.default.post(name: .veloraMeetingsChanged, object: nil)
+                    self.onRecordingEnded?(.failed)
+                    self.state = .idle
+                    return
+                }
+                let record = MeetingRecord(
+                    id: id, title: title,
+                    startedAt: files.startedAt, endedAt: files.endedAt,
+                    sourceApp: metadata?.source,
+                    calendarEventID: metadata?.calendarID,
+                    status: .processing,
+                    micPath: files.micRelativePath,
+                    systemPath: files.systemRelativePath)
+                self.store.insertProcessing(record)
+                veloraLog(
+                    "Velora: meeting \(id) recording stopped after "
+                    + "\(Int(files.endedAt.timeIntervalSince(files.startedAt))) s "
+                    + "(computer audio: \(files.systemRelativePath == nil ? "no" : "yes"))")
                 NotificationCenter.default.post(name: .veloraMeetingsChanged, object: nil)
-                self.onRecordingEnded?(.failed)
+                // A manual stop can already be finalizing when Quit arrives. Keep
+                // the durable processing row, but let next launch resume it rather
+                // than starting fresh engine work during teardown.
+                if enqueue && !self.terminating { self.processor.enqueue(meetingID: id) }
+                self.onRecordingEnded?(.saved)
                 self.state = .idle
-                return
             }
-            let record = MeetingRecord(
-                id: id, title: title,
-                startedAt: files.startedAt, endedAt: files.endedAt,
-                sourceApp: metadata?.source,
-                calendarEventID: metadata?.calendarID,
-                status: .processing,
-                micPath: files.micRelativePath,
-                systemPath: files.systemRelativePath)
-            self.store.insertProcessing(record)
-            veloraLog(
-                "Velora: meeting \(id) recording stopped after "
-                + "\(Int(files.endedAt.timeIntervalSince(files.startedAt))) s "
-                + "(computer audio: \(files.systemRelativePath == nil ? "no" : "yes"))")
-            NotificationCenter.default.post(name: .veloraMeetingsChanged, object: nil)
-            // A manual stop can already be finalizing when Quit arrives. Keep
-            // the durable processing row, but let next launch resume it rather
-            // than starting fresh engine work during teardown.
-            if enqueue && !self.terminating { self.processor.enqueue(meetingID: id) }
-            self.onRecordingEnded?(.saved)
-            self.state = .idle
         }
     }
 
@@ -563,7 +573,7 @@ final class MeetingCoordinator: ObservableObject {
             micPath: "\(id)/me.caf",
             systemPath: MeetingSystemAudioPolicy.relativePath(meetingID: id)))
         state = .preparing(title: title)
-        capture.start(meetingID: id) { [weak self] result in
+        capture.start(meetingID: id, livePreview: livePreview.enabled) { [weak self] result in
             guard let self else { return }
             guard !self.terminating else {
                 if self.capture.isCapturing {
@@ -597,6 +607,7 @@ final class MeetingCoordinator: ObservableObject {
                     micPath: start.micRelativePath,
                     systemPath: start.systemRelativePath)
                 self.store.insertRecording(recording)
+                self.livePreview.begin(meetingID: id)
                 self.state = .recording(
                     id: id, title: title,
                     startedAt: start.startedAt, systemAudio: start.systemAudio,
@@ -666,17 +677,20 @@ final class MeetingCoordinator: ObservableObject {
         discardingMeetingID = id
         state = .preparing(title: "Discarding \(title)…")
         sounds.play(.stop)
-        capture.stop(cancelled: true) { [weak self] _ in
+        capture.stop(cancelled: false) { [weak self] _ in
             guard let self else { return }
-            Self.deleteAbandoned(meetingID: id, in: self.store)
-            self.pendingMeetingID = nil
-            self.pendingMetadata = nil
-            self.discardingMeetingID = nil
-            self.onRecordingEnded?(.discarded)
-            self.state = .idle
-            let callbacks = self.finishCallbacks
-            self.finishCallbacks.removeAll()
-            callbacks.forEach { $0() }
+            self.livePreview.stopAndDrain { [weak self] in
+                guard let self else { return }
+                Self.deleteAbandoned(meetingID: id, in: self.store)
+                self.pendingMeetingID = nil
+                self.pendingMetadata = nil
+                self.discardingMeetingID = nil
+                self.onRecordingEnded?(.discarded)
+                self.state = .idle
+                let callbacks = self.finishCallbacks
+                self.finishCallbacks.removeAll()
+                callbacks.forEach { $0() }
+            }
         }
     }
 

@@ -135,6 +135,8 @@ final class MeetingNotesWindowModel: ObservableObject {
 ///     Summary / Decisions / Action items / Transcript     GroupCards
 struct MeetingNotesWindowView: View {
     @ObservedObject var model: MeetingNotesWindowModel
+    var processor: MeetingProcessor? = nil
+    @State private var subtitleRecord: MeetingRecord?
     /// A long meeting title wraps to at most this many lines.
     private static let titleLines = 2
 
@@ -181,6 +183,11 @@ struct MeetingNotesWindowView: View {
         .onReceive(NotificationCenter.default.publisher(for: .veloraMeetingsChanged)) { _ in
             model.reload()
         }
+        .sheet(item: $subtitleRecord) { record in
+            MeetingSubtitleSheet(record: record, store: model.store,
+                isReady: { processor?.canProcessLibraryAudio ?? false },
+                send: { processor?.sendLibraryRequest($0) })
+        }
     }
 
     private func header(_ record: MeetingRecord) -> some View {
@@ -208,6 +215,7 @@ struct MeetingNotesWindowView: View {
                 Label("Copy All", systemImage: "doc.on.doc")
             }
             .buttonStyle(.capsule)
+            MeetingRecapDraftButton(text: record.followUpText).buttonStyle(.capsule)
             Menu {
                 Button("Copy Follow-up") {
                     NSPasteboard.general.clearContents()
@@ -217,6 +225,8 @@ struct MeetingNotesWindowView: View {
                 ForEach(MeetingExportFormat.allCases) { format in
                     Button("Export \(format.title)…") { export(record, format: format) }
                 }
+                Button(L10n.text("Generate subtitles…")) { subtitleRecord = record }
+                    .disabled(record.status == .recording || processor == nil || (record.micPath == nil && record.systemPath == nil))
             } label: {
                 Image(systemName: "ellipsis")
             }
@@ -612,9 +622,9 @@ final class MeetingNotesWindowController: NSWindowController, NSWindowDelegate {
     let model: MeetingNotesWindowModel
     private var holdsActivation = false
 
-    init(store: MeetingStore) {
+    init(store: MeetingStore, processor: MeetingProcessor? = nil) {
         model = MeetingNotesWindowModel(store: store)
-        let root = MeetingNotesWindowView(model: model)
+        let root = MeetingNotesWindowView(model: model, processor: processor)
         // The shared shell factory: it paints the shell's titlebar and keeps
         // the hosting controller from growing the window to its content.
         let window = MainWindowController.makeShellWindow(

@@ -152,6 +152,7 @@ final class MeetingCaptureReadiness {
 final class MeetingAudioCapture {
     private let micCapture = MicrophoneStreamCapture()
     private var micFile: AVAudioFile?
+    private var liveMicrophone: MeetingLiveWindowWriter?
     private var systemCapture: AnyObject?
     private var meetingID: String?
     private var startedAt: Date?
@@ -192,6 +193,7 @@ final class MeetingAudioCapture {
 
     func start(
         meetingID: String,
+        livePreview: Bool = false,
         completion: @escaping (Result<MeetingCaptureStart, MeetingCaptureError>) -> Void
     ) {
         dispatchPrecondition(condition: .onQueue(.main))
@@ -204,6 +206,12 @@ final class MeetingAudioCapture {
         let directory = AppConfig.meetingsDirectory
             .appendingPathComponent(meetingID, isDirectory: true)
         MeetingStore.ensurePrivateDirectory(directory)
+        let liveDirectory = directory.appendingPathComponent(".live-preview", isDirectory: true)
+        let liveMicrophone = livePreview ? MeetingLiveWindowWriter(
+            directory: liveDirectory, meetingID: meetingID, speaker: .me) : nil
+        let liveSystem = livePreview ? MeetingLiveWindowWriter(
+            directory: liveDirectory, meetingID: meetingID, speaker: .them) : nil
+        self.liveMicrophone = liveMicrophone
         // CAF keeps already-flushed PCM readable after a hard crash; neither
         // track depends on a final container-length patch.
         let micURL = directory.appendingPathComponent("me.caf")
@@ -229,7 +237,7 @@ final class MeetingAudioCapture {
 
         if wantsSystemAudio {
             do {
-                try startSystemAudio(to: systemURL, readiness: readiness)
+                try startSystemAudio(to: systemURL, readiness: readiness, livePreview: liveSystem)
                 startupSystemAudio = true
             } catch {
                 startupWarning = Self.systemAudioWarning(for: error)
@@ -253,7 +261,7 @@ final class MeetingAudioCapture {
             persistedUID: persistedUID,
             onBuffer: { [weak self] buffer in
                 self?.writeMicrophone(
-                    buffer, readiness: readiness, level: microphoneLevel)
+                    buffer, readiness: readiness, level: microphoneLevel, livePreview: liveMicrophone)
             },
             onFailure: { [weak self] message in
                 readiness.recordMicrophoneFailure(message)
@@ -301,6 +309,8 @@ final class MeetingAudioCapture {
         micCapture.stop { [weak self] in
             guard let self else { completion(nil); return }
             self.micFile = nil
+            self.liveMicrophone?.finish()
+            self.liveMicrophone = nil
             self.stopSystemAudio { _ in
                 let hasSystem = Self.keepsSystemTrack(at: system)
 
@@ -344,7 +354,7 @@ final class MeetingAudioCapture {
     }
 
     private func startSystemAudio(
-        to url: URL, readiness: MeetingCaptureReadiness
+        to url: URL, readiness: MeetingCaptureReadiness, livePreview: MeetingLiveWindowWriter?
     ) throws {
         guard #available(macOS 14.2, *) else {
             throw NSError(
@@ -359,7 +369,7 @@ final class MeetingAudioCapture {
         capture.onFailure = { [weak self] message in
             self?.systemCaptureDidFail(message)
         }
-        try capture.start(to: url)
+        try capture.start(to: url, livePreview: livePreview)
         systemCapture = capture
     }
 
@@ -503,6 +513,8 @@ final class MeetingAudioCapture {
         micCapture.stop { [weak self] in
             guard let self else { return }
             self.micFile = nil
+            self.liveMicrophone?.finish()
+            self.liveMicrophone = nil
             self.stopSystemAudio { _ in
                 self.meetingID = nil
                 self.startedAt = nil
@@ -562,7 +574,7 @@ final class MeetingAudioCapture {
     /// written before readiness can declare the meeting healthy.
     private func writeMicrophone(
         _ buffer: AVAudioPCMBuffer, readiness: MeetingCaptureReadiness,
-        level: MicrophoneLevelState
+        level: MicrophoneLevelState, livePreview: MeetingLiveWindowWriter?
     ) {
         guard let micURL else { return }
         do {
@@ -581,6 +593,7 @@ final class MeetingAudioCapture {
                     [.posixPermissions: 0o600], ofItemAtPath: micURL.path)
             }
             try micFile?.write(from: buffer)
+            livePreview?.append(buffer)
             let frames = Int(buffer.frameLength)
             let peak = MeetingPCMLevel.peak(buffer)
             if readiness.recordMicrophone(frames: frames, peak: peak) {
