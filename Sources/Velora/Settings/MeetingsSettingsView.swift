@@ -37,6 +37,7 @@ struct MeetingsSettingsView: View {
         self.openMeetingSettings = openMeetingSettings
         _transcript = StateObject(wrappedValue: MeetingTranscriptLoader(store: store))
         _playback = StateObject(wrappedValue: MeetingAudioPlayback(store: store))
+        _importer = StateObject(wrappedValue: MeetingRecordingImporter(store: store))
     }
 
     @State private var records: [MeetingRecord] = []
@@ -47,6 +48,7 @@ struct MeetingsSettingsView: View {
     @State private var hits: [MeetingSearchHit] = []
     /// The meeting whose detail page is open; nil shows the list.
     @State private var selectedID: String?
+    @State private var navigationGeneration = UUID()
     /// The meeting just closed, which the list focuses as it comes back.
     @State private var returnFocusID: String?
     @State private var selectedRecord: MeetingRecord?
@@ -60,6 +62,9 @@ struct MeetingsSettingsView: View {
     /// The open meeting's Transcript card, as in the notes window.
     @StateObject private var transcript: MeetingTranscriptLoader
     @StateObject private var playback: MeetingAudioPlayback
+    @StateObject private var importer: MeetingRecordingImporter
+    @State private var selectedSearchQuery: String?
+    @State private var selectedSearchMatch: MeetingSegment?
     @State private var metadataLoadToken = UUID()
     @State private var searchLoadToken = UUID()
     @State private var exportRequestToken = UUID()
@@ -119,6 +124,19 @@ struct MeetingsSettingsView: View {
             }
             .padding(.bottom, VeloraSpacing.m)
 
+            if importer.importing {
+                HStack {
+                    ProgressView(value: importer.fraction).frame(maxWidth: 160)
+                    Text("Importing recording…").font(.callout)
+                    Spacer()
+                    Button("Cancel", action: importer.cancel)
+                }.padding(.bottom, VeloraSpacing.m)
+            }
+            if let importError = importer.error {
+                Text(importError).font(.caption).foregroundStyle(VeloraStatus.warningText)
+                    .padding(.bottom, VeloraSpacing.m)
+            }
+
             // Capture and processing state sit above the list so Finish and
             // Discard stay reachable however far the list or notes scroll.
             if showsStatusRow {
@@ -144,7 +162,7 @@ struct MeetingsSettingsView: View {
                 } else if records.isEmpty {
                     ContentUnavailableView(
                         "No meetings yet", systemImage: "person.2.wave.2",
-                        description: Text("Start one manually or let Velora suggest it when a call begins."))
+                        description: Text("Start one manually, import a recording, or let Velora suggest it when a call begins."))
                 } else {
                     MeetingRowList(
                         label: "Meetings", items: records,
@@ -159,7 +177,7 @@ struct MeetingsSettingsView: View {
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity)
         .onAppear { reload() }
-        .onDisappear { playback.stop(); exportRequestToken = UUID() }
+        .onDisappear { importer.cancel(); playback.stop(); exportRequestToken = UUID() }
         .onReceive(NotificationCenter.default.publisher(for: .veloraMeetingsChanged)) { _ in reload() }
     }
 
@@ -182,6 +200,9 @@ struct MeetingsSettingsView: View {
                     .buttonStyle(.primaryCapsule)
             }
             HeaderMenu(actions: Self.actionsLabel) {
+                Button("Import Recording…", action: importRecording)
+                    .disabled(importer.importing)
+                Divider()
                 meetingSettingsItem
             }
         }
@@ -227,7 +248,7 @@ struct MeetingsSettingsView: View {
             MeetingRowList(
                 label: "Search results", items: hits,
                 returnFocus: $returnFocusID) { hit in
-                select(hit.meetingID)
+                select(hit.meetingID, matching: query)
             } row: { hit in
                 GroupRow(label: hit.title, sub: hit.snippet) {
                     Text(hit.startedAt.formatted(date: .abbreviated, time: .shortened))
@@ -262,8 +283,9 @@ struct MeetingsSettingsView: View {
 
     /// "Sep 24, 2026 at 3:00 PM · 42 min · Zoom"
     private static func rowSubtitle(_ record: MeetingRecord) -> String {
-        var parts = [record.startedAt.formatted(date: .abbreviated, time: .shortened)]
-        let minutes = Int(record.endedAt.timeIntervalSince(record.startedAt) / 60)
+        var parts = [(record.isImported ? "Imported " : "")
+            + record.startedAt.formatted(date: .abbreviated, time: .shortened)]
+        let minutes = record.durationMs / 60_000
         if record.status != .recording && minutes > 0 {
             parts.append("\(minutes) min")
         }
@@ -353,14 +375,24 @@ struct MeetingsSettingsView: View {
             detailStatus(record)
                 .padding(.horizontal, MeetingNotesCards.rowInset)
             if record.status != .recording { MeetingPlaybackControls(playback: playback) }
-            MeetingNotesCards(notes: record.notes) { action, completed in
-                let store = store
-                DispatchQueue.global(qos: .userInitiated).async {
-                    let saved = store.setActionCompleted(meetingID: record.id, action: action, completed: completed)
-                    DispatchQueue.main.async {
-                        guard selectedID == record.id else { return }
-                        actionError = saved ? nil : "This action changed or could not be saved. Open the meeting again and retry."
-                    }
+            if let match = selectedSearchMatch {
+                GroupCard(header: "Transcript match") {
+                    VStack(alignment: .leading, spacing: VeloraSpacing.s) {
+                        Text(match.text).textSelection(.enabled)
+                        HStack {
+                            Button("Play at " + MeetingAudioPlayback.clock(Double(match.startMs) / 1_000)) {
+                                playback.play(match)
+                            }
+                            Button("Show transcript") { transcript.setExpanded(true) }
+                        }
+                    }.padding(14)
+                }
+            }
+            MeetingNotesCards(notes: record.notes) { action, completed, completion in
+                store.setActionCompletedAsync(meetingID: record.id, action: action, completed: completed) { saved in
+                    completion(saved)
+                    guard selectedID == record.id else { return }
+                    actionError = saved ? nil : "This action changed or could not be saved. Open the meeting again and retry."
                 }
             }
             if let actionError {
@@ -450,10 +482,14 @@ struct MeetingsSettingsView: View {
         let token = UUID()
         metadataLoadToken = token
         let requestedID = selectedID
+        let requestedQuery = selectedSearchQuery
         let store = store
         DispatchQueue.global(qos: .userInitiated).async {
             let fresh = store.recentMetadata(limit: 100)
             let selected = Self.openMeeting(requestedID, in: store)
+            let matched = requestedID.flatMap { id in
+                requestedQuery.flatMap { store.transcriptMatch(meetingID: id, query: $0) }
+            }
             let resolvedID = selected?.id
             let recoverable = selected.map {
                 store.hasAnyUsableAudio(for: $0)
@@ -483,6 +519,7 @@ struct MeetingsSettingsView: View {
                 loaded = true
                 selectedID = resolvedID
                 selectedRecord = selected
+                selectedSearchMatch = matched
                 playback.configure(selected)
                 selectedHasRecoverableAudio = recoverable
                 selectedCanRetryNotes = canRetryNotes
@@ -502,8 +539,28 @@ struct MeetingsSettingsView: View {
         refreshSearch()
     }
 
-    private func select(_ id: String) {
-        guard selectedID != id else { return }
+    private func importRecording() {
+        let panel = NSOpenPanel()
+        panel.allowedContentTypes = FileTranscriptionTypePolicy.allowedContentTypes
+        panel.allowsMultipleSelection = false
+        panel.canChooseDirectories = false
+        panel.message = "Add a recording to Meetings for local transcription, notes, playback, and export. The original file stays where it is."
+        panel.begin { response in
+            guard response == .OK, let source = panel.url else { return }
+            let selectionAtStart = navigationGeneration
+            importer.start(source) { id in
+                processor.enqueue(meetingID: id)
+                if navigationGeneration == selectionAtStart { select(id) }
+                reload()
+            }
+        }
+    }
+
+    private func select(_ id: String, matching searchQuery: String? = nil) {
+        guard selectedID != id || selectedSearchQuery != searchQuery else { return }
+        navigationGeneration = UUID()
+        selectedSearchQuery = searchQuery
+        selectedSearchMatch = nil
         playback.configure(nil)
         exportRequestToken = UUID()
         actionError = nil
@@ -525,6 +582,7 @@ struct MeetingsSettingsView: View {
         let store = store
         DispatchQueue.global(qos: .userInitiated).async {
             let selected = store.recordMetadata(id: id)
+            let matched = searchQuery.flatMap { store.transcriptMatch(meetingID: id, query: $0) }
             let recoverable = selected.map {
                 store.hasAnyUsableAudio(for: $0)
             } ?? false
@@ -547,6 +605,7 @@ struct MeetingsSettingsView: View {
                     meetingChanged: false, recordChanged: selectedRecord != selected,
                     readableChanged: transcript.readable != readable)
                 selectedRecord = selected
+                selectedSearchMatch = matched
                 playback.configure(selected)
                 selectedHasRecoverableAudio = recoverable
                 selectedCanRetryNotes = canRetryNotes
@@ -561,6 +620,9 @@ struct MeetingsSettingsView: View {
     }
 
     private func closeDetail() {
+        navigationGeneration = UUID()
+        selectedSearchQuery = nil
+        selectedSearchMatch = nil
         playback.configure(nil)
         exportRequestToken = UUID()
         metadataLoadToken = UUID()
@@ -829,6 +891,8 @@ private struct MeetingStatusCard: View {
 struct MeetingPreferenceRows: View {
     @ObservedObject var model: SettingsModel
     @ObservedObject var coordinator: MeetingCoordinator
+    @AppStorage(MeetingPolicy.leadKey) private var calendarLeadMinutes = 5
+    @AppStorage(MeetingPolicy.endKey) private var meetingEndBehavior = MeetingPolicy.EndBehavior.confirmedNative.rawValue
 
     static let footer = "Velora detects calls from local call apps, the microphone, and meeting pages in your browser, never saving meeting addresses, and records only after you choose Start Meeting Notes. The retention setting removes only audio; transcripts and notes stay until you delete them."
 
@@ -842,6 +906,14 @@ struct MeetingPreferenceRows: View {
                     }
                 }
             }
+        Picker("Calendar lead time", selection: $calendarLeadMinutes) {
+            ForEach([0, 5, 10, 15, 30], id: \.self) { Text("\($0) minutes").tag($0) }
+        }.disabled(!model.meetingCalendar)
+        Picker("When the call ends", selection: $meetingEndBehavior) {
+            ForEach(MeetingPolicy.EndBehavior.allCases) { Text($0.title).tag($0.rawValue) }
+        }
+        Text("Browser and manual recordings always ask before finishing unless you choose to keep recording. Detection never starts a recording.")
+            .font(.caption).foregroundStyle(.secondary)
         Picker("Keep meeting audio", selection: $model.meetingAudioRetentionDays) {
             Text("7 days").tag(7)
             Text("30 days").tag(30)

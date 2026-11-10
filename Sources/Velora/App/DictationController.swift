@@ -521,6 +521,7 @@ final class DictationController: NSObject {
     private var sessionIntent = DictationIntent(delivery: .frontApp, startedInVelora: false)
     private var sessionDeliveryPreference: DictationDelivery = .pasteAndKeep
     private var sessionShowsLiveWords = false
+    private var activeEditingPreset: EditingPreset?
     /// The delivery Retry replays: the last start asked for, set before the
     /// refusals that offer Retry. `sessionIntent` is set only once a take
     /// passes them, so a refused Home start would otherwise retry into the
@@ -1349,6 +1350,7 @@ final class DictationController: NSObject {
     /// never pasted text. Scope safety is structural: only the captured
     /// selection can ever be replaced, and only in its origin app.
     func beginEditSession(locked: Bool) {
+        activeEditingPreset = nil
         guard phase == .idle else { return }
         guard config.voiceEdit else { return }
         guard !secureInputActive() else {
@@ -1386,9 +1388,40 @@ final class DictationController: NSObject {
             locked: locked)
     }
 
+    /// Explicit transformations reuse Voice Edit's exact-selection replacement.
+    /// No microphone is opened for a preset.
+    func performEditingPreset(_ preset: EditingPreset) {
+        guard !terminating, phase == .idle, pendingEdit == nil, sublimeCaptureID == nil,
+              sublimeApplyID == nil, streamCancellation == nil,
+              actionsStorage?.isRunning != true else {
+            showNotice(symbol: "hourglass", message: "Velora is busy")
+            return
+        }
+        guard supervisor.isReady, !secureInputActive() else {
+            showError("Writing engine or selection is unavailable")
+            return
+        }
+        let generation = UserInputActivity.selectionSnapshot()
+        let app = NSWorkspace.shared.frontmostApplication ?? contextTracker.frontmost
+        guard let selection = ScreenContext.selectedText(of: app),
+              selection.text.unicodeScalars.count <= Self.maximumEditScalars else {
+            showError("Select editable text first")
+            errorRetryAction = { [weak self] in self?.performEditingPreset(preset) }
+            return
+        }
+        activeEditingPreset = preset
+        hud.model.recordingStart = nil
+        hud.model.levels.reset()
+        hud.model.beginSession(context: HUDSessionContext(appIcon: app?.icon, modeName: preset.title))
+        hud.transition(to: .transcribing)
+        sendEditCommand(selection: selection, bundleID: app?.bundleIdentifier,
+            instruction: preset.instruction, kind: .voiceEdit, inputGeneration: generation)
+    }
+
     /// Proofreads the exact current selection in one step. This path never
     /// starts audio capture or invokes the speech model.
     private func beginProofreadSession() {
+        activeEditingPreset = nil
         guard config.proofreadEnabled, !terminating else { return }
         guard !StreamInteractionGate.selectionEditIsBusy(
             phaseIsIdle: phase == .idle,
@@ -2328,7 +2361,8 @@ final class DictationController: NSObject {
                 }
             },
             voiceEdit: { [weak self] in
-                self?.beginEditSession(locked: true)
+                if let preset = self?.activeEditingPreset { self?.performEditingPreset(preset) }
+                else { self?.beginEditSession(locked: true) }
             },
             proofread: { [weak self] in
                 self?.beginProofreadSession()
@@ -2502,6 +2536,11 @@ final class DictationController: NSObject {
         if let explicitMode {
             var payload = startCommand["context"] as? [String: Any] ?? [:]
             payload["mode"] = explicitMode
+            startCommand["context"] = payload
+        }
+        if ordinaryTake, let route = KeyboardLanguageRouting.context(config: config) {
+            var payload = startCommand["context"] as? [String: Any] ?? [:]
+            payload["keyboard_route"] = route
             startCommand["context"] = payload
         }
         if sessionShowsLiveWords {
@@ -2935,6 +2974,15 @@ final class DictationController: NSObject {
                 hud.model.showsMultiStepProgress = true
             }
             armTranscribeTimeout(after: stallAfterS)
+
+        case .sessionRoute(let session, _, let language, let fallback):
+            guard session == sessionID, phase != .idle, session != cancelledSessionID else { return }
+            let previous = hud.model.sessionContext
+            hud.model.routeStatus = fallback ?? "Speech language: " + language
+            hud.model.sessionContext = HUDSessionContext(appIcon: previous?.appIcon,
+                modeName: fallback == nil ? (previous?.modeName ?? "Default") + " · " + String(language.prefix(12)) : "Model fallback",
+                livePreview: previous?.livePreview ?? false)
+            if fallback != nil { ActivityStore.shared.record(.modelFallback) }
 
         case .partial(let session, let text):
             guard session == sessionID, phase != .idle else { return }
@@ -3375,7 +3423,7 @@ final class DictationController: NSObject {
         // executing Return/Undo or copying its literal words. A clipboard-only
         // take presses nothing: its words are copied as said.
         if let command = sessionIntent.voiceCommand(
-            text: trimmed, raw: raw, enabled: config.voiceCommands) {
+            text: trimmed, raw: raw, enabled: config.voiceCommands && mode != "Snippet") {
             if LateFinalPolicy.commandMayExecute(
                 allowAutomaticInsertion: allowAutomaticInsertion
             ) {
@@ -3523,6 +3571,7 @@ final class DictationController: NSObject {
         }
 
         if let fallbackMessage {
+            ActivityStore.shared.record(.deliveryBlocked)
             NSLog("Velora: insert fallback session=%@ — %@", sessionID, fallbackMessage)
             errorRetryAction = nil
             errorRetryIntent = .dictation
@@ -3610,7 +3659,7 @@ final class DictationController: NSObject {
     ) {
         let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
         if let command = StreamTypingFinalPolicy.voiceCommand(
-            enabled: config.voiceCommands, text: trimmed, raw: raw
+            enabled: config.voiceCommands && mode != "Snippet", text: trimmed, raw: raw
         ) {
             let session = stream.session
             // A command is never draft text. Remove a still-owned provisional

@@ -20,6 +20,7 @@ enum EngineEvent {
     case vocabularyPromoted(count: Int)
 
     /// Display-only streaming transcript used by the fixed live HUD.
+    case sessionRoute(session: String, model: String, language: String, fallback: String?)
     case partial(session: String, text: String)
 
     /// Raw transcript available (before LLM cleanup).
@@ -167,6 +168,10 @@ enum EngineEvent {
         case "vocabulary_promoted":
             return .vocabularyPromoted(
                 count: (object["count"] as? NSNumber)?.intValue ?? 0)
+        case "session_route":
+            return .sessionRoute(session: object["session"] as? String ?? "",
+                model: object["model"] as? String ?? "", language: object["language"] as? String ?? "",
+                fallback: object["fallback"] as? String)
         case "partial":
             return .partial(
                 session: object["session"] as? String ?? "",

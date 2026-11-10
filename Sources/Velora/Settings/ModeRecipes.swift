@@ -90,7 +90,7 @@ enum ModeRecipeDocument {
         let name = try string(fields, "name", maximum: 100, required: true)
             .trimmingCharacters(in: .whitespacesAndNewlines)
         guard !name.isEmpty else { throw invalid("Give the recipe a name.") }
-        let prompt = try string(fields, "prompt", maximum: 16_000)
+        let prompt = try string(fields, "prompt", maximum: 12_000)
         let formatting = try string(fields, "formatting", maximum: 16, fallback: "light")
         guard Mode.formattingOptions.contains(formatting) else {
             throw invalid("Formatting must be off, light, or full.")
@@ -104,7 +104,7 @@ enum ModeRecipeDocument {
             }
             for key in pairs.keys.sorted() {
                 guard !key.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty,
-                      key.count <= 200, let value = pairs[key], value.count <= 4_000 else {
+                      key.unicodeScalars.count <= 200, let value = pairs[key], value.unicodeScalars.count <= 4_000 else {
                     throw invalid("Replacement phrases must be nonempty and at most 200 characters; replacement text must be at most 4,000 characters.")
                 }
                 replacements.append(Mode.Replacement(key: key, value: value))
@@ -149,7 +149,7 @@ enum ModeRecipeDocument {
             if required { throw invalid("The recipe needs a \(key).") }
             return fallback
         }
-        guard let text = value as? String, text.count <= maximum else {
+        guard let text = value as? String, text.unicodeScalars.count <= maximum else {
             throw invalid("\(key.capitalized) must be text with at most \(maximum) characters.")
         }
         return text
@@ -160,7 +160,7 @@ enum ModeRecipeDocument {
     ) throws -> [String] {
         guard let value = fields[key] else { return [] }
         guard let list = value as? [String], list.count <= maximumCount,
-              list.allSatisfy({ $0.count <= maximumLength }) else {
+              list.allSatisfy({ $0.unicodeScalars.count <= maximumLength }) else {
             throw invalid("\(key.capitalized) must be a list of at most \(maximumCount) text entries, each at most \(maximumLength) characters.")
         }
         return list

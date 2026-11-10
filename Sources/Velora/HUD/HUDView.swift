@@ -304,6 +304,7 @@ struct HUDView: View {
     private var recordingControls: some View {
         ZStack(alignment: .topLeading) {
             contextChip
+                .help(model.routeStatus)
                 .frame(
                     width: contextChipWidth,
                     height: HUDGeometry.waveformSize.height,

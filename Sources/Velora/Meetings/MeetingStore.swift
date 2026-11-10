@@ -17,12 +17,14 @@ enum MeetingStatus: String {
 enum MeetingSpeaker: RawRepresentable, Equatable, Hashable {
     case me
     case them
+    case recording
     case remote(Int)
 
     init?(rawValue: String) {
         switch rawValue {
         case "me": self = .me
         case "them": self = .them
+        case "recording": self = .recording
         default:
             guard rawValue.hasPrefix("s"), rawValue.count <= 3,
                   let n = Int(rawValue.dropFirst()), n >= 1
@@ -35,6 +37,7 @@ enum MeetingSpeaker: RawRepresentable, Equatable, Hashable {
         switch self {
         case .me: return "me"
         case .them: return "them"
+        case .recording: return "recording"
         case .remote(let n): return "s\(n)"
         }
     }
@@ -43,6 +46,7 @@ enum MeetingSpeaker: RawRepresentable, Equatable, Hashable {
         switch self {
         case .me: return "Me"
         case .them: return "Them"
+        case .recording: return "Recording"
         case .remote(let n): return "Speaker \(n)"
         }
     }
@@ -120,8 +124,13 @@ struct MeetingRecord: Identifiable, Equatable {
     var micIssue: MeetingTrackIssue?
     var systemIssue: MeetingTrackIssue?
     var segments: [MeetingSegment] = []
+    var isImported: Bool = false
+    var importedDurationMs: Int? = nil
 
-    var durationMs: Int { max(0, Int(endedAt.timeIntervalSince(startedAt) * 1_000)) }
+    var durationMs: Int {
+        if isImported, let importedDurationMs { return max(0, importedDurationMs) }
+        return max(0, Int(endedAt.timeIntervalSince(startedAt) * 1_000))
+    }
 
     /// The warning on a ready meeting that carries an error. A ready row
     /// keeps an error only when a later operation failed; name that one,
@@ -153,7 +162,8 @@ struct MeetingRecord: Identifiable, Equatable {
     }
 
     var exportText: String {
-        var sections = ["# \(title)", "", startedAt.formatted(date: .long, time: .shortened)]
+        var sections = ["# \(title)", "", (isImported ? "Imported " : "")
+            + startedAt.formatted(date: .long, time: .shortened)]
         if !notes.summary.isEmpty { sections += ["", "## Summary", "", notes.summary] }
         if !notes.decisions.isEmpty {
             sections += ["", "## Decisions", ""] + notes.decisions.map { "- \($0)" }
@@ -215,6 +225,7 @@ enum MeetingTrackFormat {
 final class MeetingStore {
     private var db: OpaquePointer?
     private let queue = DispatchQueue(label: "com.velora.meetings.store")
+    private let actionWrites = DispatchQueue(label: "com.velora.meetings.actions", qos: .userInitiated)
     private let databaseURL: URL
     private let filesRoot: URL
     private var ftsAvailable = false
@@ -272,7 +283,9 @@ final class MeetingStore {
                 mic_issue TEXT,
                 system_issue TEXT,
                 notes_partial INTEGER NOT NULL DEFAULT 0,
-                notes_auto_retried INTEGER NOT NULL DEFAULT 0
+                notes_auto_retried INTEGER NOT NULL DEFAULT 0,
+                imported INTEGER NOT NULL DEFAULT 0,
+                imported_duration_ms INTEGER
             );
             CREATE TABLE IF NOT EXISTS meeting_segments (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -323,6 +336,8 @@ final class MeetingStore {
         for column in [
             "mic_issue TEXT", "system_issue TEXT",
             "notes_partial INTEGER NOT NULL DEFAULT 0",
+            "imported INTEGER NOT NULL DEFAULT 0",
+            "imported_duration_ms INTEGER",
         ] {
             sqlite3_exec(db, "ALTER TABLE meetings ADD COLUMN \(column);", nil, nil, nil)
         }
@@ -412,7 +427,9 @@ final class MeetingStore {
         for child in children {
             let isDirectory = (try? child.resourceValues(forKeys: [.isDirectoryKey]).isDirectory) == true
             let name = child.lastPathComponent
-            if isDirectory && UUID(uuidString: name) != nil && !retained.contains(name) {
+            let importID = name.hasPrefix(".import-") ? String(name.dropFirst(8)) : ""
+            let abandonedImport = UUID(uuidString: importID) != nil
+            if isDirectory && (abandonedImport || (UUID(uuidString: name) != nil && !retained.contains(name))) {
                 try? FileManager.default.removeItem(at: child)
             }
         }
@@ -505,8 +522,9 @@ final class MeetingStore {
             let sql = """
                 INSERT OR REPLACE INTO meetings
                     (id, title, started_at, ended_at, source_app, calendar_event_id,
-                     status, summary, decisions, action_items, mic_path, system_path, error)
-                VALUES (?, ?, ?, ?, ?, ?, ?, '', '', '', ?, ?, NULL);
+                     status, summary, decisions, action_items, mic_path, system_path, error,
+                     imported, imported_duration_ms)
+                VALUES (?, ?, ?, ?, ?, ?, ?, '', '', '', ?, ?, NULL, ?, ?);
                 """
             var stmt: OpaquePointer?
             guard sqlite3_prepare_v2(db, sql, -1, &stmt, nil) == SQLITE_OK else { return }
@@ -520,10 +538,82 @@ final class MeetingStore {
             bindText(stmt, 7, status.rawValue)
             bindText(stmt, 8, record.micPath)
             bindText(stmt, 9, record.systemPath)
+            sqlite3_bind_int(stmt, 10, record.isImported ? 1 : 0)
+            if let duration = record.importedDurationMs {
+                sqlite3_bind_int64(stmt, 11, Int64(max(0, duration)))
+            } else { sqlite3_bind_null(stmt, 11) }
             if sqlite3_step(stmt) != SQLITE_DONE {
                 NSLog("Velora: meeting insert failed: %@", lastError)
             }
             protectDatabaseFiles()
+        }
+    }
+
+    /// A private staging directory on the same volume as the meeting library.
+    /// It is never exposed as a recording row until conversion and activation finish.
+    func prepareImportDirectory(id: String) throws -> URL {
+        guard UUID(uuidString: id) != nil else { throw MeetingImportError.invalidSource }
+        return try queue.sync {
+            let root = filesRoot.standardizedFileURL.resolvingSymlinksInPath()
+            let directory = root.appendingPathComponent(".import-" + id, isDirectory: true)
+            try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: false,
+                attributes: [.posixPermissions: 0o700])
+            return directory
+        }
+    }
+
+    /// Rename and INSERT share the store queue, so delete/retention cannot see a
+    /// half-imported row. A crash between them leaves only a sweepable orphan.
+    func activateImport(id: String, title: String, durationMs: Int,
+                        cancelled: () -> Bool) throws -> MeetingRecord {
+        try queue.sync {
+            guard db != nil, UUID(uuidString: id) != nil, durationMs > 0,
+                  let directory = meetingDirectoryURL(id: id) else { throw MeetingImportError.saveFailed }
+            if cancelled() { throw MeetingImportError.cancelled }
+            let staging = directory.deletingLastPathComponent()
+                .appendingPathComponent(".import-" + id, isDirectory: true)
+            let stagingType = try? FileManager.default.attributesOfItem(atPath: staging.path)[.type] as? FileAttributeType
+            let audio = staging.appendingPathComponent("them.caf")
+            let audioType = try? FileManager.default.attributesOfItem(atPath: audio.path)[.type] as? FileAttributeType
+            guard stagingType == .typeDirectory, audioType == .typeRegular,
+                  let decoded = try? AVAudioFile(forReading: audio),
+                  decoded.length > 0, MeetingTrackFormat.isSupported(decoded),
+                  !FileManager.default.fileExists(atPath: directory.path) else { throw MeetingImportError.saveFailed }
+            try FileManager.default.moveItem(at: staging, to: directory)
+            var committed = false
+            defer { if !committed { try? FileManager.default.removeItem(at: directory) } }
+            if cancelled() { throw MeetingImportError.cancelled }
+            var statement: OpaquePointer?
+            let sql = """
+                INSERT INTO meetings (id, title, started_at, ended_at, source_app, status,
+                    system_path, imported, imported_duration_ms)
+                VALUES (?, ?, ?, ?, 'Imported recording', 'processing', ?, 1, ?);
+                """
+            guard sqlite3_prepare_v2(db, sql, -1, &statement, nil) == SQLITE_OK else {
+                throw MeetingImportError.saveFailed
+            }
+            defer { sqlite3_finalize(statement) }
+            let now = Date()
+            bindText(statement, 1, id)
+            bindText(statement, 2, title)
+            sqlite3_bind_double(statement, 3, now.timeIntervalSince1970)
+            sqlite3_bind_double(statement, 4, now.timeIntervalSince1970)
+            bindText(statement, 5, id + "/them.caf")
+            sqlite3_bind_int64(statement, 6, Int64(durationMs))
+            guard sqlite3_step(statement) == SQLITE_DONE else { throw MeetingImportError.saveFailed }
+            committed = true
+            protectDatabaseFiles()
+            return MeetingRecord(id: id, title: title, startedAt: now, endedAt: now,
+                sourceApp: "Imported recording", status: .processing, systemPath: id + "/them.caf",
+                isImported: true, importedDurationMs: durationMs)
+        }
+    }
+
+    /// Reads only the selected meeting, then finds a real transcript match.
+    /// A summary-only match deliberately has no invented timestamp.
+    func transcriptMatch(meetingID: String, query: String) -> MeetingSegment? {
+        queue.sync { [self] in
+            return MeetingTranscriptMatch.first(in: segmentsOnQueue(meetingID: meetingID), query: query)
         }
     }
 
@@ -1061,6 +1151,15 @@ final class MeetingStore {
         }
     }
 
+    /// One ordered lane for every view writing checkboxes to this store.
+    func setActionCompletedAsync(meetingID: String, action: String, completed: Bool,
+                                 completion: @escaping (Bool) -> Void) {
+        actionWrites.async { [self] in
+            let saved = setActionCompleted(meetingID: meetingID, action: action, completed: completed)
+            DispatchQueue.main.async { completion(saved) }
+        }
+    }
+
     /// Rejects a stale checkbox after the action was removed by regeneration
     /// or the meeting was deleted. Nothing outside the matching action changes.
     @discardableResult
@@ -1336,7 +1435,7 @@ final class MeetingStore {
         let sql = """
             SELECT id, title, started_at, ended_at, source_app, calendar_event_id,
                    status, summary, decisions, action_items, mic_path, system_path, error,
-                   mic_issue, system_issue, notes_partial
+                   mic_issue, system_issue, notes_partial, imported, imported_duration_ms
             FROM meetings \(whereClause) ORDER BY started_at DESC LIMIT ?;
             """
         var stmt: OpaquePointer?
@@ -1369,7 +1468,10 @@ final class MeetingStore {
                 error: columnText(stmt, 12),
                 micIssue: Self.issue(from: columnText(stmt, 13)),
                 systemIssue: Self.issue(from: columnText(stmt, 14)),
-                segments: includeSegments ? segmentsOnQueue(meetingID: id) : []))
+                segments: includeSegments ? segmentsOnQueue(meetingID: id) : [],
+                isImported: sqlite3_column_int(stmt, 16) == 1,
+                importedDurationMs: sqlite3_column_type(stmt, 17) == SQLITE_NULL
+                    ? nil : Int(sqlite3_column_int64(stmt, 17))))
         }
         return output
     }

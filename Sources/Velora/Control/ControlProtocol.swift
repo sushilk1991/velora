@@ -128,6 +128,8 @@ final class LocalControlRouter {
     private let listen: AsyncCapability?
     private let action: AsyncCapability?
     private let axProbe: AsyncCapability?
+    private let workflow: AsyncCapability?
+    private let capabilityAllowed: ((AgentCapability) -> Bool)?
 
     init(
         history: HistoryStore,
@@ -138,7 +140,9 @@ final class LocalControlRouter {
         transcribeFile: AsyncCapability? = nil,
         listen: AsyncCapability? = nil,
         action: AsyncCapability? = nil,
-        axProbe: AsyncCapability? = nil
+        axProbe: AsyncCapability? = nil,
+        workflow: AsyncCapability? = nil,
+        capabilityAllowed: ((AgentCapability) -> Bool)? = nil
     ) {
         self.history = history
         self.accessEnabled = accessEnabled
@@ -149,6 +153,8 @@ final class LocalControlRouter {
         self.listen = listen
         self.action = action
         self.axProbe = axProbe
+        self.workflow = workflow
+        self.capabilityAllowed = capabilityAllowed
     }
 
     static let maxActionCommandCharacters = 1_200
@@ -161,12 +167,39 @@ final class LocalControlRouter {
         _ request: ControlRequest,
         completion: @escaping (ControlResponse) -> Void
     ) -> (() -> Void)? {
+        if LocalWorkflowService.commands.contains(request.command) {
+            guard accessEnabled() else { completion(.error(id: request.id, .disabled)); return nil }
+            guard isAllowed(request.command) else {
+                completion(.error(id: request.id, LocalWorkflowService.denied(request.command))); return nil
+            }
+            guard let workflow else {
+                completion(.error(id: request.id, ControlFailure(code: "capability_unavailable", message: "Capability is unavailable")))
+                return nil
+            }
+            var arguments = request.arguments
+            arguments["_command"] = request.command
+            return workflow(arguments) { [weak self] result in
+                guard let self, self.accessEnabled() else { completion(.error(id: request.id, .disabled)); return }
+                guard self.isAllowed(request.command) else {
+                    completion(.error(id: request.id, LocalWorkflowService.denied(request.command))); return
+                }
+                switch result {
+                case .success(let payload): completion(.success(id: request.id, result: payload))
+                case .failure(let failure): completion(.error(id: request.id, failure))
+                }
+            }
+        }
         guard ["transcribe", "listen", "action", "ax_probe"].contains(request.command) else {
             completion(handle(request))
             return nil
         }
         guard accessEnabled() else {
             completion(.error(id: request.id, .disabled))
+            return nil
+        }
+
+        guard isAllowed(request.command) else {
+            completion(.error(id: request.id, LocalWorkflowService.denied(request.command)))
             return nil
         }
 
@@ -177,6 +210,10 @@ final class LocalControlRouter {
                 return nil
             }
             return axProbe([:]) { result in
+                guard self.accessEnabled() else { completion(.error(id: request.id, .disabled)); return }
+                guard self.isAllowed(request.command) else {
+                    completion(.error(id: request.id, LocalWorkflowService.denied(request.command))); return
+                }
                 switch result {
                 case .success(let payload):
                     completion(.success(id: request.id, result: payload))
@@ -212,6 +249,10 @@ final class LocalControlRouter {
             return action([
                 "text": text, "execute": execute, "allow_send": allowSend,
             ]) { result in
+                guard self.accessEnabled() else { completion(.error(id: request.id, .disabled)); return }
+                guard self.isAllowed(request.command) else {
+                    completion(.error(id: request.id, LocalWorkflowService.denied(request.command))); return
+                }
                 switch result {
                 case .success(let payload):
                     completion(.success(id: request.id, result: payload))
@@ -248,6 +289,10 @@ final class LocalControlRouter {
             return nil
         }
         return capability(arguments) { result in
+            guard self.accessEnabled() else { completion(.error(id: request.id, .disabled)); return }
+            guard self.isAllowed(request.command) else {
+                completion(.error(id: request.id, LocalWorkflowService.denied(request.command))); return
+            }
             switch result {
             case .success(let payload):
                 completion(.success(id: request.id, result: payload))
@@ -262,30 +307,34 @@ final class LocalControlRouter {
             return .success(id: request.id, result: status())
         }
         guard accessEnabled() else { return .error(id: request.id, .disabled) }
+        guard isAllowed(request.command) else { return .error(id: request.id, LocalWorkflowService.denied(request.command)) }
         switch request.command {
         case "recent":
-            return .success(
-                id: request.id,
-                result: ["records": records(history.recent(limit: limit(request.arguments)))])
+            return completedRead(request, result: ["records": records(history.recent(limit: limit(request.arguments)))])
         case "search":
             guard let query = query(request.arguments) else {
                 return .error(id: request.id, ControlFailure(
                     code: "invalid_arguments", message: "search requires a non-empty query"))
             }
-            return .success(
-                id: request.id,
-                result: [
+            return completedRead(request, result: [
                     "query": query,
                     "records": records(history.page(
                         limit: limit(request.arguments), offset: 0, search: query)),
                 ])
         case "stats":
-            return .success(id: request.id, result: stats())
+            return completedRead(request, result: stats())
         default:
             return .error(id: request.id, ControlFailure(
                 code: "unknown_command", message: "Unknown command: \(request.command)"))
         }
     }
+
+    private func completedRead(_ request: ControlRequest, result: [String: Any]) -> ControlResponse {
+        guard accessEnabled() else { return .error(id: request.id, .disabled) }
+        guard isAllowed(request.command) else { return .error(id: request.id, LocalWorkflowService.denied(request.command)) }
+        return .success(id: request.id, result: result)
+    }
+
 
     private func status() -> [String: Any] {
         let enabled = accessEnabled()
@@ -297,6 +346,7 @@ final class LocalControlRouter {
             "safe_to_restart": blockReason == nil,
             "protocol_version": ControlRequest.version,
             "capabilities": enabled ? capabilities : [],
+            "permission_grants": enabled ? AgentCapability.allCases.filter { capabilityAllowed?($0) ?? true }.map(\.rawValue) : [],
         ]
         if let blockReason {
             result["restart_block_reason"] = blockReason
@@ -310,7 +360,12 @@ final class LocalControlRouter {
         if listen != nil { values.append("listen") }
         if action != nil { values.append("action") }
         if axProbe != nil { values.append("ax_probe") }
-        return values
+        if workflow != nil { values += LocalWorkflowService.commands }
+        return values.filter(isAllowed)
+    }
+
+    private func isAllowed(_ command: String) -> Bool {
+        AgentAccessPolicy.required(for: command).allSatisfy { capabilityAllowed?($0) ?? true }
     }
 
     /// A missing mode is valid. A present value is trimmed and bounded; this

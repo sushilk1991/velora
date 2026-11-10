@@ -240,6 +240,8 @@ final class EngineSupervisor: NSObject, EngineClientDelegate {
     private(set) var state: State = .stopped {
         didSet {
             guard state != oldValue else { return }
+            if case .degraded = state { ActivityStore.shared.record(.engineUnavailable) }
+            if state == .launching && oldValue != .stopped { ActivityStore.shared.record(.engineRestart) }
             NSLog("Velora: engine state → \(state)")
             if state != .ready { setupComplete = false }
             if state == .launching || state == .stopped {

@@ -11,6 +11,7 @@ struct TextFormattingResult: Equatable {
     var explanation: String {
         let operation: String
         switch reason {
+        case "snippet": operation = "Saved snippet inserted as literal text"
         case "cleanup_disabled": operation = "Writing cleanup is off"
         case "formatting_off": operation = "No writing model"
         case "short_utterance": operation = "Light cleanup for a short passage"
@@ -78,7 +79,7 @@ final class TextFormattingClient {
     @discardableResult
     func format(
         _ text: String, mode: Mode? = nil, modeName: String? = nil,
-        bundleID: String? = nil, appName: String? = nil,
+        bundleID: String? = nil, appName: String? = nil, personalContext: Bool = true,
         completion: @escaping (Result<TextFormattingResult, TextFormattingFailure>) -> Void
     ) -> String? {
         guard let supervisor, supervisor.state == .ready else {
@@ -94,6 +95,7 @@ final class TextFormattingClient {
         }
         let id = UUID().uuidString
         var command: [String: Any] = ["cmd": "format_text", "request_id": id, "text": text]
+        command["personal_context"] = personalContext
         if let mode {
             command["inline_mode"] = Self.modePayload(mode)
         } else if let modeName {
@@ -129,6 +131,9 @@ final class TextFormattingClient {
     private func finish(_ id: String, _ result: Result<TextFormattingResult, TextFormattingFailure>) {
         guard let request = pending.removeValue(forKey: id) else { return }
         request.timeout.cancel()
+        if case .failure(let failure) = result, failure.code != "cancelled" {
+            ActivityStore.shared.record(.formattingFailed)
+        }
         request.completion(result)
     }
 }

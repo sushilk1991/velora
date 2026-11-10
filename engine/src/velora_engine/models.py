@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 import functools
+import threading
+from contextlib import contextmanager
 import hashlib
 import logging
 import json
@@ -555,6 +557,20 @@ def _legacy_cached(model_id: str) -> str | None:
         return None
 
 
+_resolution_policy = threading.local()
+
+
+@contextmanager
+def installed_only():
+    """Constrain one loader thread to installed files, even if a cache disappears."""
+    previous = getattr(_resolution_policy, "installed_only", False)
+    _resolution_policy.installed_only = True
+    try:
+        yield
+    finally:
+        _resolution_policy.installed_only = previous
+
+
 def ensure_downloaded(model_id: str) -> str:
     """Return the local snapshot path, downloading only when not cached.
 
@@ -571,6 +587,12 @@ def ensure_downloaded(model_id: str) -> str:
     owned = _owned_cached(model_id)
     if owned is not None:
         return owned
+
+    if getattr(_resolution_policy, "installed_only", False):
+        cached = _legacy_cached(model_id)
+        if cached is None:
+            raise FileNotFoundError("The selected speech model is not installed")
+        return cached
 
     if bark_spec(model_id) is not None:
         # Reuse the pinned, bounded worker pipeline instead of fetching the
@@ -626,6 +648,17 @@ def ensure_downloaded(model_id: str) -> str:
         raise OSError("Model cache integrity failed. Required model files are missing or corrupt.")
     log.info("model %s ready at %s (%.1fs)", model_id, path, time.perf_counter() - t0)
     return path
+
+
+def cached_model_path(model_id: str) -> str | None:
+    """Resolve an already installed, verified registered model without downloading."""
+    info = lookup(model_id)
+    if info is None or info.kind != "stt":
+        return None
+    try:
+        return _owned_cached(model_id) or _legacy_cached(model_id)
+    except Exception:
+        return None
 
 
 def is_cached(model_id: str) -> bool:

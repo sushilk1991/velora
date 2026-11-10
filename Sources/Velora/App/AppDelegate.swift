@@ -186,6 +186,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     private var loadingObserver: NSObjectProtocol?
     private var hudPrefsObserver: NSObjectProtocol?
     private var localAgentAccessObserver: LocalAgentAccessRevocationObserver?
+    private var localWorkflowService: LocalWorkflowService?
+    private var localCapabilitiesObserver: NSObjectProtocol?
+    private var localActionRequestIDs: Set<UUID> = []
     private var meetingHUDActive = false
     /// Exact state last placed on the shared HUD by a meeting flow. Equality
     /// is the ownership token: teardown never hides a state
@@ -461,6 +464,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             self?.showMeetingNotes(meetingID: meetingID)
         }
 
+        let workflowService = LocalWorkflowService(
+            history: history, meetings: meetings, dictionary: dictionary, supervisor: supervisor,
+            accessEnabled: { AppConfig.shared.localAgentAccess },
+            engineReady: { [weak supervisor] in supervisor?.isReady ?? false })
+        localWorkflowService = workflowService
         let controlRouter = LocalControlRouter(
             history: history,
             accessEnabled: { AppConfig.shared.localAgentAccess },
@@ -478,7 +486,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                             code: "app_unavailable", message: "Velora is shutting down")))
                         return
                     }
-                    guard self.config.localAgentAccess else {
+                    guard self.config.localAgentAccess, AgentAccessPolicy.shared.allows(.files) else {
                         completion(.failure(.disabled))
                         return
                     }
@@ -530,7 +538,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                             code: "app_unavailable", message: "Velora is shutting down")))
                         return
                     }
-                    guard self.config.localAgentAccess else {
+                    guard self.config.localAgentAccess, AgentAccessPolicy.shared.allows(.microphone) else {
                         completion(.failure(.disabled))
                         return
                     }
@@ -577,7 +585,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                             code: "app_unavailable", message: "Velora is shutting down")))
                         return
                     }
-                    guard self.config.localAgentAccess else {
+                    guard self.config.localAgentAccess, AgentAccessPolicy.shared.allows(.actions) else {
                         completion(.failure(.disabled))
                         return
                     }
@@ -586,12 +594,16 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                             code: "invalid_arguments", message: "action requires a command")))
                         return
                     }
+                    self.localActionRequestIDs.insert(requestID)
                     self.dictation.performAction(
                         command: text,
                         execute: arguments["execute"] as? Bool ?? false,
                         allowSend: arguments["allow_send"] as? Bool ?? false,
                         requestID: requestID,
-                        completion: completion)
+                        completion: { [weak self] result in
+                            self?.localActionRequestIDs.remove(requestID)
+                            completion(result)
+                        })
                 }
                 return { [weak self] in
                     DispatchQueue.main.async {
@@ -601,7 +613,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             },
             axProbe: { [weak self] _, completion in
                 DispatchQueue.main.async {
-                    guard let self, self.config.localAgentAccess else {
+                    guard let self, self.config.localAgentAccess, AgentAccessPolicy.shared.allows(.actions) else {
                         completion(.failure(.disabled))
                         return
                     }
@@ -613,13 +625,30 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                     completion(.success(dump))
                 }
                 return {}
-            })
+            },
+            workflow: { arguments, completion in workflowService.handle(arguments, completion: completion) },
+            capabilityAllowed: { AgentAccessPolicy.shared.allows($0) })
         let controlServer = LocalControlServer(router: controlRouter)
         if controlServer.start() { self.controlServer = controlServer }
 
         localAgentAccessObserver = LocalAgentAccessRevocationObserver { [weak self] in
             self?.dictation.revokeExternalAccess()
             self?.transcriber.revokeAgentAccess()
+            self?.localWorkflowService?.revoke()
+            if let self {
+                for id in Array(self.localActionRequestIDs) { self.dictation.cancelAction(requestID: id) }
+            }
+        }
+        localCapabilitiesObserver = NotificationCenter.default.addObserver(
+            forName: .veloraAgentCapabilitiesChanged, object: nil, queue: .main
+        ) { [weak self] notification in
+            guard notification.object as? Bool == false, let self else { return }
+            if !AgentAccessPolicy.shared.allows(.microphone) { self.dictation.revokeExternalAccess() }
+            if !AgentAccessPolicy.shared.allows(.files) { self.transcriber.revokeAgentAccess() }
+            if !AgentAccessPolicy.shared.allows(.actions) {
+                for id in Array(self.localActionRequestIDs) { self.dictation.cancelAction(requestID: id) }
+            }
+            if !AgentAccessPolicy.shared.allows(.formatting) { self.localWorkflowService?.revoke() }
         }
 
         supervisor.delegate = self
@@ -948,6 +977,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             NotificationCenter.default.removeObserver(hudPrefsObserver)
         }
         localAgentAccessObserver?.stop()
+        if let localCapabilitiesObserver { NotificationCenter.default.removeObserver(localCapabilitiesObserver) }
     }
 
     // MARK: - Windows
@@ -1163,6 +1193,10 @@ extension AppDelegate: StatusItemControllerDelegate {
 
     func statusItemPasteLastRaw() {
         dictation.pasteLastRawOriginal()
+    }
+
+    func statusItemTransformSelection(_ preset: EditingPreset) {
+        dictation.performEditingPreset(preset)
     }
 
     func statusItemReformatLast(mode: String) {

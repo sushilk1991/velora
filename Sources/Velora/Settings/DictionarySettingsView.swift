@@ -470,6 +470,7 @@ struct DictionarySettingsView: View {
             ScrollView {
                 VStack(alignment: .leading, spacing: DictionaryMetrics.sectionSpacing) {
                     learningCard
+                    SnippetSettingsCard()
                     entriesCard
                 }
                 .padding(.bottom, VeloraSpacing.xl)

@@ -914,7 +914,7 @@ private struct JournalEntry: View {
     @State private var reformatting = false
     @State private var reformatModeOverride: String?
     @State private var reformatSnapshot: DictationRecord?
-    @State private var rememberedSpellings: [DictionaryRow] = []
+    @State private var rememberedSpellings: [DictionaryEntry] = []
     @State private var spellingMessage: String?
     @State private var editDraft = ""
     @State private var editError: String?
@@ -1310,7 +1310,7 @@ private struct JournalEntry: View {
                 Button("Remember spelling: \(pair.wrong) → \(pair.right)") {
                     do {
                         let row = try dictionary.add(writeAs: pair.right, heardAs: pair.wrong)
-                        rememberedSpellings.append(row)
+                        if let receipt = dictionary.document.entry(id: row.id) { rememberedSpellings.append(receipt) }
                         spellingMessage = "Remembered. You can undo this here or remove it in Dictionary."
                     } catch { spellingMessage = error.localizedDescription }
                 }
@@ -1322,9 +1322,9 @@ private struct JournalEntry: View {
                     if let last = rememberedSpellings.last {
                         Button("Undo") {
                             do {
-                                try dictionary.remove(id: last.id)
+                                let removed = try dictionary.undoAddition(last)
                                 rememberedSpellings.removeLast()
-                                self.spellingMessage = "Spelling removed."
+                                self.spellingMessage = removed ? "Spelling removed." : "This spelling changed since it was remembered. The newer entry was kept."
                             } catch { self.spellingMessage = error.localizedDescription }
                         }.buttonStyle(.link)
                     }

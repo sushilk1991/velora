@@ -292,6 +292,10 @@ enum Selftest {
         testModeRecipes()
         testMeetingReviewFeatures()
         testWritingRecovery()
+        testSnippetsAndActivity()
+        testMeetingLibraryImport()
+        testLocalWorkflowCapabilities()
+        testRuntimePreferences()
         testScratchPreferenceCheck()
         testSelftestIsolation(preferencesBaseline: preferencesBaseline)
         testNothingLeftOnScreen()
@@ -3909,6 +3913,7 @@ enum Selftest {
         stateExistedAtReload = false
 
         let replacement = try! repository.add(writeAs: "Airlearn", heardAs: "air learn")
+        let originalSpellingReceipt = repository.document.entry(id: replacement.id)!
         expect(reloads == 1 && stateExistedAtReload,
                "repository persists and projects before requesting one engine reload")
         let config = AppConfig.manualDictionarySnapshot(at: fixture.config)
@@ -3920,6 +3925,18 @@ enum Selftest {
             id: replacement.id, writeAs: "Airlearn AI", heardAs: "air learn")
         expect(repository.rows.first(where: { $0.id == replacement.id })?.writeAs == "Airlearn AI",
                "editing a manual rule updates the stable heard-as entry")
+        expect((try? repository.undoAddition(originalSpellingReceipt)) == false,
+               "an old spelling Undo cannot remove a newer entry revision")
+        let newSpelling = try! repository.add(writeAs: "Velora", heardAs: "valora")
+        let spellingReceipt = repository.document.entry(id: newSpelling.id)!
+        let remoteSpelling = try! spellingReceipt.revising(writeAs: "Velora App", deviceID: "remote-device", at: Date(timeIntervalSince1970: 900))
+        try! repository.mergeRemote(repository.document.upserting(remoteSpelling))
+        expect((try? repository.undoAddition(spellingReceipt)) == false
+            && repository.rows.contains(where: { $0.id == newSpelling.id && $0.writeAs == "Velora App" }),
+            "spelling Undo preserves a newer synced correction")
+        let removable = try! repository.add(writeAs: "SnippetName", heardAs: "snippet name")
+        expect((try? repository.undoAddition(repository.document.entry(id: removable.id)!)) == true,
+               "an unchanged spelling addition can be undone")
         do {
             _ = try repository.add(writeAs: "Airline", heardAs: "air learn")
             expect(false, "adding a conflicting heard-as rule requires an explicit decision")
@@ -9874,8 +9891,8 @@ enum Selftest {
             "jsonrpc": "2.0", "id": "tools", "method": "tools/list",
         ], caller: caller)
         let tools = (listed?["result"] as? [String: Any])?["tools"] as? [[String: Any]]
-        expect(tools?.count == 6,
-               "MCP lists the read-only tools plus file and consented voice input")
+        expect(tools?.count == 20,
+               "MCP lists bounded workflow tools behind the app capability grants")
 
         let calledTool = MCPStdioServer.process([
             "jsonrpc": "2.0", "id": 2, "method": "tools/call",
@@ -9969,6 +9986,29 @@ enum Selftest {
             competing.stop()
             expect(FileManager.default.fileExists(atPath: path),
                    "a server that never owned the socket cannot unlink it")
+
+            let cancellation = ControlClientCancellation()
+            let callerReturned = DispatchSemaphore(value: 0)
+            DispatchQueue.global(qos: .userInitiated).async {
+                defer { callerReturned.signal() }
+                _ = try? LocalControlClient.send(command: "listen", path: path, timeoutSeconds: 30,
+                                                 cancellation: cancellation)
+            }
+            expect(longRequestStarted.wait(timeout: .now() + 2) == .success,
+                   "cancellable client begins a broker request")
+            cancellation.cancel()
+            expect(callerReturned.wait(timeout: .now() + 2) == .success,
+                   "Shortcut cancellation promptly unblocks its socket client")
+            expect(longRequestCancelled.wait(timeout: .now() + 2) == .success,
+                   "Shortcut cancellation reaches app-owned work through disconnect")
+            let preCancelled = ControlClientCancellation()
+            preCancelled.cancel()
+            do {
+                _ = try LocalControlClient.send(command: "status", path: path, cancellation: preCancelled)
+                expect(false, "pre-cancelled client cannot dispatch")
+            } catch is CancellationError {
+                expect(true, "pre-cancelled client cannot dispatch")
+            } catch { expect(false, "pre-cancelled client reports cancellation") }
 
             DispatchQueue.global(qos: .userInitiated).async {
                 _ = try? LocalControlClient.send(
@@ -17518,6 +17558,9 @@ private final class RecordingOutputVolume: OutputVolumeControlling {
 
     // Register testModeRecipes() beside the existing Modes suites.
     private static func testModeRecipes() {
+        let oversizedPrompt: [String: Any] = ["name": "Too long", "prompt": String(repeating: "a", count: 12_001)]
+        do { _ = try ModeRecipeDocument.decode(JSONSerialization.data(withJSONObject: oversizedPrompt)); expect(false, "mode import matches preview prompt limit") }
+        catch { expect(true, "oversized prompt rejected before saving") }
         let base = FileManager.default.temporaryDirectory
             .appendingPathComponent("velora-mode-recipes-\(UUID().uuidString)")
         let directory = base.appendingPathComponent("modes", isDirectory: true)
@@ -17641,6 +17684,13 @@ private final class RecordingOutputVolume: OutputVolumeControlling {
                "meeting action completion is durable in the database")
         expect(!store.setActionCompleted(meetingID: id, action: "Invented action", completed: true),
                "a stale or invented meeting action cannot be checked off")
+        var orderedActionWrites: [Bool] = []
+        store.setActionCompletedAsync(meetingID: id, action: "Send draft", completed: true) { orderedActionWrites.append($0) }
+        store.setActionCompletedAsync(meetingID: id, action: "Send draft", completed: false) { orderedActionWrites.append($0) }
+        expect(waitUntil { orderedActionWrites.count == 2 }
+            && orderedActionWrites == [true, true]
+            && store.record(id: id)?.notes.completedActionItems.isEmpty == true,
+            "rapid check and uncheck persist in submission order")
         store.complete(meetingID: id, notes: MeetingNotes(summary: "New notes", actionItems: ["Review it"]))
         expect(store.record(id: id)?.notes.completedActionItems.isEmpty == true
                && !store.setActionCompleted(meetingID: id, action: "Send draft", completed: false),
@@ -17702,6 +17752,389 @@ private final class RecordingOutputVolume: OutputVolumeControlling {
         if case .unknown = EngineEvent.parse(["event": "text_formatted", "text": "orphan"]) {
             expect(true, "an uncorrelated formatting response cannot settle a request")
         } else { expect(false, "formatting requires request identity") }
+    }
+
+    private static func testSnippetsAndActivity() {
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent("velora-snippets-" + UUID().uuidString)
+        defer { try? FileManager.default.removeItem(at: root) }
+        let snippetsURL = root.appendingPathComponent("snippets.json")
+        let snippets = SnippetStore(url: snippetsURL)
+        do {
+            try snippets.save(trigger: "Insert my signature", text: "Regards,\nVelora")
+            expect(SnippetStore(url: snippetsURL).snippets == snippets.snippets,
+                   "literal multi-line snippets survive relaunch")
+            do { try snippets.save(trigger: "insert my signature.", text: "Duplicate"); expect(false, "duplicate trigger rejected") }
+            catch { expect(true, "duplicate trigger rejected") }
+            do { try snippets.save(trigger: "scratch that", text: "Unsafe trigger"); expect(false, "voice-command trigger rejected") }
+            catch { expect(true, "voice-command trigger rejected") }
+            let attrs = try FileManager.default.attributesOfItem(atPath: snippetsURL.path)
+            expect((attrs[.posixPermissions] as? NSNumber)?.intValue == 0o600, "snippets are owner-only")
+            if let item = snippets.snippets.first { try snippets.delete(item.id) }
+            expect(SnippetStore(url: snippetsURL).snippets.isEmpty, "snippet deletion is durable")
+            try Data("corrupt".utf8).write(to: snippetsURL)
+            let corrupt = SnippetStore(url: snippetsURL)
+            do { try corrupt.save(trigger: "hello", text: "world"); expect(false, "corrupt snippet file is preserved") }
+            catch { expect((try? String(contentsOf: snippetsURL, encoding: .utf8)) == "corrupt", "corrupt snippet file is preserved") }
+        } catch { expect(false, "snippet storage: \(error)") }
+        let eventsURL = root.appendingPathComponent("activity.json")
+        let activity = ActivityStore(url: eventsURL)
+        activity.record(.deliveryBlocked, date: Date(timeIntervalSince1970: 100))
+        activity.record(.deliveryBlocked, date: Date(timeIntervalSince1970: 101))
+        expect(activity.items.count == 1, "repeated support events are coalesced")
+        for index in 0..<210 { activity.record(.modelFallback, date: Date(timeIntervalSince1970: Double(index * 10 + 200))) }
+        expect(activity.items.count == 200, "support events have bounded retention")
+        let exported = (try? activity.exportData()) ?? Data()
+        let exportText = String(data: exported, encoding: .utf8) ?? ""
+        expect(!exportText.contains("transcript") && !exportText.contains("path"), "support export has only typed event fields")
+        activity.clear()
+        expect(waitUntil { (try? JSONDecoder().decode([ActivityItem].self, from: Data(contentsOf: eventsURL)))?.isEmpty == true },
+               "clearing support events persists the empty state")
+        expect(EditingPreset.allCases.allSatisfy { $0.instruction.contains("Preserve meaning") },
+               "editing presets retain the fidelity contract")
+        if case .sessionRoute(let session, let model, let language, let fallback) = EngineEvent.parse([
+            "event": "session_route", "session": "route-1", "model": "saved", "language": "hi", "fallback": "Using saved model"
+        ]) {
+            expect(session == "route-1" && model == "saved" && language == "hi" && fallback != nil,
+                   "language route results remain bound to their recording")
+        } else { expect(false, "session route event parses") }
+    }
+
+    static func testMeetingLibraryImport() {
+        let base = FileManager.default.temporaryDirectory
+            .appendingPathComponent("velora-meeting-import-\(UUID().uuidString)", isDirectory: true)
+        let root = base.appendingPathComponent("library", isDirectory: true)
+        defer { try? FileManager.default.removeItem(at: base) }
+        do {
+            try FileManager.default.createDirectory(at: base, withIntermediateDirectories: true)
+            let source = base.appendingPathComponent("Source interview.wav")
+            guard let format = AVAudioFormat(commonFormat: .pcmFormatInt16,
+                sampleRate: 16_000, channels: 1, interleaved: true),
+                let buffer = AVAudioPCMBuffer(pcmFormat: format, frameCapacity: 16_000) else {
+                expect(false, "import fixture format is available"); return
+            }
+            buffer.frameLength = 16_000
+            buffer.int16ChannelData!.pointee.initialize(repeating: 600, count: 16_000)
+            try autoreleasepool {
+                let writer = try AVAudioFile(forWriting: source, settings: format.settings,
+                    commonFormat: .pcmFormatInt16, interleaved: true)
+                try writer.write(from: buffer)
+            }
+            let sourceBytes = try Data(contentsOf: source)
+            let store = MeetingStore(url: root.appendingPathComponent("meetings.sqlite3"), filesRoot: root)
+            let operation = MeetingImportOperation()
+            let imported = try MeetingRecordingImporter.importRecording(source, into: store, operation: operation)
+            let metadata = store.recordMetadata(id: imported.id)
+            expect(metadata?.isImported == true && metadata?.durationMs == 1_000
+                   && metadata?.micPath == nil && metadata?.sourceApp == "Imported recording",
+                   "recording import persists source identity and measured duration without Me attribution")
+            expect(metadata?.startedAt == metadata?.endedAt,
+                   "import date does not invent a historical meeting start/end time")
+            guard let audio = store.audioURL(relativePath: metadata?.systemPath) else {
+                expect(false, "import activates a readable owned audio path"); return
+            }
+            expect(store.hasUsableAudio(relativePath: metadata?.systemPath),
+                   "import normalizes audio to the existing resumable meeting format")
+            let attributes = try FileManager.default.attributesOfItem(atPath: audio.path)
+            let directoryAttributes = try FileManager.default.attributesOfItem(atPath: audio.deletingLastPathComponent().path)
+            expect((attributes[.posixPermissions] as? NSNumber)?.intValue == 0o600
+                   && (directoryAttributes[.posixPermissions] as? NSNumber)?.intValue == 0o700,
+                   "imported recordings and their directory are owner-only")
+            expect(try Data(contentsOf: source) == sourceBytes, "import never rewrites its original file")
+
+            let received = MeetingSegment(meetingID: imported.id, speaker: .them,
+                chunkIndex: 0, startMs: 0, endMs: 1_000, text: "Café launch budget approved")
+            let normalized = MeetingProcessor.sourceSegment(received, imported: true)
+            expect(normalized.speaker == .recording
+                   && MeetingProcessor.sourceSegment(received, imported: false) == received,
+                   "imported wire channels become Recording while captured channel labels are preserved")
+            store.appendSegment(normalized)
+            expect(store.nextChunk(meetingID: imported.id, speaker: .them) == 1,
+                   "imported Recording labels preserve the existing system-track resume cursor")
+            expect(store.record(id: imported.id)?.formattedTranscript.contains("Recording: Café") == true,
+                   "saved transcripts do not call an imported interview Me or Them")
+            expect(store.transcriptMatch(meetingID: imported.id, query: "CAFE budget")?.startMs == 0,
+                   "meeting search resolves a real case/diacritic-normalized transcript passage")
+            expect(MeetingTranscriptMatch.first(in: [received], query: "cat") == nil
+                   && MeetingTranscriptMatch.first(in: [MeetingSegment(meetingID: imported.id,
+                       speaker: .recording, chunkIndex: 0, startMs: 0, endMs: 1_000,
+                       text: "concatenate the result")], query: "cat") == nil,
+                   "search navigation does not invent a word match from an unrelated substring")
+
+            var messages: [[String: Any]] = []
+            let processor = MeetingProcessor(store: store, engineIsReady: { true },
+                sendToEngine: { messages.append($0) })
+            processor.enqueue(meetingID: imported.id)
+            expect(messages.first?["cmd"] as? String == "meeting_transcribe"
+                   && messages.first?["speaker"] as? String == "them"
+                   && messages.first?["start_chunk"] as? Int == 1,
+                   "imported jobs reuse the installed engine wire contract and durable checkpoint")
+            if let job = messages.first?["id"] as? String {
+                processor.handle(.meetingSegment(id: job,
+                    segment: MeetingSegment(meetingID: imported.id, speaker: .them, chunkIndex: 1,
+                        startMs: 1_000, endMs: 2_000, text: "Second imported passage")))
+                expect(store.record(id: imported.id)?.segments.allSatisfy { $0.speaker == .recording } == true,
+                       "the live processor maps every imported completion before saving it")
+            }
+            processor.cancelCurrent()
+            let player = MeetingAudioPlayback(store: store)
+            player.configure(store.recordMetadata(id: imported.id))
+            expect(player.tracks == [.recording] && player.track == .recording,
+                   "imported playback exposes one Recording track instead of a Mac/microphone label")
+            expect(store.delete(meetingID: imported.id)
+                   && store.transcriptMatch(meetingID: imported.id, query: "budget") == nil
+                   && FileManager.default.fileExists(atPath: source.path),
+                   "deletion invalidates imported search/audio and leaves the original file intact")
+
+            let cancelled = MeetingImportOperation()
+            cancelled.cancel()
+            do {
+                _ = try MeetingRecordingImporter.importRecording(source, into: store, operation: cancelled)
+                expect(false, "a cancelled import cannot activate")
+            } catch MeetingImportError.cancelled {
+                expect(true, "cancel before decoding leaves no meeting")
+            }
+            let during = MeetingImportOperation()
+            do {
+                _ = try MeetingRecordingImporter.importRecording(source, into: store, operation: during,
+                    progress: { _ in during.cancel() })
+                expect(false, "cancel during decoding cannot activate")
+            } catch MeetingImportError.cancelled {
+                expect(store.recentMetadata().isEmpty, "cancelled conversion leaves no partial recording row")
+                let children = try FileManager.default.contentsOfDirectory(atPath: root.path)
+                expect(!children.contains { $0.hasPrefix(".import-") || UUID(uuidString: $0) != nil },
+                       "cancelled import removes all of its staging and activated audio")
+            }
+        } catch {
+            expect(false, "meeting import fixture: \(error)")
+        }
+
+        let domain = scratchDomain("meeting-policy")
+        let defaults = UserDefaults(suiteName: domain)!
+        defer { removeScratchDomain(domain) }
+        let policy = MeetingPolicy(defaults: defaults)
+        expect(policy.calendarLeadMinutes == 5 && policy.endBehavior == .confirmedNative,
+               "meeting policy migration retains existing calendar/end behavior")
+        policy.calendarLeadMinutes = 100
+        expect(policy.calendarLeadMinutes == 30, "calendar lead time is bounded")
+        policy.calendarLeadMinutes = -1
+        expect(policy.calendarLeadMinutes == 0, "calendar lead time never becomes negative")
+        expect(MeetingPolicy.automaticallyFinishes(behavior: .confirmedNative,
+                   microphoneEvidence: true, scope: .native("Zoom"))
+               && !MeetingPolicy.automaticallyFinishes(behavior: .ask,
+                   microphoneEvidence: true, scope: .native("Zoom"))
+               && !MeetingPolicy.automaticallyFinishes(behavior: .never,
+                   microphoneEvidence: true, scope: .native("Zoom"))
+               && !MeetingPolicy.automaticallyFinishes(behavior: .confirmedNative,
+                   microphoneEvidence: true, scope: .browser("Chrome"))
+               && !MeetingPolicy.automaticallyFinishes(behavior: .confirmedNative,
+                   microphoneEvidence: false, scope: .native("Zoom")),
+               "end preferences can require consent but never strengthen weak recording evidence")
+    }
+
+    private static func testLocalWorkflowCapabilities() {
+        let domain = scratchDomain("agent-grants")
+        let defaults = UserDefaults(suiteName: domain)!
+        defer { removeScratchDomain(domain) }
+        let center = NotificationCenter()
+        let policy = AgentAccessPolicy(defaults: defaults, center: center)
+        expect(policy.allows(.history) && policy.allows(.files) && policy.allows(.microphone),
+               "existing master-gated history, supplied files, and consented input remain available")
+        expect(!policy.allows(.meetings) && !policy.allows(.vocabularyWrite)
+               && !policy.allows(.vocabularyRead) && !policy.allows(.actions)
+               && !policy.allows(.configuration) && !policy.allows(.delivery),
+               "new data and mutation grants begin disabled")
+        var revocations = 0
+        let observer = center.addObserver(forName: .veloraAgentCapabilitiesChanged,
+                                          object: nil, queue: nil) { note in
+            if note.object as? Bool == false { revocations += 1 }
+        }
+        defer { center.removeObserver(observer) }
+        policy.setAllowed(true, for: .meetings)
+        policy.setAllowed(false, for: .meetings)
+        policy.setAllowed(false, for: .meetings)
+        expect(revocations == 1 && !AgentAccessPolicy(defaults: defaults).allows(.meetings),
+               "capability revocation persists and emits one live edge")
+
+        withHistoryStore { history, url in
+            for command in ["recent", "search", "stats"] {
+                var checks = 0
+                let revoking = LocalControlRouter(history: history,
+                    accessEnabled: { checks += 1; return checks == 1 }, engineReady: { true }, typingWPM: { 40 })
+                let response = revoking.handle(ControlRequest(id: "revoked", command: command,
+                    arguments: command == "search" ? ["query": "test"] : [:]))
+                expect(response.failure?.code == "access_disabled" && response.result == nil,
+                       "\(command) rechecks access after its synchronous read")
+            }
+            var dispatched = ""
+            var pending: ((Result<[String: Any], ControlFailure>) -> Void)?
+            let router = LocalControlRouter(history: history, accessEnabled: { true },
+                engineReady: { true }, typingWPM: { 40 },
+                workflow: { arguments, completion in
+                    dispatched = arguments["_command"] as? String ?? ""
+                    pending = completion
+                    return {}
+                }, capabilityAllowed: { policy.allows($0) })
+            var response: ControlResponse?
+            _ = router.handle(ControlRequest(id: "closed", command: "meetings_list", arguments: [:])) { response = $0 }
+            expect(response?.failure?.code == "capability_disabled" && dispatched.isEmpty,
+                   "a history grant cannot read meeting content or enter its service")
+            policy.setAllowed(true, for: .meetings)
+            response = nil
+            _ = router.handle(ControlRequest(id: "open", command: "meetings_list",
+                                            arguments: ["_command": "vocabulary_remove"])) { response = $0 }
+            expect(dispatched == "meetings_list", "caller data cannot replace the broker's workflow command")
+            policy.setAllowed(false, for: .meetings)
+            pending?(.success(["private": "must not escape"]))
+            expect(response?.failure?.code == "capability_disabled" && response?.result == nil,
+                   "revocation suppresses even a completed pending meeting response")
+            policy.setAllowed(false, for: .history)
+            expect(router.handle(ControlRequest(id: "history", command: "recent", arguments: [:])).failure?.code
+                   == "capability_disabled", "history has its own revocable grant under the master toggle")
+
+            let base = url.deletingLastPathComponent().appendingPathComponent("workflows")
+            try? FileManager.default.createDirectory(at: base, withIntermediateDirectories: true)
+            let dictionary = DictionaryRepository(
+                stateURL: base.appendingPathComponent("dictionary.json"),
+                configURL: base.appendingPathComponent("config.json"),
+                learnedURL: base.appendingPathComponent("learned.json"),
+                autoURL: base.appendingPathComponent("auto.json"), deviceID: "workflow-selftest")
+            let meetings = MeetingStore(url: base.appendingPathComponent("meetings.sqlite3"),
+                                        filesRoot: base.appendingPathComponent("recordings"))
+            let modes = base.appendingPathComponent("modes")
+            let service = LocalWorkflowService(history: history, meetings: meetings, dictionary: dictionary,
+                supervisor: nil, policy: policy, accessEnabled: { true }, engineReady: { false }, modesDirectory: modes)
+            func call(_ command: String, _ arguments: [String: Any] = [:]) -> Result<[String: Any], ControlFailure>? {
+                var result: Result<[String: Any], ControlFailure>?
+                var input = arguments; input["_command"] = command
+                _ = service.handle(input) { result = $0 }
+                expect(waitUntil { result != nil }, "workflow \(command) completes on its app-owned queue")
+                return result
+            }
+            policy.setAllowed(true, for: .configuration)
+            if case .success(let scaffold)? = call("modes_init", ["name": "My report", "recipe": "issue-report"]),
+               let document = scaffold["document"] as? String {
+                if case .success(let valid)? = call("modes_validate", ["document": document]) {
+                    expect(valid["valid"] as? Bool == true && valid["saved"] as? Bool == false,
+                           "CLI scaffold validates through the same recipe codec without installation")
+                } else { expect(false, "scaffold validates") }
+                expect(!FileManager.default.fileExists(atPath: modes.path),
+                       "scaffold and validation do not create the live modes folder")
+            } else { expect(false, "recipe scaffold is returned") }
+            policy.setAllowed(true, for: .vocabularyWrite)
+            if case .success(let added)? = call("vocabulary_add", ["write_as": "Velora", "heard_as": "valora"]),
+               let entry = added["entry"] as? [String: Any], let entryID = entry["id"] as? String {
+                expect(dictionary.rows.contains { $0.id == entryID }, "agent vocabulary uses the real canonical Dictionary")
+                if case .failure(let error)? = call("vocabulary_remove", ["entry_id": entryID, "confirm": 1]) {
+                    expect(error.code == "invalid_arguments", "numeric truth cannot authorize Dictionary deletion")
+                } else { expect(false, "removal needs a true JSON boolean") }
+                _ = call("vocabulary_remove", ["entry_id": entryID, "confirm": true])
+                expect(!dictionary.rows.contains { $0.id == entryID }, "explicit removal updates canonical Dictionary")
+            } else { expect(false, "explicit vocabulary addition succeeds") }
+            let meetingID = UUID().uuidString
+            let meeting = MeetingRecord(id: meetingID, title: "Local call", startedAt: Date(),
+                endedAt: Date().addingTimeInterval(60), status: .processing,
+                micPath: meetingID + "/me.caf", systemPath: meetingID + "/them.caf")
+            meetings.insertProcessing(meeting)
+            meetings.appendSegment(MeetingSegment(meetingID: meetingID, speaker: .them,
+                chunkIndex: 0, startMs: 0, endMs: 60000, text: "Ship the report Friday."))
+            meetings.complete(meetingID: meetingID, notes: MeetingNotes(summary: "Report", actionItems: ["Ship Friday"]))
+            policy.setAllowed(true, for: .meetings)
+            if case .success(let shown)? = call("meetings_show", ["meeting_id": meetingID]) {
+                let json = VeloraCLI.json(shown, pretty: false)
+                expect(shown["id"] as? String == meetingID && json.contains("Ship the report"),
+                       "meeting grant exposes the selected stored notes and transcript")
+                expect(!json.contains("me.caf") && !json.contains("them.caf")
+                       && shown["source_app"] == nil && shown["calendar_event_id"] == nil,
+                       "meeting projection omits recording paths and unrelated context")
+            } else { expect(false, "stored meeting is readable after its grant") }
+            if case .success(let exported)? = call("meetings_export", ["meeting_id": meetingID, "format": "vtt"]) {
+                expect((exported["text"] as? String)?.hasPrefix("WEBVTT") == true
+                       && exported["timing_notice"] != nil, "explicit meeting export retains real coarse timing and its notice")
+            } else { expect(false, "meeting export returns text") }
+            meetings.delete(meetingID: meetingID)
+            if case .failure(let deleted)? = call("meetings_show", ["meeting_id": meetingID]) {
+                expect(deleted.code == "not_found", "deleted meeting content is immediately unavailable to agents")
+            } else { expect(false, "deleted meeting cannot be read") }
+            policy.setAllowed(false, for: .formatting)
+            if case .failure(let denied)? = call("format_text", ["text": "Hello"]) {
+                expect(denied.code == "capability_disabled", "formatting grant is checked before engine work")
+            } else { expect(false, "disabled formatting never reaches inference") }
+        }
+
+        do {
+            expect(try CLIInvocation.parse(["modes", "list", "--limit", "500"]).command
+                   == .workflow(name: "modes_list", arguments: ["limit": "100"]),
+                   "CLI mode listing is bounded before transport")
+            expect(try CLIInvocation.parse(["format", "--file", "note.txt", "--mode", "Email"]).command
+                   == .workflow(name: "format_text", arguments: ["text_file": "note.txt", "mode": "Email"]),
+                   "CLI text-file formatting has an explicit caller-supplied input")
+            expect(try CLIInvocation.parse(["paste-last", "--copy"]).command
+                   == .workflow(name: "paste_last", arguments: ["delivery": "copy"]),
+                   "CLI clipboard delivery is explicit")
+            for arguments in [["paste-last"], ["paste-last", "--paste"],
+                              ["paste-last", "--copy", "--paste"], ["vocabulary", "remove", "id"]] {
+                do { _ = try CLIInvocation.parse(arguments); expect(false, "ambiguous/destructive CLI intent is rejected") }
+                catch { expect(true, "CLI requires explicit delivery, target, and removal confirmation") }
+            }
+        } catch { expect(false, "new CLI workflows parse: \(error)") }
+        var mapped = ""
+        let response = MCPStdioServer.process([
+            "jsonrpc": "2.0", "id": 1, "method": "tools/call",
+            "params": ["name": "list_meetings", "arguments": ["limit": 2]]
+        ]) { command, _ in mapped = command; return .failure(LocalWorkflowService.denied(command)) }
+        expect(mapped == "meetings_list"
+               && (response?["result"] as? [String: Any])?["isError"] as? Bool == true,
+               "MCP meeting access passes through the same broker grant and error result")
+        let toolNames = MCPStdioServer.tools.compactMap { $0["name"] as? String }
+        expect(toolNames.count == Set(toolNames).count && toolNames.contains("reformat_text")
+               && toolNames.contains("remove_vocabulary"), "expanded MCP tools have unique names and writing parity")
+    }
+
+    private static func testRuntimePreferences() {
+        var document = SettingsDocument.defaults
+        expect(document.settings.models.keyboardRoutes.isEmpty && !document.settings.models.followKeyboardLanguage,
+               "keyboard routing is opt-in for existing settings")
+        expect(document.settings.engine.memoryPolicy == .automatic && document.settings.engine.cleanupIdleMinutes == 5,
+               "existing idle-memory behavior remains the default")
+        let source = KeyboardLanguageRouting.InputSource(id: "com.test.keyboard", name: "Test keyboard", language: "hi")
+        let rule = KeyboardSpeechRoute(language: "hi", model: "mlx-community/whisper-large-v3-turbo")
+        let routes = [source.id: rule]
+        expect(KeyboardLanguageRouting.context(enabled: false, routes: routes, source: source) == nil,
+               "manual language overrides keyboard mappings while disabled")
+        expect(KeyboardLanguageRouting.context(enabled: true, routes: routes, source: nil) == nil,
+               "an unknown input source retains the manual model")
+        let frozen = KeyboardLanguageRouting.context(enabled: true, routes: routes, source: source)
+        expect(frozen?["language"] == "hi" && frozen?["model"] == rule.model,
+               "a take receives an explicit source/language/model mapping")
+        document.settings.models.followKeyboardLanguage = true
+        document.settings.models.keyboardRoutes = routes
+        document.settings.engine.memoryPolicy = .saveMemory
+        document.settings.engine.cleanupIdleMinutes = 2
+        do {
+            let data = try SettingsDocumentCodec.encode(document)
+            expect(try SettingsDocumentCodec.decode(data) == document,
+                   "runtime preferences round-trip through portable settings")
+            var root = try JSONSerialization.jsonObject(with: data) as! [String: Any]
+            var settings = root["settings"] as! [String: Any]
+            var models = settings["models"] as! [String: Any]
+            models.removeValue(forKey: "follow_keyboard_language")
+            models.removeValue(forKey: "keyboard_routes")
+            var engine = settings["engine"] as! [String: Any]
+            engine.removeValue(forKey: "memory_policy")
+            engine.removeValue(forKey: "cleanup_idle_minutes")
+            settings["models"] = models
+            settings["engine"] = engine
+            root["settings"] = settings
+            let legacy = try SettingsDocumentCodec.decode(JSONSerialization.data(withJSONObject: root))
+            expect(!legacy.settings.models.followKeyboardLanguage && legacy.settings.models.keyboardRoutes.isEmpty
+                && legacy.settings.engine.memoryPolicy == .automatic,
+                "older portable settings decode with their prior behavior")
+            document.settings.engine.cleanupIdleMinutes = .nan
+            do { try SettingsDocumentCodec.validate(document); expect(false, "invalid idle delays are rejected") }
+            catch { expect(true, "invalid idle delay rejected") }
+        } catch { expect(false, "runtime preferences fixture: \(error)") }
+        expect(!KeyboardLanguageRouting.valid([source.id: KeyboardSpeechRoute(language: "hi;run", model: rule.model)]),
+               "malformed language tokens cannot become routing rules")
     }
 
 }

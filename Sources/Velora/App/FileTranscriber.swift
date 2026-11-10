@@ -239,6 +239,7 @@ final class FileTranscriber {
         var command: [String: Any] = [
             "cmd": "transcribe_file", "path": sourceURL.path, "id": jobID,
         ]
+        command["personal_context"] = agentRequestID == nil
         if let requestedMode { command["mode"] = requestedMode }
         supervisor.send(command)
         // The engine acks immediately (before decoding); no ack = the command

@@ -362,11 +362,12 @@ final class MeetingDetector {
     ) -> EKEvent? {
         guard enabled, Self.calendarAuthorization == .fullAccess else { return nil }
         let now = Date()
+        let leadSeconds = TimeInterval(MeetingPolicy.shared.calendarLeadMinutes * 60)
         let predicate = eventStore.predicateForEvents(
             withStart: now.addingTimeInterval(-10 * 60),
-            end: now.addingTimeInterval(10 * 60), calendars: nil)
+            end: now.addingTimeInterval(max(10 * 60, leadSeconds + 60)), calendars: nil)
         let candidates = eventStore.events(matching: predicate)
-            .filter { $0.startDate <= now.addingTimeInterval(5 * 60)
+            .filter { $0.startDate <= now.addingTimeInterval(leadSeconds)
                 && $0.endDate >= now.addingTimeInterval(-5 * 60) }
             .sorted { abs($0.startDate.timeIntervalSince(now)) < abs($1.startDate.timeIntervalSince(now)) }
             .filter(Self.hasConferenceLink)

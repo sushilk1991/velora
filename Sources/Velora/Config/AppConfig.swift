@@ -927,6 +927,23 @@ final class AppConfig {
         set { updateSettings { $0.shortcuts.behavior = newValue } }
     }
 
+    var followKeyboardLanguage: Bool {
+        get { readSetting(\.models.followKeyboardLanguage) }
+        set { updateSettings { $0.models.followKeyboardLanguage = newValue }; writeEngineConfig() }
+    }
+    var keyboardSpeechRoutes: [String: KeyboardSpeechRoute] {
+        get { readSetting(\.models.keyboardRoutes) }
+        set { updateSettings { $0.models.keyboardRoutes = newValue }; writeEngineConfig() }
+    }
+    var cleanupMemoryPolicy: CleanupMemoryPolicy {
+        get { readSetting(\.engine.memoryPolicy) }
+        set { updateSettings { $0.engine.memoryPolicy = newValue }; writeEngineConfig() }
+    }
+    var cleanupIdleMinutes: Double {
+        get { readSetting(\.engine.cleanupIdleMinutes) }
+        set { updateSettings { $0.engine.cleanupIdleMinutes = min(120, max(1, newValue)) }; writeEngineConfig() }
+    }
+
     var dictationDelivery: DictationDelivery {
         get { readSetting(\.dictation.delivery) }
         set { updateSettings { $0.dictation.delivery = newValue } }
@@ -1456,6 +1473,12 @@ final class AppConfig {
         return Self.updateEngineConfig(at: engineConfigStorageURL) { payload in
             payload["stt_model"] = self.sttModel
             payload["language_scope"] = self.languageScope
+            payload["follow_keyboard_language"] = self.followKeyboardLanguage
+            payload["keyboard_routes"] = self.keyboardSpeechRoutes.mapValues {
+                ["language": $0.language, "model": $0.model]
+            }
+            payload["memory_policy"] = self.cleanupMemoryPolicy.rawValue
+            payload["cleanup_idle_minutes"] = self.cleanupIdleMinutes
             payload["language"] = self.language
             payload["remove_hesitations"] = self.removeHesitations
             payload["auto_punctuation"] = self.autoPunctuation

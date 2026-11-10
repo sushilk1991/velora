@@ -22,7 +22,7 @@
       "required": ["name"],
       "properties": {
         "name": { "type": "string", "minLength": 1, "maxLength": 100, "pattern": "\\S" },
-        "prompt": { "type": "string", "maxLength": 16000 },
+        "prompt": { "type": "string", "maxLength": 12000 },
         "formatting": { "enum": ["off", "light", "full"] },
         "apps": {
           "type": "array", "maxItems": 256,

@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 from copy import copy, deepcopy
+import importlib.resources
+import json
 from typing import Any
 
 from .config import Config, Mode, VALID_FORMATTING
@@ -25,15 +27,7 @@ def preview_input(msg: dict[str, Any], config: Config) -> tuple[str, Config, str
         value = msg.get(key)
         if value is not None and (not isinstance(value, str) or len(value) > 512):
             raise ValueError(f"Invalid {key}.")
-    # An asynchronous preview must not change live mode selection or follow a
-    # later reload halfway through generation. No Config constructor/reload is
-    # used here: a preview neither installs modes nor writes configuration.
-    snapshot = copy(config)
-    snapshot.data = deepcopy(config.data)
-    snapshot.modes = deepcopy(config.modes)
-    snapshot._learned_vocab = list(config._learned_vocab)
-    snapshot._learned_replacements = dict(config._learned_replacements)
-    snapshot._auto_vocab = list(config._auto_vocab)
+    snapshot = configuration_snapshot(config, personal_context=msg.get("personal_context") is not False)
     name = msg.get("mode")
     inline = msg.get("inline_mode")
     if inline is not None:
@@ -47,6 +41,31 @@ def preview_input(msg: dict[str, Any], config: Config) -> tuple[str, Config, str
         if not isinstance(name, str) or not name or snapshot.mode_by_name(name) is None:
             raise ValueError("That mode is not available. Choose another mode.")
     return raw, snapshot, name
+
+
+def configuration_snapshot(config: Config, *, personal_context: bool = True) -> Config:
+    # An asynchronous preview must not change live mode selection or follow a
+    # later reload halfway through generation. No Config constructor/reload is
+    # used here: a preview neither installs modes nor writes configuration.
+    snapshot = copy(config)
+    snapshot.data = deepcopy(config.data)
+    snapshot.modes = deepcopy(config.modes)
+    snapshot._learned_vocab = list(config._learned_vocab)
+    snapshot._learned_replacements = dict(config._learned_replacements)
+    snapshot._auto_vocab = list(config._auto_vocab)
+    if not personal_context:
+        # Broker callers supplied text, not access to private snippets, learned
+        # spellings, or saved mode instructions. UI previews retain those.
+        snapshot.data.update(vocabulary=[], replacements={}, default_mode="Default", allow_snippets=False)
+        snapshot._learned_vocab = []
+        snapshot._learned_replacements = {}
+        snapshot._learned_soft = {}
+        snapshot._auto_vocab = []
+        directory = importlib.resources.files("velora_engine").joinpath("modes_builtin")
+        stock = [Mode.from_dict(json.loads(path.read_text()))
+                 for path in directory.iterdir() if path.name.endswith(".json")]
+        snapshot.modes = {mode.name.lower(): mode for mode in stock}
+    return snapshot
 
 
 def validated_mode(value: Any) -> Mode:

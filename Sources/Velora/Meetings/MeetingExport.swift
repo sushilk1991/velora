@@ -30,7 +30,8 @@ extension MeetingRecord {
         switch format {
         case .markdown: return exportText
         case .plainText:
-            var sections = [title, startedAt.formatted(date: .long, time: .shortened)]
+            var sections = [title, (isImported ? "Imported " : "")
+                + startedAt.formatted(date: .long, time: .shortened)]
             if !notes.summary.isEmpty { sections += ["Summary", notes.summary] }
             if !notes.decisions.isEmpty { sections += ["Decisions", notes.decisions.joined(separator: "\n")] }
             if !notes.actionItems.isEmpty {

@@ -98,15 +98,12 @@ final class MeetingNotesWindowModel: ObservableObject {
         transcript.reset()
     }
 
-    func setAction(_ action: String, completed: Bool) {
-        guard let meetingID else { return }
-        let store = store
-        DispatchQueue.global(qos: .userInitiated).async { [weak self] in
-            let saved = store.setActionCompleted(meetingID: meetingID, action: action, completed: completed)
-            DispatchQueue.main.async {
-                guard let self, self.isShowing(meetingID) else { return }
-                self.actionError = saved ? nil : "This action changed or could not be saved. Open the meeting again and retry."
-            }
+    func setAction(_ action: String, completed: Bool, completion: @escaping (Bool) -> Void) {
+        guard let meetingID else { completion(false); return }
+        store.setActionCompletedAsync(meetingID: meetingID, action: action, completed: completed) { [weak self] saved in
+            completion(saved)
+            guard let self, self.isShowing(meetingID) else { return }
+            self.actionError = saved ? nil : "This action changed or could not be saved. Open the meeting again and retry."
         }
     }
 
@@ -282,7 +279,8 @@ struct MeetingNotesWindowView: View {
 ///     └──────────────────────────────────────┘
 struct MeetingNotesCards: View {
     let notes: MeetingNotes
-    var onToggleAction: ((String, Bool) -> Void)? = nil
+    var onToggleAction: ((String, Bool, @escaping (Bool) -> Void) -> Void)? = nil
+    @State private var pending: [String: (id: UUID, value: Bool, saved: Bool)] = [:]
 
     /// Space between cards, as on Home and Modes.
     static let sectionSpacing: CGFloat = 18
@@ -307,8 +305,16 @@ struct MeetingNotesCards: View {
                     VStack(alignment: .leading, spacing: VeloraSpacing.s) {
                         ForEach(Array(notes.actionItems.enumerated()), id: \.offset) { _, item in
                             Toggle(item, isOn: Binding(
-                                get: { notes.completedActionItems.contains(item) },
-                                set: { onToggleAction(item, $0) }))
+                                get: { pending[item]?.value ?? notes.completedActionItems.contains(item) },
+                                set: { value in
+                                    let token = UUID()
+                                    pending[item] = (token, value, false)
+                                    onToggleAction(item, value) { saved in
+                                        guard pending[item]?.id == token else { return }
+                                        if !saved || notes.completedActionItems.contains(item) == value { pending.removeValue(forKey: item) }
+                                        else { pending[item] = (token, value, true) }
+                                    }
+                                }))
                                 .toggleStyle(.checkbox)
                                 .fixedSize(horizontal: false, vertical: true)
                         }
@@ -316,6 +322,12 @@ struct MeetingNotesCards: View {
                     .modifier(MeetingCardText())
                 } else {
                     bullets(notes.actionItems)
+                }
+            }
+            .onChange(of: notes) { latest in
+                pending = pending.filter { action, state in
+                    latest.actionItems.contains(action)
+                        && !(state.saved && latest.completedActionItems.contains(action) == state.value)
                 }
             }
         }

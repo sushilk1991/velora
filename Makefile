@@ -45,6 +45,7 @@ test-sublime-plugin:
 	python3 scripts/test-sublime-plugin.py
 
 test-release-scripts:
+	python3 scripts/app-intents-metadata.py
 	./scripts/test-signing-config.sh
 	./scripts/test-publish-release.sh
 	./scripts/test-engine-bootstrap.sh

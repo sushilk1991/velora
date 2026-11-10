@@ -165,6 +165,8 @@ mkdir -p "$APP/Contents/MacOS" "$APP/Contents/Resources"
 cp "$SHIPPED_BIN" "$APP/Contents/MacOS/Velora"
 cp Resources/Info.plist "$APP/Contents/Info.plist"
 cp Resources/start.caf Resources/stop.caf Resources/error.caf "$APP/Contents/Resources/"
+python3 scripts/app-intents-metadata.py
+cp -R Resources/Metadata.appintents "$APP/Contents/Resources/"
 cp Resources/AppIcon.icns "$APP/Contents/Resources/"  # CFBundleIconFile = AppIcon
 mkdir -p "$APP/Contents/Resources/SublimeText"
 cp Resources/SublimeText/VeloraVoiceEdit.py \

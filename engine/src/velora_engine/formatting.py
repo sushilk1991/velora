@@ -18,6 +18,7 @@ import unicodedata
 from dataclasses import dataclass, field
 
 from .config import Config, Mode
+from .snippets import expansion as snippet_expansion
 
 # --- app category mapping (known bundle ids) -------------------------------
 
@@ -1031,6 +1032,14 @@ def run_gate(
     chat_style = _is_chat(mode, category)
 
     text = raw.strip()
+    # Explicit whole-take expansion. Never hand literal snippets to a model,
+    # punctuation normalization, or technical-command formatting.
+    if (config.data.get("allow_snippets", True) is True and mode.formatting != "off"
+            and mode.name.casefold() != "raw" and category not in ("code", "terminal")):
+        expanded = snippet_expansion(config.home, text)
+        if expanded is not None:
+            return GateResult(Mode(name="Snippet", formatting="off"), category, False,
+                              "snippet", expanded, auto_punctuation=False)
 
     # Fast dictation is an explicit no-writing-model contract, including
     # romanization and smart Terminal prose. Keep the recognizer output and

@@ -47,12 +47,16 @@ adjusts — then stops rather than guess when the window it expects isn't there.
   email, notes, documents, and other text fields.
 - **Keeps your meaning.** Velora removes filler, adds punctuation, follows
   spoken line breaks, and preserves the original transcript in History.
-- **Keeps every result pasteable.** Each final dictation stays on the clipboard,
-  even if the current app ignores the automatic paste.
+- **Lets you choose delivery.** Paste and keep the result, restore your previous
+  clipboard after a successful paste, or copy only. Blocked insertion keeps the
+  result available to paste yourself.
 - **Adapts to your work.** Formatting changes with the app, and a Personal
   Dictionary teaches Velora names and terms you use often.
 - **Edits selected text.** Select text, describe the change, and undo normally
-  if the result is not right.
+  if the result is not right. Common editing presets are in the menubar.
+- **Makes corrections reusable.** Fix a History result, compare it with As Heard,
+  remember a spelling explicitly, or reformat stored text after audio expires.
+  Modes includes examples, a playground, and recipe import/export.
 - **Carries out spoken actions.** Hold ⌃⇧A and say what you want done — "search
   YouTube for the match highlights", "message Priya on Slack that I'm running
   late" — and Velora opens the app and does it, working like an agent: it acts
@@ -64,7 +68,18 @@ adjusts — then stops rather than guess when the window it expects isn't there.
   expects is not the one in front.
 - **Remembers meetings—with permission.** After you confirm, Velora records
   microphone and computer audio, then creates a local transcript and notes.
+  Import an existing recording, seek from transcript/search results, check off
+  actions, and export Markdown, text, or coarse timed SRT/VTT transcripts.
   It captures audio only, never the screen.
+
+Settings also offers optional provisional dictation words, keyboard-language
+routes to installed speech models, and writing-model idle memory choices.
+Dictionary can expand explicitly saved phrases into literal snippets.
+
+The local CLI, MCP tools, and Mac Shortcuts actions use the running app's
+permission checks. Enable local integrations in Advanced, then choose separate
+grants for history, meetings, vocabulary, formatting, files, actions, and delivery.
+Microphone requests still need visible approval each time.
 
 When dictation starts, Velora can pause supported playback in Apple Music or
 Spotify and resume only the playback it paused. This avoids the audio-quality
@@ -116,6 +131,13 @@ open build/Velora.app
 
 Run the app bundle rather than the bare executable. macOS attaches microphone,
 input-monitoring, and accessibility permissions to the app identity.
+
+Mac Shortcuts metadata is checked in so normal builds still need only Command
+Line Tools. Changing `Sources/Velora/Shortcuts/VeloraIntents.swift` requires a
+current Swift build and Apple's Xcode metadata extractor to regenerate the
+catalog with `scripts/app-intents-metadata.py --refresh --const-values` followed
+by the build's `VeloraIntents.swiftconstvalues` path. Packaging checks the source
+and catalog hashes before copying the four actions into the app.
 
 ## Privacy
 

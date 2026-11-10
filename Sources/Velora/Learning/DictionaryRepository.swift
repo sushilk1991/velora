@@ -196,6 +196,14 @@ final class DictionaryRepository: ObservableObject {
         try commit(next)
     }
 
+    /// Undo only the exact version created by this UI action. Sync, a clear,
+    /// or an intervening edit must never be undone by an older sheet.
+    func undoAddition(_ expected: DictionaryEntry) throws -> Bool {
+        guard document.entry(id: expected.logicalKey) == expected, isActive(expected) else { return false }
+        try remove(id: expected.logicalKey)
+        return true
+    }
+
     func remove(id: String) throws {
         guard let existing = document.entry(id: id), isActive(existing) else {
             throw DictionaryRepositoryError.missingEntry

@@ -471,10 +471,12 @@ final class MeetingCoordinator: ObservableObject {
             let id, let title, let startedAt, let systemAudio, false
         ) = state,
               discardConfirmToken == nil else { return }
-        // No preference for this: attribution decides. A native client's own
-        // mic closing is a definitive end. Browser mic ownership is only
-        // bundle-wide, and title/manual inferences can be stale, so both ask.
-        if recordingMicEvidence, watchScope.mayAutoStop {
+        let behavior = MeetingPolicy.shared.endBehavior
+        guard behavior != .never else { return }
+        // A preference can make this more cautious, never turn a browser or
+        // manual recording into attributable evidence for automatic stopping.
+        if MeetingPolicy.automaticallyFinishes(
+            behavior: behavior, microphoneEvidence: recordingMicEvidence, scope: watchScope) {
             veloraLog("Velora: native call released its microphone — stopping and creating notes")
             stopRecording()
             return

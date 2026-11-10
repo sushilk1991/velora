@@ -13,6 +13,7 @@ import fcntl
 import json
 import logging
 import os
+import math
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
@@ -34,6 +35,10 @@ DEFAULT_CONFIG: dict[str, Any] = {
     "cleanup_model": DEFAULT_CLEANUP_MODEL,
     "cleanup_enabled": True,
     "remove_hesitations": False,
+    "follow_keyboard_language": False,
+    "keyboard_routes": {},
+    "memory_policy": "automatic",
+    "cleanup_idle_minutes": 5,
     "experimental_native_cleanup": False,
     "default_mode": "Default",
     "vocabulary": [],
@@ -362,6 +367,18 @@ class Config:
     @property
     def cleanup_enabled(self) -> bool:
         return bool(self.data.get("cleanup_enabled", True))
+
+    @property
+    def memory_policy(self) -> str:
+        value = self.data.get("memory_policy", "automatic")
+        return value if value in ("automatic", "keep_ready", "save_memory") else "automatic"
+
+    @property
+    def cleanup_idle_minutes(self) -> float:
+        value = self.data.get("cleanup_idle_minutes", 5)
+        if isinstance(value, bool) or not isinstance(value, (int, float)):
+            return 5.0
+        return min(120.0, max(1.0, float(value))) if math.isfinite(value) else 5.0
 
     @property
     def experimental_native_cleanup(self) -> bool:

@@ -148,17 +148,19 @@ enum AgentIntegration {
         name: velora
         description: >
           Query the user's Velora dictation app (local-first, on-device): recent
-          dictation transcripts, history search, usage stats, or transcribing an
-          audio file. Use when the user asks about their dictations, dictation
-          history/stats, or wants a local audio file transcribed.
+          dictation transcripts, history search, meeting notes, mode recipes,
+          vocabulary, usage stats, or transcribing supplied files. Use when the
+          user explicitly asks to use their local Velora data or workflows.
         ---
 
         # Velora local control
 
         Velora is a local-first macOS dictation app. It exposes a deliberately
-        small, allow-listed control surface for local CLIs and agents. Nothing
-        leaves the machine; raw audio, screen context, contacts, and learning
-        data are never exposed.
+        small, allow-listed control surface for local CLIs and agents. Requests
+        use the running app's owner-only local socket. History and meeting
+        tools omit raw audio, recording paths, and screen context. Dictionary
+        tools expose spelling rules only after a separate grant; writes may
+        sync through the user's existing iCloud Dictionary.
 
         ## Requirements
 
@@ -168,6 +170,11 @@ enum AgentIntegration {
           `access_enabled: false`) but every other call fails with
           `access_disabled` — tell the user to flip the toggle rather than
           retrying.
+        - `status` lists the currently enabled capabilities and permission grants.
+          Meetings, Dictionary reads/writes, modes, actions, and clipboard delivery
+          have separate controls in Advanced and begin disabled. Do not treat the
+          master toggle or dictation-history permission as consent for those data.
+        - `listen` always needs a visible Allow Once approval, even with its grant.
 
         ## CLI
 
@@ -182,6 +189,20 @@ enum AgentIntegration {
         | `velora stats` | words, dictations, streaks, time saved |
         | `velora transcribe <audio-file>` | transcript of a local audio file |
         | `velora listen` | one live dictation — shows a visible approval prompt first |
+        | `velora modes list` | saved mode names and formatting strengths |
+        | `velora modes validate FILE` | validate recipe JSON without saving it |
+        | `velora modes init NAME` | print a declarative recipe scaffold to stdout |
+        | `velora vocabulary list` | Dictionary entries, after a separate read grant |
+        | `velora vocabulary add TEXT [--heard-as TEXT]` | explicitly requested spelling rule |
+        | `velora vocabulary remove ID --yes` | explicitly requested Dictionary removal |
+        | `velora meetings list` | meeting titles and status, after a meeting-content grant |
+        | `velora meetings search QUERY` | matching meeting excerpts |
+        | `velora meetings show ID` | bounded notes and transcript passages |
+        | `velora meetings export ID --format markdown` | export text to stdout, not an implicit file |
+        | `velora format TEXT [--mode NAME]` | format supplied text without saving or pasting |
+        | `velora model status` | configured model names and readiness; no local paths |
+        | `velora paste-last --copy` | explicitly copy the last result after a delivery grant |
+        | `velora paste-last --paste --target BUNDLE_ID` | paste only if the specified app is already focused |
 
         Add `--json` to any command for machine-readable output. Results are
         capped (100 rows, 20k transcript chars per row).
@@ -208,6 +229,11 @@ enum AgentIntegration {
         - History rows are the user's private dictations: quote them back to
           the user freely, but do not send them to other services without an
           explicit instruction.
+        - Do not enable permissions or install recipes on the user's behalf.
+          A recipe scaffold or validation response does not save a mode.
+        - Clipboard writes and pastes need explicit user intent. The delivery tool
+          never activates an app; a changed or unreadable target falls back to copy.
+        - SRT/VTT exports use coarse audio-block timing, not sentence alignment.
 
         <!-- Written by Velora \(version); reinstall from Settings → General →
              Advanced after major updates to refresh paths. -->

@@ -154,6 +154,7 @@ struct GeneralSettingsView: View {
                 }
                 .pickerStyle(.segmented)
                 Toggle("Launch Velora at login", isOn: $model.launchAtLogin)
+                DisclosureGroup("Preview the pill") { HUDPreviewView(model: model) }
                 Toggle("Play sounds", isOn: $model.soundsEnabled)
                 if model.soundsEnabled {
                     LabeledContent("Sound volume") {
@@ -352,6 +353,7 @@ struct DictationSettingsView: View {
             } footer: {
                 SettingsFooter("Velora keeps using this microphone when AirPods or another input connect.")
             }
+            KeyboardRoutingSettingsView(model: model)
             Section("Delivery") {
                 Picker("Result", selection: $model.dictationDelivery) {
                     ForEach(DictationDelivery.allCases) { choice in Text(choice.title).tag(choice) }
@@ -560,6 +562,19 @@ struct ModelSettingsView: View {
                 SettingsFooter("Changing the language choice re-selects the recommended speech model for it. Models download once, then run on this Mac. Your voice never leaves this Mac.")
             }
             nativeCleanupSection
+            Section {
+                Picker("Writing model readiness", selection: $model.cleanupMemoryPolicy) {
+                    ForEach(CleanupMemoryPolicy.allCases) { policy in Text(policy.title).tag(policy) }
+                }
+                if model.cleanupMemoryPolicy == .saveMemory {
+                    Stepper("Release after \(Int(model.cleanupIdleMinutes)) minutes idle",
+                            value: $model.cleanupIdleMinutes, in: 1...120, step: 1)
+                }
+            } header: {
+                Text("Idle memory")
+            } footer: {
+                SettingsFooter("Automatic uses Velora's existing memory policy. Keep ready avoids idle unloading. Save memory releases the writing model while idle; the next writing task reloads it and may take longer. Speech models are unaffected.")
+            }
             Section("Download status") {
                 DownloadRecoveryView(state: model.downloads)
                 if let pending = model.downloads.pending[.stt] {
@@ -808,6 +823,10 @@ struct AdvancedSettingsView: View {
     var body: some View {
         Form {
             Section {
+                DisclosureGroup("Recent support events") { ActivityView() }
+            }
+
+            Section {
                 MeetingPreferenceRows(model: model, coordinator: coordinator)
                 LabeledContent("Notes prompt") {
                     HStack(spacing: VeloraSpacing.m) {
@@ -834,6 +853,7 @@ struct AdvancedSettingsView: View {
             Section {
                 settingsFileRow
                 Toggle("Allow local CLI and agents", isOn: $model.localAgentAccess)
+                AgentCapabilitySettingsView(enabled: model.localAgentAccess)
                 if model.localAgentAccess {
                     agentIntegrationRow(
                         title: "Command-line tool",

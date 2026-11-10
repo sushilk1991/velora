@@ -3,11 +3,21 @@ import Combine
 import SwiftUI
 
 enum MeetingAudioTrack: String, CaseIterable, Identifiable {
-    case microphone, system
+    case microphone, system, recording
     var id: String { rawValue }
-    var title: String { self == .microphone ? "Microphone" : "Mac audio" }
+    var title: String {
+        switch self {
+        case .microphone: return "Microphone"
+        case .system: return "Mac audio"
+        case .recording: return "Recording"
+        }
+    }
     func contains(_ speaker: MeetingSpeaker) -> Bool {
-        self == .microphone ? speaker == .me : speaker.isRemote
+        switch self {
+        case .microphone: return speaker == .me
+        case .system: return speaker.isRemote && speaker != .recording
+        case .recording: return speaker == .recording
+        }
     }
 }
 
@@ -52,7 +62,8 @@ final class MeetingAudioPlayback: NSObject, ObservableObject, AVAudioPlayerDeleg
         if changed { stop() }
         self.record = record
         meetingID = record?.id
-        tracks = record?.status == .recording ? [] : MeetingAudioTrack.allCases.filter { url(for: $0) != nil }
+        let available: [MeetingAudioTrack] = record?.isImported == true ? [.recording] : [.microphone, .system]
+        tracks = record?.status == .recording ? [] : available.filter { url(for: $0) != nil }
         if !tracks.contains(track) {
             stop()
             track = tracks.contains(.system) ? .system : (tracks.first ?? .system)
@@ -81,7 +92,8 @@ final class MeetingAudioPlayback: NSObject, ObservableObject, AVAudioPlayerDeleg
 
     func play(_ segment: MeetingSegment) {
         guard segment.meetingID == meetingID else { return }
-        let desired: MeetingAudioTrack = segment.speaker == .me ? .microphone : .system
+        let desired: MeetingAudioTrack = record?.isImported == true ? .recording
+            : (segment.speaker == .me ? .microphone : .system)
         guard tracks.contains(desired) else {
             pause()
             error = "The audio for this transcript passage is no longer available."

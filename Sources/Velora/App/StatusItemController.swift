@@ -5,6 +5,7 @@ import Foundation
 protocol StatusItemControllerDelegate: AnyObject {
     func statusItemToggleDictation()
     func statusItemReformatLast(mode: String)
+    func statusItemTransformSelection(_ preset: EditingPreset)
     func statusItemPasteLastRaw()
     func statusItemTranscribeFile()
     func statusItemCancelTranscription()
@@ -181,6 +182,17 @@ final class StatusItemController: NSObject, NSMenuDelegate {
         let open = NSMenuItem(title: "Open Velora", action: #selector(openMain), keyEquivalent: "o")
         open.target = self
         menu.addItem(open)
+
+        let transforms = NSMenuItem(title: "Edit selected text", action: nil, keyEquivalent: "")
+        let transformMenu = NSMenu()
+        for preset in EditingPreset.allCases {
+            let item = NSMenuItem(title: preset.title, action: #selector(transformSelection(_:)), keyEquivalent: "")
+            item.target = self
+            item.representedObject = preset.rawValue
+            transformMenu.addItem(item)
+        }
+        transforms.submenu = transformMenu
+        menu.addItem(transforms)
 
         let recents = history.recent(limit: 1)
 
@@ -489,6 +501,11 @@ final class StatusItemController: NSObject, NSMenuDelegate {
     @objc private func reformatLast(_ sender: NSMenuItem) {
         guard let mode = sender.representedObject as? String else { return }
         delegate?.statusItemReformatLast(mode: mode)
+    }
+
+    @objc private func transformSelection(_ item: NSMenuItem) {
+        guard let value = item.representedObject as? String, let preset = EditingPreset(rawValue: value) else { return }
+        delegate?.statusItemTransformSelection(preset)
     }
 
     @objc private func pasteLastRaw() {

@@ -79,6 +79,7 @@ final class MeetingProcessor: ObservableObject {
         /// The generated notes were refused once and written again after
         /// `notesSaveRetryDelay` (see `notesNotSaved`).
         var notesWriteRetried = false
+        var imported = false
     }
 
     private enum Stage { case transcribing, notes }
@@ -432,10 +433,12 @@ final class MeetingProcessor: ObservableObject {
                 meetingID: meetingID,
                 // Names the track as the pane and HUD name sources
                 // (MeetingCoordinator.sourcesLabel), not "Me" / "Them".
-                label: speaker.isRemote ? "Transcribing Mac audio…" : "Transcribing your mic…",
+                label: work.imported ? "Transcribing recording…"
+                    : (speaker.isRemote ? "Transcribing Mac audio…" : "Transcribing your mic…"),
                 fraction: trackBase(work))
-        case .meetingSegment(let id, let segment):
-            guard matches(id: id, meetingID: segment.meetingID, work: work) else { return }
+        case .meetingSegment(let id, let receivedSegment):
+            guard matches(id: id, meetingID: receivedSegment.meetingID, work: work) else { return }
+            let segment = Self.sourceSegment(receivedSegment, imported: work.imported)
             if work.reprocessing {
                 store.appendReprocessSegment(segment)
             } else {
@@ -640,6 +643,7 @@ final class MeetingProcessor: ObservableObject {
         work = Work(
             meetingID: meetingID, tracks: tracks, reprocessing: item.reprocessing, trackIndex: 0,
             jobID: UUID().uuidString, stage: .transcribing, issues: issues)
+        work?.imported = record.isImported
         beginCurrentTrack()
     }
 
@@ -780,7 +784,7 @@ final class MeetingProcessor: ObservableObject {
         self.work = work
         state = .processing(
             meetingID: work.meetingID,
-            label: "Preparing \(track.speaker.displayName)…",
+            label: work.imported ? "Preparing recording…" : "Preparing \(track.speaker.displayName)…",
             fraction: trackBase(work))
         let startChunk = work.reprocessing
             ? store.nextReprocessChunk(
@@ -925,6 +929,12 @@ final class MeetingProcessor: ObservableObject {
 
     /// The captured tracks the engine can decode, and the captured ones it
     /// cannot (missing, unreadable, or an unsupported format).
+    static func sourceSegment(_ segment: MeetingSegment, imported: Bool) -> MeetingSegment {
+        guard imported else { return segment }
+        return MeetingSegment(id: segment.id, meetingID: segment.meetingID, speaker: .recording,
+            chunkIndex: segment.chunkIndex, startMs: segment.startMs, endMs: segment.endMs, text: segment.text)
+    }
+
     private func availableTracks(
         _ record: MeetingRecord
     ) -> (usable: [Track], unreadable: [MeetingSpeaker]) {

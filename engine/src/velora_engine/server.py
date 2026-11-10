@@ -665,6 +665,8 @@ class Session:
         # The connection that started this session. A displaced client's
         # cleanup must only abort a session it still owns (reconnect race).
         self.owner = owner
+        self.admission_cancel = threading.Event()
+        self.backend_released = False
         # Crash-readable audio archive source. Appended before admission to the
         # duration-bounded STT queue so a freeze can recover all accepted PCM.
         self.spool: ActiveAudioSpool | None = None
@@ -724,6 +726,11 @@ class Engine:
         # DIFFERENT model than the live one; cached so re-transcribing several
         # clips with the same model doesn't reload it each time.
         self._reprocess_backend: STTBackend | None = None
+        self._keyboard_backend: STTBackend | None = None
+        self._backend_session_owners: dict[int, Session] = {}
+        self._starting_owner: object | None = None
+        self._starting_session: Session | None = None
+        self._idle_since: float | None = None
         # Reprocess runs off the dispatch loop. Crash recoveries queue behind
         # one another, while a live start waits only for the recovery already
         # holding the thread-affine STT backend and pauses the remaining queue.
@@ -1270,7 +1277,7 @@ class Engine:
                 and not self._transcribing and not self._stt_pending
                 and (kind == "cleanup" or not self._cleanup_load_lock.locked()))
 
-    async def _load_stt_local(self, backend: STTBackend, path: str | None) -> None:
+    async def _load_stt_local(self, backend: STTBackend, path: str | None, *, installed_only: bool = False) -> None:
         # Retain the registered backend type, but resolve only the verified
         # local path during load. Restore the logical ID even on timeout.
         def load() -> None:
@@ -1278,7 +1285,11 @@ class Engine:
             try:
                 if path is not None:
                     backend.model_id = path
-                backend.load()
+                if installed_only:
+                    with models.installed_only():
+                        backend.load()
+                else:
+                    backend.load()
             finally:
                 backend.model_id = model
 
@@ -1287,6 +1298,8 @@ class Engine:
             # Only trusted backend code supplies this bound, never the wire.
             bound = getattr(backend, "load_timeout_s", _STT_LOAD_S)
             bound = min(600.0, max(_STT_LOAD_S, float(bound)))
+            if installed_only and self._start_task is asyncio.current_task():
+                self._start_wait_deadline = time.monotonic() + bound + _STT_LOAD_S
             await asyncio.wait_for(self._stt_call(load), bound)
         except (asyncio.TimeoutError, asyncio.CancelledError):
             cancel_load = getattr(backend, "cancel_load", None)
@@ -1746,6 +1759,7 @@ class Engine:
         loader = asyncio.create_task(self._load_models())
         watchdog = asyncio.create_task(self._watch_parent())
         download_watch = asyncio.create_task(self._watch_downloads())
+        idle_watch = asyncio.create_task(self._watch_idle_memory())
         try:
             await self.shutdown.wait()
         finally:
@@ -1757,12 +1771,13 @@ class Engine:
             # serve() has returned.
             watchdog.cancel()
             download_watch.cancel()
+            idle_watch.cancel()
             loader.cancel()
             jobs = list(self._adoption_jobs)
             for job in jobs:
                 job.cancel()
             await self._downloads.close()
-            await asyncio.gather(download_watch, *jobs, return_exceptions=True)
+            await asyncio.gather(download_watch, idle_watch, *jobs, return_exceptions=True)
             # Cancellation owns cleanup too: wait until _load_models has
             # reaped any cold-start sidecar before serve() can return. A bare
             # cancel left that child alive during app replacement.
@@ -1844,6 +1859,8 @@ class Engine:
             if self._stt_pending:
                 await asyncio.wait(self._stt_pending)
             await self._close_stt_backend(self.stt)
+            if self._keyboard_backend is not None and self._keyboard_backend is not self.stt:
+                await self._close_stt_backend(self._keyboard_backend)
             if self._reprocess_backend is not None and self._reprocess_backend is not self.stt:
                 await self._close_stt_backend(self._reprocess_backend)
             self._stt_executor.shutdown(wait=False)
@@ -2124,6 +2141,8 @@ class Engine:
                     await self._cmd_stop(msg)
             elif cmd == "cancel":
                 if self._start_task is not None and msg.get("session") == self._start_session_id:
+                    if self._starting_session is not None:
+                        self._starting_session.admission_cancel.set()
                     self._start_task.cancel()
                     self._start_audio.clear()
                     self._start_audio_samples = 0
@@ -2159,7 +2178,8 @@ class Engine:
                 self.config.reload()
                 # Whisper reads `language` at transcribe time; propagate the
                 # (possibly changed) setting without reloading the backend.
-                if hasattr(self.stt, "language"):
+                if (self.session is None and not self._finalizing and not self._starting
+                        and not self._stt_pending and hasattr(self.stt, "language")):
                     self.stt.language = self.config.language
                 if not self.config.cleanup_enabled:
                     self._schedule_action_cleanup()
@@ -2321,6 +2341,7 @@ class Engine:
                 finally:
                     if self._start_task is asyncio.current_task():
                         self._start_wait_deadline = None
+        self._idle_since = None
         self._cancel_action_cleanup()
         # Explicit-mode file cleanup uses the same writing model as foreground
         # dictation. Stop it between tokens and retry the exact chunk later.
@@ -2354,6 +2375,13 @@ class Engine:
         # returns — without this flag the job would slip its next chunk in
         # between and wipe the just-started live stream (review P0).
         self._starting = True
+        starting_owner = object()
+        self._starting_owner = starting_owner
+        session: Session | None = None
+        if self._start_task is asyncio.current_task():
+            route = (msg.get("context") or {}).get("keyboard_route") if isinstance(msg.get("context"), dict) else None
+            cold_route = isinstance(route, dict) and route.get("model") != self.stt.model_id
+            self._start_wait_deadline = time.monotonic() + ((600.0 + _STT_LOAD_S) if cold_route else _STT_LOAD_S)
         # A dictation owns the machine: lift the batch-job Darwin-background
         # demotion right now, before any model work queues behind it.
         self._refresh_batch_priority()
@@ -2384,32 +2412,39 @@ class Engine:
             if not isinstance(context, dict):
                 context = {}
             session = Session(session_id, context, owner=self.writer)
+            self._starting_session = session
+            await self._bind_keyboard_route(session)
             if self._start_task is None and self.config.save_audio:
                 session.spool = self.audio.begin_active(session_id)
-            if hasattr(self.stt, "windowed_finalize"):
-                self.stt.windowed_finalize = True
-            # STT contextual biasing: bias whisper toward the user's vocabulary and
-            # the NAMES on screen right now (person/file/channel/subject entities
-            # only — nearby free text is cleanup-prompt material, not glossary).
-            self.stt.initial_prompt = self._glossary(session.start_entities)
-            # Whisper's extra preview decodes are opt-in because they consume
-            # model time. Ordinary dictation keeps the existing final-first
-            # latency; Stream Typing alone asks for progressive cursor text.
-            if hasattr(self.stt, "preview_enabled"):
-                self.stt.preview_enabled = (context.get("stream_typing") is True
-                                            or context.get("preview_only") is True)
-            await self._stt_call(self.stt.start_session)
+            if self._start_task is asyncio.current_task():
+                self._start_wait_deadline = time.monotonic() + _STT_LOAD_S
+            started = await self._stt_call(self._begin_session_backend, session)
+            if not started:
+                return False
             if self._start_spool is not None:
                 session.spool = self._start_spool
                 self._start_spool = None
             session.feeder = asyncio.create_task(self._feed_loop(session))
             self.session = session
+            if getattr(session, "route_event", None) is not None:
+                await self._send(session.route_event)
         finally:
-            self._starting = False
-            if self.session is None:
-                self._resume_cleanup_recovery()
-                self._recovery_paused = False
-                self._start_next_recovery()
+            if session is not None and self.session is not session:
+                session.admission_cancel.set()
+                await self._rollback_admission(session)
+                if session.spool is not None:
+                    self.audio.discard_active(session.spool)
+                    session.spool = None
+            if self._starting_owner is starting_owner:
+                self._starting_owner = None
+                self._starting_session = None
+                self._starting = False
+                if self._start_task is asyncio.current_task():
+                    self._start_wait_deadline = None
+                if self.session is None:
+                    self._resume_cleanup_recovery()
+                    self._recovery_paused = False
+                    self._start_next_recovery()
         log.info(
             "session %s started (bundle_id=%s app=%s mode=%s)",
             session_id,
@@ -2418,6 +2453,162 @@ class Engine:
             context.get("mode"),
         )
         return False
+
+    def _session_stt(self, session: Session) -> STTBackend:
+        return getattr(session, "backend", None) or self.stt
+
+    def _session_config(self, session: Session) -> Config:
+        return getattr(session, "config_snapshot", None) or self.config
+
+    def _begin_session_backend(self, session: Session) -> bool:
+        """One STT-executor transaction, after any batch decode has finished."""
+        if session.admission_cancel.is_set():
+            return False
+        backend = self._session_stt(session)
+        previous = self._backend_session_owners.get(id(backend))
+        if previous is not None and previous.admission_cancel.is_set():
+            self._finish_session_backend(previous, rollback=True, reset=True)
+        fields = ("language", "initial_prompt", "windowed_finalize", "preview_enabled")
+        session.previous_backend_settings = {key: getattr(backend, key) for key in fields if hasattr(backend, key)}
+        session.backend_released = False
+        self._backend_session_owners[id(backend)] = session
+        try:
+            if hasattr(backend, "language"):
+                backend.language = self._session_config(session).language
+            if hasattr(backend, "windowed_finalize"):
+                backend.windowed_finalize = True
+            backend.initial_prompt = session.admission_glossary
+            if hasattr(backend, "preview_enabled"):
+                backend.preview_enabled = (session.context.get("stream_typing") is True
+                                           or session.context.get("preview_only") is True)
+            backend.start_session()
+        except BaseException:
+            self._finish_session_backend(session, rollback=True, reset=True)
+            raise
+        if session.admission_cancel.is_set():
+            self._finish_session_backend(session, rollback=True, reset=True)
+            return False
+        return True
+
+    def _finish_session_backend(self, session: Session, rollback: bool = False, reset: bool = False) -> None:
+        """STT-executor-only restoration, guarded against a newer admission."""
+        backend = self._session_stt(session)
+        if self._backend_session_owners.get(id(backend)) is not session:
+            session.backend_released = True
+            return
+        try:
+            if reset:
+                with contextlib.suppress(Exception):
+                    backend.reset()
+            for key, value in getattr(session, "previous_backend_settings", {}).items():
+                setattr(backend, key, value)
+            if not rollback:
+                # These flags belong only to a live take, even if a backend
+                # exposes them lazily after admission. Never leave batch
+                # decode in the live-window or optional-preview mode.
+                if hasattr(backend, "windowed_finalize"):
+                    backend.windowed_finalize = False
+                if hasattr(backend, "preview_enabled"):
+                    backend.preview_enabled = False
+                if backend is self.stt and hasattr(backend, "language"):
+                    backend.language = self.config.language
+        finally:
+            self._backend_session_owners.pop(id(backend), None)
+            session.backend_released = True
+
+    async def _rollback_admission(self, session: Session) -> None:
+        # Cancelled awaits do not cancel executor work. Join a guarded rollback.
+        task = asyncio.create_task(self._stt_call(self._finish_session_backend, session, True, True))
+        while not task.done():
+            try:
+                await asyncio.shield(task)
+            except asyncio.CancelledError:
+                continue
+        task.result()
+
+    async def _bind_keyboard_route(self, session: Session) -> None:
+        from copy import copy, deepcopy
+        session.backend = self.stt
+        language = self.config.language
+        route = session.context.get("keyboard_route")
+        fallback = None
+        if self.config.data.get("follow_keyboard_language") is True and isinstance(route, dict):
+            requested_language = route.get("language")
+            requested_model = route.get("model")
+            source = route.get("input_source")
+            valid = (isinstance(source, str) and 0 < len(source) <= 512
+                     and isinstance(requested_language, str)
+                     and 0 < len(requested_language) <= 32
+                     and all(c.isascii() and (c.isalpha() or c in "-_") for c in requested_language)
+                     and isinstance(requested_model, str) and 0 < len(requested_model) <= 512)
+            if valid:
+                language = requested_language.split("-")[0].split("_")[0].lower()
+                if requested_model != self.stt.model_id:
+                    cached = self._keyboard_backend
+                    path = await asyncio.to_thread(models.cached_model_path, requested_model)
+                    if path is None:
+                        fallback = "The keyboard's speech model is not installed. Using your selected model."
+                    else:
+                        try:
+                            if cached is None or cached.model_id != requested_model:
+                                candidate = create_backend(requested_model, language)
+                                try:
+                                    await self._load_stt_local(candidate, path, installed_only=True)
+                                except BaseException:
+                                    await self._close_stt_backend(candidate)
+                                    raise
+                                self._keyboard_backend = candidate
+                                if cached is not None:
+                                    await self._close_stt_backend(cached)
+                                cached = candidate
+                            session.backend = cached
+                        except Exception:
+                            fallback = "The keyboard's speech model could not load. Using your selected model."
+                            log.warning("keyboard speech model could not load", exc_info=True)
+                if fallback is not None:
+                    language = self.config.language
+                session.route_event = {"event": "session_route", "session": session.id,
+                                       "model": session.backend.model_id, "language": language,
+                                       **({"fallback": fallback} if fallback else {})}
+            else:
+                session.route_event = {"event": "session_route", "session": session.id,
+                                       "model": self.stt.model_id, "language": language,
+                                       "fallback": "The keyboard language rule is invalid. Using your selected model."}
+        session.admission_glossary = self._glossary(session.start_entities)
+        snapshot = copy(self.config)
+        snapshot.data = deepcopy(self.config.data)
+        snapshot.data["language"] = language
+        snapshot.modes = deepcopy(self.config.modes)
+        session.config_snapshot = snapshot
+
+    async def _watch_idle_memory(self) -> None:
+        while not self.shutdown.is_set():
+            await asyncio.sleep(5)
+            try:
+                await self._idle_memory_step()
+            except Exception:
+                log.debug("idle memory cleanup skipped", exc_info=True)
+
+    async def _idle_memory_step(self) -> None:
+        if (self.config.memory_policy != "save_memory" or not self._cleanup_model_is_idle()
+                or self._adopting or self._stt_pending or self._cleanup_load_lock.locked()
+                or self._native_cleanup_switching):
+            self._idle_since = None
+            return
+        cleanup = self.cleanup
+        if cleanup is None or not getattr(cleanup, "loaded", False):
+            self._idle_since = None
+            return
+        now = self._clock()
+        if self._idle_since is None:
+            self._idle_since = now
+            return
+        if now - self._idle_since < self.config.cleanup_idle_minutes * 60:
+            return
+        hibernate = getattr(cleanup, "hibernate", None)
+        if callable(hibernate) and self._cleanup_model_is_idle():
+            await hibernate()
+        self._idle_since = None
 
     @staticmethod
     def _cleanup_stall_s() -> float:
@@ -2449,8 +2640,8 @@ class Engine:
         if session.current_feed_samples:
             return session.current_feed_samples
         if session.stt_processed_samples < session.samples:
-            return self.stt.pending_decode_samples()
-        return self.stt.finalize_decode_samples()
+            return self._session_stt(session).pending_decode_samples()
+        return self._session_stt(session).finalize_decode_samples()
 
     async def _emit_partial(self, session: Session, partial: str | None) -> None:
         """Send one current-session partial, shared by stream and preview lanes."""
@@ -2500,7 +2691,7 @@ class Engine:
             return
         # Announce the exact next feed span before a quiet boundary triggers
         # a potentially long decode; stop can arrive during that same call.
-        session.current_feed_samples = self.stt.pending_decode_samples() + len(chunk)
+        session.current_feed_samples = self._session_stt(session).pending_decode_samples() + len(chunk)
         if self._finalizing_session is session:
             await self._send({
                 "event": "finalize_progress", "session": session.id,
@@ -2510,11 +2701,11 @@ class Engine:
             })
         try:
             started = time.perf_counter()
-            partial = await self._stt_call(self.stt.feed_chunk, chunk)
+            partial = await self._stt_call(self._session_stt(session).feed_chunk, chunk)
             session.stt_time_s += time.perf_counter() - started
             session.stt_processed_samples += len(chunk)
             session.stt_decoded_samples = max(
-                session.stt_decoded_samples, self.stt.decoded_samples())
+                session.stt_decoded_samples, self._session_stt(session).decoded_samples())
         except Exception:
             log.exception("feed_chunk failed")
             return
@@ -2533,7 +2724,7 @@ class Engine:
         # speaks. Any failure only costs the streaming fast path; finalization
         # falls back to whole-text cleanup.
         try:
-            for seg in self.stt.take_new_segments():
+            for seg in self._session_stt(session).take_new_segments():
                 self._on_new_segment(session, seg)
         except Exception:
             log.exception("segment scheduling failed")
@@ -2570,8 +2761,8 @@ class Engine:
         task = session.preview_task
         if task is not None and not task.done():
             return
-        take = getattr(self.stt, "take_preview_request", None)
-        decode = getattr(self.stt, "decode_preview", None)
+        take = getattr(self._session_stt(session), "take_preview_request", None)
+        decode = getattr(self._session_stt(session), "decode_preview", None)
         if not callable(take) or not callable(decode):
             return
         try:
@@ -2618,7 +2809,7 @@ class Engine:
             with contextlib.suppress(asyncio.CancelledError, Exception):
                 await task
         session.preview_task = None
-        discard = getattr(self.stt, "discard_preview_request", None)
+        discard = getattr(self._session_stt(session), "discard_preview_request", None)
         if callable(discard):
             with contextlib.suppress(Exception):
                 await self._stt_call(discard)
@@ -2715,7 +2906,7 @@ class Engine:
                 for attempt in range(2):
                     try:
                         started = time.perf_counter()
-                        text = await self._stt_call(transcribe_clip, self.stt, pcm)
+                        text = await self._stt_call(transcribe_clip, self._session_stt(session), pcm)
                         session.stt_time_s += time.perf_counter() - started
                         break
                     except Exception:
@@ -2753,8 +2944,8 @@ class Engine:
                                       if next_samples else self._cleanup_stall_s()),
                 })
         tail = " ".join(parts)
-        self.stt.segments_used_for_final = bool(prefix)
-        self.stt.final_tail = tail if prefix else ""
+        self._session_stt(session).segments_used_for_final = bool(prefix)
+        self._session_stt(session).final_tail = tail if prefix else ""
         return " ".join(([prefix] if prefix else []) + parts)
 
     async def _abort_session(
@@ -2766,6 +2957,11 @@ class Engine:
             return
         self.session = None
         session.cancelled = True
+        # Stop optional previews immediately when cancellation detaches the
+        # take. Decoder settings are restored later on their owning executor.
+        backend = self._session_stt(session)
+        if hasattr(backend, "preview_enabled"):
+            backend.preview_enabled = False
         spool = session.spool
         session.spool = None
         if spool is not None:
@@ -2773,18 +2969,12 @@ class Engine:
                 self.audio.discard_active(spool)
             else:
                 spool.close()
-        if hasattr(self.stt, "preview_enabled"):
-            self.stt.preview_enabled = False
         if detached is not None:
             detached.set()
         await self._cancel_chunk_tasks_and_wait(session)
         await self._drain_feeder(session)
         await self._drain_preview(session)
-        await self._stt_call(self.stt.reset)
-        if hasattr(self.stt, "windowed_finalize"):
-            self.stt.windowed_finalize = False
-        if hasattr(self.stt, "preview_enabled"):
-            self.stt.preview_enabled = False
+        await self._stt_call(self._finish_session_backend, session, False, True)
         outcome = "discarded" if disposition is SpoolDisposition.discard else "interrupted"
         log.info("session %s %s (%s)", session.id, outcome, why)
         self._resume_cleanup_recovery()
@@ -3081,10 +3271,8 @@ class Engine:
                 else:
                     session.spool.close()
                 session.spool = None
-            if hasattr(self.stt, "preview_enabled"):
-                self.stt.preview_enabled = False
-            if hasattr(self.stt, "windowed_finalize"):
-                self.stt.windowed_finalize = False
+            if not session.backend_released:
+                await self._stt_call(self._finish_session_backend, session)
             if self._finalizing_session is session:
                 self._finalizing = False
                 self._finalizing_session_id = None
@@ -3108,14 +3296,14 @@ class Engine:
         await self._drain_feeder(session)
         await self._drain_preview(session)
         if session.cancelled:
-            await self._stt_call(self.stt.reset)
+            await self._stt_call(self._session_stt(session).reset)
             return
         self._start_cleanup_warmup(session)
         try:
             started = time.perf_counter()
-            raw = await self._stt_call(self.stt.finalize)
-            if getattr(self.stt, "needs_windowed_fallback", False):
-                prefix, chunks = await self._stt_call(self.stt.take_fallback_chunks)
+            raw = await self._stt_call(self._session_stt(session).finalize)
+            if getattr(self._session_stt(session), "needs_windowed_fallback", False):
+                prefix, chunks = await self._stt_call(self._session_stt(session).take_fallback_chunks)
                 await self._send({
                     "event": "finalize_progress", "session": session.id,
                     "stage": "stt", "completed": session.stt_decoded_samples,
@@ -3138,7 +3326,7 @@ class Engine:
         except Exception as exc:
             log.exception("finalize failed")
             await self._cancel_chunk_tasks_and_wait(session)
-            await self._stt_call(self.stt.reset)
+            await self._stt_call(self._session_stt(session).reset)
             await self._error(f"transcription failed: {exc}", session.id)
             return
         if session.cancelled:
@@ -3175,9 +3363,16 @@ class Engine:
                 entities=ctx.get("entities"),
                 cancel_event=session.finalize_cancel,
                 session=session,
+                config_snapshot=self._session_config(session),
             )
         text, mode_name, cleanup_ms, cleanup_applied, reason = result
         cleanup_wall_ms = int((time.perf_counter() - format_started) * 1000)
+        # Finish executor-owned session settings before publishing the terminal
+        # event. Once the client receives final, the finally block must release
+        # foreground ownership and resume deferred recovery without another
+        # executor await in between. The session snapshot still owns cleanup
+        # and history language independently from this restored batch backend.
+        await self._stt_call(self._finish_session_backend, session)
         if session.cancelled:
             return
 
@@ -3252,7 +3447,7 @@ class Engine:
         # Session-level gates: if any fails, segments stay preview-only (HUD
         # partials) and finalize runs the whole-text pipeline unchanged.
         if not (
-            self.config.streaming_cleanup
+            self._session_config(session).streaming_cleanup
             and self.cleanup is not None
             and self.cleanup.loaded
             and not formatting.is_mostly_non_latin(seg_raw)
@@ -3270,7 +3465,7 @@ class Engine:
             ctx = session.context
             gate = formatting.run_gate(
                 seg_raw,
-                self.config,
+                self._session_config(session),
                 bundle_id=ctx.get("bundle_id"),
                 app_name=ctx.get("app_name"),
                 explicit_mode=ctx.get("mode"),
@@ -3286,7 +3481,7 @@ class Engine:
                 # custom formatting-off modes remain off when probed.
                 long_gate = formatting.run_gate(
                     formatting.LLM_PATH_PROBE,
-                    self.config,
+                    self._session_config(session),
                     bundle_id=ctx.get("bundle_id"),
                     app_name=ctx.get("app_name"),
                     explicit_mode=ctx.get("mode"),
@@ -3302,7 +3497,7 @@ class Engine:
             session.stream_allowed_terms = self._allowed_terms(gate.mode)
             session.stream_prefix_candidates = (
                 formatting.build_prefill_prompt_candidates(
-                    self.config,
+                    self._session_config(session),
                     bundle_id=ctx.get("bundle_id"),
                     app_name=ctx.get("app_name"),
                     explicit_mode=ctx.get("mode"),
@@ -3650,7 +3845,7 @@ class Engine:
         """Assemble the final text from the per-segment cleanups. Returns the
         `_apply_formatting`-shaped tuple, or None → caller falls back to the
         whole-text pipeline (never lose a transcript to the fast path)."""
-        backend = self.stt
+        backend = self._session_stt(session)
         if not getattr(backend, "segments_used_for_final", False):
             return None  # finalize re-decoded the whole clip; chunks were preview-only
         if session.streaming_disabled or not session.chunk_tasks:
@@ -3672,7 +3867,7 @@ class Engine:
         # split across two writing systems at the final seam.
         gate = formatting.run_gate(
             raw,
-            self.config,
+            self._session_config(session),
             bundle_id=ctx.get("bundle_id"),
             app_name=ctx.get("app_name"),
             explicit_mode=ctx.get("mode"),
@@ -3889,9 +4084,9 @@ class Engine:
             # preview predicts nothing: the rest of the audio can add words.
             ctx = session.context
             preview = session.last_raw_partial
-            if preview and self.config.romanize_output and formatting.run_gate(
+            if preview and self._session_config(session).romanize_output and formatting.run_gate(
                 preview,
-                self.config,
+                self._session_config(session),
                 bundle_id=ctx.get("bundle_id"),
                 app_name=ctx.get("app_name"),
                 explicit_mode=ctx.get("mode"),
@@ -3902,7 +4097,7 @@ class Engine:
             # Same candidates _apply_formatting will pass for this session; []
             # when the mode never reaches the model (Raw, formatting off).
             candidates = formatting.build_prefill_prompt_candidates(
-                self.config,
+                self._session_config(session),
                 bundle_id=ctx.get("bundle_id"),
                 app_name=ctx.get("app_name"),
                 explicit_mode=ctx.get("mode"),
@@ -4011,6 +4206,7 @@ class Engine:
         (text, mode_name, cleanup_ms, cleanup_applied, reason). Shared by live
         finalize and history reprocessing; `session` is the live dictation,
         whose stop-time warm-up the cleanup waits for."""
+        self._idle_since = None
         config = config_snapshot or self.config
         gate = formatting.run_gate(
             raw,
@@ -4471,6 +4667,8 @@ class Engine:
     async def _cmd_remove_model(self, msg: dict[str, Any]) -> None:
         model = msg.get("model")
         protected = {self.stt.model_id, self.config.stt_model, self.config.cleanup_model}
+        if self._keyboard_backend is not None:
+            protected.add(self._keyboard_backend.model_id)
         if self._reprocess_backend is not None:
             protected.add(self._reprocess_backend.model_id)
         protected.update(self._model_targets.values())
@@ -4949,6 +5147,8 @@ class Engine:
         if not callable(hibernate):
             return
         pressure = await asyncio.to_thread(_memory_pressure_level)
+        if self.config.memory_policy == "keep_ready" and self.config.cleanup_enabled:
+            return
         if pressure < 2 and self.config.cleanup_enabled:
             return
         try:
@@ -6025,6 +6225,21 @@ class Engine:
         # from "command was dropped" (engine restarting) and un-stick its UI.
         await self._send({"event": "transcribe_accepted", "id": msg.get("id")})
 
+    @staticmethod
+    def _transcribe_file_piece(backend: STTBackend, chunk: Any, prompt: str | None, language: str) -> str:
+        """Keep file hints and language inside the serialized decode operation."""
+        old_prompt = getattr(backend, "initial_prompt", None)
+        old_language = getattr(backend, "language", None)
+        try:
+            backend.initial_prompt = prompt
+            if hasattr(backend, "language"):
+                backend.language = language
+            return transcribe_clip(backend, chunk)
+        finally:
+            backend.initial_prompt = old_prompt
+            if hasattr(backend, "language"):
+                backend.language = old_language
+
     async def _run_transcribe_file(self, msg: dict[str, Any]) -> None:
         path = str(msg.get("path"))
         job_id = msg.get("id")
@@ -6033,6 +6248,13 @@ class Engine:
             await self._send({"event": "transcribe_failed", "id": job_id, "error": error})
 
         try:
+            private_context = msg.get("personal_context") is not False
+            snapshot = (None if private_context else text_formatting.configuration_snapshot(
+                self.config, personal_context=False))
+            if (snapshot is not None and isinstance(msg.get("mode"), str)
+                    and snapshot.mode_by_name(msg["mode"]) is None):
+                await fail("That formatting mode is unavailable for supplied-only file transcription. Choose a built-in mode.")
+                return
             try:
                 pcm = await asyncio.to_thread(load_media, path)
             except ValueError as exc:
@@ -6071,8 +6293,9 @@ class Engine:
                     await fail("cancelled")
                     return
                 # Re-set per chunk: a dictation in between overwrites the prompt.
-                self.stt.initial_prompt = self._glossary()
-                piece = await self._stt_call(transcribe_clip, self.stt, chunk)
+                prompt = self._glossary() if private_context else None
+                language = snapshot.language if snapshot is not None else self.config.language
+                piece = await self._stt_call(self._transcribe_file_piece, self.stt, chunk, prompt, language)
                 if self.shutdown.is_set():
                     await fail("engine shutting down")
                     return
@@ -6115,6 +6338,7 @@ class Engine:
                                 app_name="Local file",
                                 explicit_mode=msg["mode"],
                                 cancel_event=self._transcribe_preempt,
+                                **({"config_snapshot": snapshot} if snapshot is not None else {}),
                             )
                         )
                         if self.shutdown.is_set():

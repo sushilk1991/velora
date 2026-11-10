@@ -78,7 +78,14 @@ or updates change:
 | Voice action against a real app (`velora action "…" --execute`) | The current app stays in front while the plan runs against the exact background process and window; a plan that cannot confirm that target stops without typing |
 | Voice action with the screen locked | The plan fails with "the screen is locked" and opens nothing |
 | Voice action while the target conversation is wrong | Only the switcher query is typed; the message body is never sent |
-| Normal text field with a non-text clipboard item | Text lands once and the original clipboard is restored |
+| Normal text field with a non-text clipboard item | Text lands once; Paste and restore preserves the original clipboard formats |
+| Each dictation delivery choice, including delayed paste and another copy during delivery | Paste and keep leaves the result; Paste and restore restores the previous clipboard only after successful delivery; Copy only posts no input; a user copy wins |
+| Fix this, remembered spelling, Undo, and text-only Reformat in History | Raw text is preserved; whole rewrites do not become spelling rules; Undo preserves newer dictionary edits; deleted/stale records cannot be overwritten; reformat works without audio |
+| Modes Try it, recipe import/export, invalid files | Unsaved instructions affect only the preview; imported app assignments stay inactive; invalid documents preserve the working mode |
+| Import a recording, search a passage, and play it | Conversion does not alter the original; imported speech is labeled Recording; search seeks to the matching passage; deletion stops playback |
+| Rapid meeting action checkbox changes and refreshed notes | Click order is preserved; failed saves revert; generated notes do not silently apply an earlier completion callback |
+| Local integrations after revoking a grant | Active requests cancel; final reads recheck access; supplied-only text/file formatting cannot expand private snippets or use personal vocabulary |
+| Mac Shortcuts action catalog in the signed app | Get Last Velora Result, Reformat Text with Velora, Transcribe File with Velora, and Export Velora Meeting appear; cold launch waits for readiness; cancellation releases work; disabled grants remain disabled |
 | Proofread a selection in TextEdit, Notes, a Chrome textarea, Gmail compose, Slack, and VS Code | The selection is replaced in place and the HUD shows struck and inserted words; in Terminal or on a static webpage nothing is pasted and the HUD says the text is on the clipboard; a click or key press before the result lands leaves it on the clipboard |
 | Quit during dictation or meeting capture | Capture stops, media state is restored, and recoverable meeting audio is finalized or retained |
 | Signed release DMG | Signature, notarization, staple, Gatekeeper, bundle identity, stripped harness-free executable, and packaged engine/CLI/MCP runtime checks all pass |

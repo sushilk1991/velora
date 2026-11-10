@@ -169,6 +169,8 @@ extension SettingsDocument {
         /// the recommended speech model ("english" → the small fast English
         /// tier; "multilingual" → Whisper Turbo).
         var languageScope: String
+        var followKeyboardLanguage: Bool = false
+        var keyboardRoutes: [String: KeyboardSpeechRoute] = [:]
 
         static let defaults = Models(
             speech: STTModel.all[0].id, languageScope: "multilingual")
@@ -185,6 +187,8 @@ extension SettingsDocument {
             speech = try container.decode(String.self, forKey: .speech)
             languageScope = try container.decodeIfPresent(
                 String.self, forKey: .languageScope) ?? "multilingual"
+            followKeyboardLanguage = try container.decodeIfPresent(Bool.self, forKey: .followKeyboardLanguage) ?? false
+            keyboardRoutes = try container.decodeIfPresent([String: KeyboardSpeechRoute].self, forKey: .keyboardRoutes) ?? [:]
         }
     }
 
@@ -196,6 +200,8 @@ extension SettingsDocument {
         static let defaultMaximumRecordingSeconds: Double = 3_600
 
         var cleanupEnabled: Bool
+        var memoryPolicy: CleanupMemoryPolicy = .automatic
+        var cleanupIdleMinutes: Double = 5
         var defaultMode: String
         var streamingCleanup: Bool
         var maximumRecordingSeconds: Double
@@ -209,6 +215,29 @@ extension SettingsDocument {
             maximumRecordingSeconds: defaultMaximumRecordingSeconds,
             audioRetentionDays: 180,
             audioMaximumMegabytes: 4096)
+
+        init(cleanupEnabled: Bool, defaultMode: String, streamingCleanup: Bool,
+             maximumRecordingSeconds: Double, audioRetentionDays: Double,
+             audioMaximumMegabytes: Double) {
+            self.cleanupEnabled = cleanupEnabled
+            self.defaultMode = defaultMode
+            self.streamingCleanup = streamingCleanup
+            self.maximumRecordingSeconds = maximumRecordingSeconds
+            self.audioRetentionDays = audioRetentionDays
+            self.audioMaximumMegabytes = audioMaximumMegabytes
+        }
+
+        init(from decoder: Decoder) throws {
+            let c = try decoder.container(keyedBy: CodingKeys.self)
+            cleanupEnabled = try c.decode(Bool.self, forKey: .cleanupEnabled)
+            defaultMode = try c.decode(String.self, forKey: .defaultMode)
+            streamingCleanup = try c.decode(Bool.self, forKey: .streamingCleanup)
+            maximumRecordingSeconds = try c.decode(Double.self, forKey: .maximumRecordingSeconds)
+            audioRetentionDays = try c.decode(Double.self, forKey: .audioRetentionDays)
+            audioMaximumMegabytes = try c.decode(Double.self, forKey: .audioMaximumMegabytes)
+            memoryPolicy = try c.decodeIfPresent(CleanupMemoryPolicy.self, forKey: .memoryPolicy) ?? .automatic
+            cleanupIdleMinutes = try c.decodeIfPresent(Double.self, forKey: .cleanupIdleMinutes) ?? 5
+        }
     }
 
     struct Meetings: Codable, Equatable {
@@ -521,6 +550,13 @@ enum SettingsDocumentCodec {
         }
         guard ["english", "multilingual"].contains(value.models.languageScope) else {
             throw SettingsDocumentError.invalidValue("model language scope")
+        }
+        guard KeyboardLanguageRouting.valid(value.models.keyboardRoutes) else {
+            throw SettingsDocumentError.invalidValue("keyboard language rules")
+        }
+        guard value.engine.cleanupIdleMinutes.isFinite,
+              (1...120).contains(value.engine.cleanupIdleMinutes) else {
+            throw SettingsDocumentError.invalidValue("idle memory delay")
         }
         guard (1...1_000).contains(value.dictation.typingWordsPerMinute) else {
             throw SettingsDocumentError.invalidValue("typing speed")

@@ -224,7 +224,32 @@ enum ControlClientError: LocalizedError {
     }
 }
 
-/// Blocking one-shot client used only by the headless CLI/MCP process.
+/// Shuts down a request without transferring descriptor ownership. The client
+/// removes the descriptor under the same lock before closing it, so a late
+/// cancellation can never touch a reused descriptor.
+final class ControlClientCancellation {
+    private let lock = NSLock()
+    private var descriptor: Int32?
+    private var cancelled = false
+
+    var isCancelled: Bool { lock.withLock { cancelled } }
+    func cancel() {
+        lock.withLock {
+            cancelled = true
+            if let descriptor { shutdown(descriptor, SHUT_RDWR) }
+        }
+    }
+    fileprivate func attach(_ fd: Int32) -> Bool {
+        lock.withLock {
+            guard !cancelled else { return false }
+            descriptor = fd
+            return true
+        }
+    }
+    fileprivate func detach() { lock.withLock { descriptor = nil } }
+}
+
+/// Blocking one-shot client for CLI/MCP and the asynchronous Shortcuts adapter.
 enum LocalControlClient {
     static let maxResponseBytes = 4 * 1_048_576
 
@@ -232,11 +257,13 @@ enum LocalControlClient {
         command: String,
         arguments: [String: Any] = [:],
         path: String = AppConfig.controlSocketPath,
-        timeoutSeconds: Int = 30
+        timeoutSeconds: Int = 30,
+        cancellation: ControlClientCancellation? = nil
     ) throws -> [String: Any] {
         let fd = socket(AF_UNIX, SOCK_STREAM, 0)
         guard fd >= 0 else { throw ControlClientError.appUnavailable }
-        defer { close(fd) }
+        defer { cancellation?.detach(); close(fd) }
+        guard cancellation?.attach(fd) != false else { throw CancellationError() }
         UnixSocket.disableSigpipe(fd)
         UnixSocket.setTimeouts(fd, seconds: timeoutSeconds)
         guard let connected = UnixSocket.withAddress(path: path, { address, length in
@@ -254,6 +281,7 @@ enum LocalControlClient {
         UnixSocket.writeAll(data, to: fd)
 
         guard let responseData = UnixSocket.readLine(fd, cap: maxResponseBytes) else {
+            if cancellation?.isCancelled == true { throw CancellationError() }
             throw ControlClientError.invalidResponse
         }
         guard responseData.count <= maxResponseBytes else {

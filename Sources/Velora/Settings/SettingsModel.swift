@@ -484,6 +484,10 @@ final class SettingsModel: ObservableObject {
         language = config.language
         cleanupEnabled = config.cleanupEnabled
         languageScope = config.languageScope
+        followKeyboardLanguage = config.followKeyboardLanguage
+        keyboardSpeechRoutes = config.keyboardSpeechRoutes
+        cleanupMemoryPolicy = config.cleanupMemoryPolicy
+        cleanupIdleMinutes = config.cleanupIdleMinutes
         duckOtherAudio = config.duckOtherAudio
         autoPunctuation = config.autoPunctuation
         romanizeOutput = config.romanizeOutput
@@ -677,6 +681,10 @@ final class SettingsModel: ObservableObject {
         saveAudio = imported.dictation.saveAudio
         duckOtherAudio = imported.dictation.duckOtherAudio
         languageScope = imported.models.languageScope
+        followKeyboardLanguage = imported.models.followKeyboardLanguage
+        keyboardSpeechRoutes = imported.models.keyboardRoutes
+        cleanupMemoryPolicy = imported.engine.memoryPolicy
+        cleanupIdleMinutes = imported.engine.cleanupIdleMinutes
         romanizeOutput = imported.dictation.romanizeOutput
         learnFromEdits = imported.dictation.learnFromEdits
         vocabMining = imported.dictation.vocabularyMining
@@ -845,6 +853,35 @@ final class SettingsModel: ObservableObject {
         didSet {
             guard inputDeviceUID != oldValue else { return }
             config.inputDeviceUID = inputDeviceUID
+        }
+    }
+
+    @Published var followKeyboardLanguage = false {
+        didSet {
+            guard !applyingImportedSettings else { return }
+            config.followKeyboardLanguage = followKeyboardLanguage
+            supervisor?.send(["cmd": "reload_config"])
+        }
+    }
+    @Published var keyboardSpeechRoutes: [String: KeyboardSpeechRoute] = [:] {
+        didSet {
+            guard !applyingImportedSettings else { return }
+            config.keyboardSpeechRoutes = keyboardSpeechRoutes
+            supervisor?.send(["cmd": "reload_config"])
+        }
+    }
+    @Published var cleanupMemoryPolicy: CleanupMemoryPolicy = .automatic {
+        didSet {
+            guard !applyingImportedSettings else { return }
+            config.cleanupMemoryPolicy = cleanupMemoryPolicy
+            supervisor?.send(["cmd": "reload_config"])
+        }
+    }
+    @Published var cleanupIdleMinutes: Double = 5 {
+        didSet {
+            guard !applyingImportedSettings else { return }
+            config.cleanupIdleMinutes = cleanupIdleMinutes
+            supervisor?.send(["cmd": "reload_config"])
         }
     }
 
