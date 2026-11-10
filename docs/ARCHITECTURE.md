@@ -597,6 +597,17 @@ changes length.
 
 **Parakeet segments:** the same pause rule, but past 25s a segment closes at the first 0.2s of quiet rather than mid-speech; audio with no quiet at all (steady room noise) is never cut and decodes whole at stop. At any length, `stop` decodes only the un-decoded tail and stitches the committed segments; the whole clip is decoded instead when nothing was committed, a segment decode failed, or the tail decoded empty over speech. A speech span that decodes empty stays pending and is retried 3s later, the wait doubling per consecutive empty decode up to 48s. Spans over 120s decode in windows that share 15s of audio. Each seam joins on the longest run of ≥3 tokens that agree in text and within 1.5s; among equally long runs, the one with the smallest timing error wins. With no such run, the seam is cut at the widest gap between words. With Stream Typing, previews decode the last 25s of the open span about every 0.5s, backing off with decode time, and never change segment state.
 
+**Writing-model ownership:** selection is app-wide. The native router uses the
+selected backend for dictation, edits, recipe previews, meeting notes, and
+generative action plans. Native startup and retry do not acquire the saved MLX
+model. Generic tasks use their supplied system prompt through the same native
+runtime; qualified dictation requests can retain the trained student prompt.
+An invalid request or unavailable native backend returns an error or original
+text without activating the saved backend. Only an explicit model change may
+retire one backend and load the other. Native option logits are unavailable;
+typed decision callers retain their validated generative path on that same
+backend. Context and output limits remain 4,096 and 512 tokens respectively.
+
 ## Smart formatting policy (the "smart as Wispr Flow" part)
 
 Two stages, both local:

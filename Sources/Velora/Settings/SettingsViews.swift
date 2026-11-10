@@ -553,7 +553,7 @@ struct ModelSettingsView: View {
         }
     }
 
-    /// The set of currently-active model ids (never offered for deletion).
+    /// Selected choices and in-flight models remain protected from deletion.
     private var activeModelIDs: Set<String> {
         Set([model.sttModel, model.cleanupModel].filter { !$0.isEmpty })
             .union(model.downloads.protectedModels)
@@ -574,11 +574,22 @@ struct ModelSettingsView: View {
                     title: "Speech to text", slot: .speech, choices: speechChoices,
                     selection: speechBinding)
                 Button(L10n.text("Use an Existing Whisper Model…")) { chooseWhisperModel() }
+                if model.nativeCleanupEnabled {
+                    LabeledContent(L10n.text("Writing model")) {
+                        Text(L10n.text("LFM3 Native — Experimental"))
+                            .foregroundStyle(.secondary)
+                    }
+                }
                 if !cleanupChoices.isEmpty {
                     slotRow(
-                        title: model.nativeCleanupEnabled ? "Standard cleanup" : "Cleanup",
+                        title: model.nativeCleanupEnabled ? "Saved writing model" : "Writing model",
                         slot: .cleanup, choices: cleanupChoices,
                         selection: cleanupBinding)
+                        .disabled(model.nativeCleanupEnabled || model.nativeCleanupSwitching)
+                    if model.nativeCleanupEnabled {
+                        Text(L10n.text("Turn off LFM3 Native to use or change the saved writing model."))
+                            .font(.caption).foregroundStyle(.secondary)
+                    }
                 }
             } header: {
                 Text(L10n.text("On this Mac"))
@@ -614,9 +625,9 @@ struct ModelSettingsView: View {
                         Text(error).font(.caption).foregroundStyle(.secondary)
                     }
                 }
-                Text(model.nativeCleanupEnabled
-                     ? "Experimental cleanup is enabled. The standard model loads when needed."
-                     : model.cleanupLoaded ? "Writing model is loaded." : "Writing model is not loaded. Dictation needs only speech.")
+                Text(L10n.text(model.nativeCleanupEnabled
+                     ? model.cleanupLoaded ? "LFM3 Native is loaded for all writing tasks." : "LFM3 Native is selected but not loaded."
+                     : model.cleanupLoaded ? "Selected writing model is loaded." : "Selected writing model is not loaded. Dictation can still transcribe speech."))
                     .font(.caption).foregroundStyle(.secondary)
             }
             Section {
@@ -638,7 +649,9 @@ struct ModelSettingsView: View {
                                 Button(L10n.text("Remove Velora Copies…")) { removalCandidate = item.id }
                                     .disabled(!model.downloads.isCurrent)
                             } else if activeModelIDs.contains(item.id) {
-                                Text(L10n.text("In use")).font(.caption).foregroundStyle(.secondary)
+                                Text(L10n.text(model.nativeCleanupEnabled && item.id == model.cleanupModel
+                                               ? "Saved choice" : "In use"))
+                                    .font(.caption).foregroundStyle(.secondary)
                             } else {
                                 Text(L10n.text("Shared or included")).font(.caption).foregroundStyle(.secondary)
                             }
@@ -658,6 +671,12 @@ struct ModelSettingsView: View {
         .scrollContentBackground(.hidden)
         .task(id: model.storageRevision) { await refreshStorage() }
         .onAppear { model.requestStatus() }
+        .onChange(of: model.nativeCleanupSwitching) { _, switching in
+            if switching && changing == .cleanup { changing = nil }
+        }
+        .onChange(of: model.nativeCleanupEnabled) { _, enabled in
+            if enabled && changing == .cleanup { changing = nil }
+        }
         .alert("Remove Velora model copies?", isPresented: Binding(
             get: { removalCandidate != nil },
             set: { if !$0 { removalCandidate = nil } })) {
@@ -680,9 +699,9 @@ struct ModelSettingsView: View {
                 if model.nativeCleanupSwitching {
                     HStack(spacing: VeloraSpacing.s) {
                         ProgressView().controlSize(.small).accessibilityHidden(true)
-                        Text(model.nativeCleanupSelection.pendingEnabled == false
-                             ? "Returning to standard cleanup…"
-                             : "Waiting for the engine to confirm the change…")
+                        Text(L10n.text(model.nativeCleanupSelection.pendingEnabled == false
+                             ? "Switching to the saved writing model…"
+                             : "Waiting for the engine to confirm the change…"))
                             .font(.caption)
                             .foregroundStyle(.secondary)
                     }
@@ -691,16 +710,16 @@ struct ModelSettingsView: View {
                     Text(L10n.text("Reconnect to the engine to change this choice."))
                         .font(.caption).foregroundStyle(.secondary)
                 } else if !model.nativeCleanupAvailable && model.nativeCleanupEnabled {
-                    Text(L10n.text("The local trial package is unavailable. Turn this off to use standard cleanup."))
+                    Text(L10n.text("LFM3 Native is unavailable. Restore the local package or turn this off to choose another writing model."))
                         .font(.caption).foregroundStyle(.secondary)
                 }
                 if let error = model.nativeCleanupError {
                     Text(error).font(.caption).foregroundStyle(VeloraStatus.warningText)
                 }
             } header: {
-                Text(L10n.text("Experimental dictation"))
+                Text(L10n.text("Experimental writing model"))
             } footer: {
-                SettingsFooter(L10n.text("Try native cleanup for short English paragraphs in built-in modes. It may miss corrections or omit words. For other languages, turn this off or choose a language in Dictation. Dictation with line breaks, longer notes and other workflows use standard cleanup; switching models can take several seconds."))
+                SettingsFooter(L10n.text("LFM3 handles every writing task and never switches models automatically. It is tuned for dictation; editing, translation, and other instructions may be less reliable. Review experimental output."))
             }
         }
     }
@@ -716,7 +735,7 @@ struct ModelSettingsView: View {
         let active = choices.first { $0.id == selection.wrappedValue }
         HStack(alignment: .firstTextBaseline) {
             VStack(alignment: .leading, spacing: 2) {
-                Text(title)
+                Text(L10n.text(title))
                 Text(caption(for: active, fallback: selection.wrappedValue))
                     .font(.caption)
                     .foregroundStyle(.secondary)
@@ -806,7 +825,10 @@ struct ModelSettingsView: View {
     }
 
     private var cleanupBinding: Binding<String> {
-        Binding(get: { model.cleanupModel }, set: { model.setCleanupModel($0) })
+        Binding(get: { model.cleanupModel }, set: {
+            guard !model.nativeCleanupEnabled && !model.nativeCleanupSwitching else { return }
+            model.setCleanupModel($0)
+        })
     }
 
     private var nativeCleanupBinding: Binding<Bool> {

@@ -20,7 +20,7 @@ from velora_engine.cleanup import (
 from velora_engine.cleanup_process import CleanupProcess
 from velora_engine.decisions import DecisionResult
 from velora_engine.native_cleanup import NativeCleanupRouter, SYSTEM_PROMPT
-from velora_engine.native_runtime import MODEL_SHA256, NativePackage, NativeRuntime
+from velora_engine.native_runtime import validate_request, MODEL_SHA256, NativePackage, NativeRuntime
 from test_native_runtime import alive, package, rows as native_rows  # shared dummy-child fixture
 
 
@@ -235,20 +235,38 @@ async def test_cancel_arriving_with_native_ready_rejects_enable_and_restores_sta
     await cleanup.aclose()
 
 
-async def test_startup_failure_latches_and_falls_back_without_retries(backends):
+async def test_startup_failure_latches_without_starting_unselected_model(backends):
     cleanup = router(backends)
     standard, native, events, _ = backends
     native.load_error = RuntimeError("bad package")
-    await cleanup.load_async()
-    assert cleanup.native_enabled and cleanup.native_error and standard.loaded
+    with pytest.raises(RuntimeError, match="bad package"):
+        await cleanup.load_async()
+    assert cleanup.native_enabled and cleanup.native_error and not standard.loaded
     for _ in range(2):
         result = await cleanup.cleanup_dictation("raw", "system", CONTEXT)
-        assert result.backend == result.attempted_backend == "standard"
+        assert result.backend == "raw" and result.attempted_backend == "native_lfm3_g"
+        assert result.text == "raw" and not await cleanup.ensure_loaded()
     assert events.count("native.load") == 1
+    assert "standard.load" not in events and "standard.ensure" not in events
     native.load_error = None
     await cleanup.set_enabled(False)
     await cleanup.set_enabled(True)
     assert cleanup.native_loaded and cleanup.native_error is None
+    await cleanup.aclose()
+
+
+async def test_failed_retry_of_selected_native_never_rolls_back_to_standard(backends):
+    cleanup = router(backends)
+    standard, native, events, _ = backends
+    await cleanup.load_async()
+    native.generate_error = RuntimeError("transport failure")
+    assert not (await cleanup.cleanup("keep raw", "Edit this.")).applied
+    native.load_error = RuntimeError("native reload failed")
+    with pytest.raises(RuntimeError, match="native reload failed"):
+        await cleanup.set_enabled(True)
+    assert cleanup.native_enabled and cleanup.native_error
+    assert not standard.loaded and not cleanup.loaded
+    assert "standard.load" not in events and "standard.ensure" not in events
     await cleanup.aclose()
 
 
@@ -300,15 +318,20 @@ async def test_non_eos_never_accepts_payload_or_partial(backends, status):
     assert result.attempted_backend == "native_lfm3_g" and result.model_identity == MODEL_SHA256
     if status == "native_transport_failure":
         assert cleanup.native_error
-        assert (await cleanup.cleanup_dictation("raw", "system", CONTEXT)).attempted_backend == "standard"
+        assert (await cleanup.cleanup_dictation("raw", "system", CONTEXT)).attempted_backend == "native_lfm3_g"
+        assert not backends[0].loaded
+    else:
+        assert cleanup.native_error is None and cleanup.loaded
     await cleanup.aclose()
 
 
-async def test_transport_failure_and_failed_reap_return_raw_and_block_next_load(backends):
+@pytest.mark.parametrize("failure", [RuntimeError("transport failed"), ValueError("invalid runtime response")],
+                         ids=["transport", "runtime-response"])
+async def test_transport_failure_and_failed_reap_return_raw_and_block_next_load(backends, failure):
     cleanup = router(backends)
     standard, native, events, _ = backends
     await cleanup.load_async()
-    native.generate_error = RuntimeError("transport failed")
+    native.generate_error = failure
     native.close_error = RuntimeError("worker still alive")
     result = await cleanup.cleanup_dictation("original raw", "system", CONTEXT)
     assert not result.applied and result.text == "original raw" and cleanup.native_error
@@ -337,7 +360,7 @@ async def test_native_cancel_with_failed_reap_still_returns_raw(backends):
     await cleanup.aclose()
 
 
-async def test_native_task_cancel_returns_raw_and_retires_before_standard(backends):
+async def test_native_task_cancel_returns_raw_and_reloads_only_selected_native(backends):
     cleanup = router(backends)
     standard, native, events, _ = backends
     await cleanup.load_async()
@@ -347,8 +370,11 @@ async def test_native_task_cancel_returns_raw_and_retires_before_standard(backen
     task.cancel()
     result = await task
     assert result.text == "original raw" and result.reason == "cancelled" and not result.applied
-    await cleanup.cleanup("action", "system")
-    assert events.index("native.close") < events.index("standard.ensure")
+    native.block = None
+    await cleanup.cleanup("action", "system", check_ratio=False)
+    assert events.index("native.close") < len(events) - 1
+    assert events[-1] == "native.generate" and not standard.loaded
+    assert "standard.ensure" not in events and "standard.cleanup" not in events
     await cleanup.aclose()
 
 
@@ -370,7 +396,7 @@ async def test_divergence_restore_and_pre_cancel(backends):
     await cleanup.aclose()
 
 
-async def test_standard_actions_decisions_and_enabled_prefix_does_not_wake(backends):
+async def test_native_actions_decisions_and_prefix_never_wake_standard(backends):
     cleanup = router(backends)
     standard, native, events, _ = backends
     await cleanup.load_async()
@@ -380,9 +406,10 @@ async def test_standard_actions_decisions_and_enabled_prefix_does_not_wake(backe
     await cleanup.release_cache()
     await cleanup.release_action_memory()
     assert events == []
-    assert (await cleanup.cleanup("action", "system")).attempted_backend == "standard"
-    assert (await cleanup.decide("state", [])).status == "ok"
-    assert "standard.cleanup" in events and "standard.decide" in events
+    assert (await cleanup.cleanup("action", "system", check_ratio=False)).attempted_backend == "native_lfm3_g"
+    decision = await cleanup.decide("state", [])
+    assert decision.status == "unavailable" and not decision.answers
+    assert "standard.cleanup" not in events and "standard.decide" not in events
     await cleanup.cleanup_dictation("Clean text.", "system", CONTEXT)
     assert cleanup.native_active and not standard.loaded
     await cleanup.aclose()
@@ -396,7 +423,7 @@ async def test_enabled_prefix_before_initial_load_does_not_load_either_backend(b
     await cleanup.aclose()
 
 
-async def test_latched_native_failure_allows_standard_prefix_only_after_retirement(backends):
+async def test_latched_native_failure_never_loads_standard_through_legacy_helpers(backends):
     cleanup = router(backends)
     standard, native, events, _ = backends
     await cleanup.load_async()
@@ -404,10 +431,110 @@ async def test_latched_native_failure_allows_standard_prefix_only_after_retireme
     events.clear()
     assert not (await cleanup.prepare_prefix([("system", "alpha")])).applied
     assert events == []  # Unknown native ownership must never wake standard.
-    assert await cleanup.ensure_standard_loaded()
-    events.clear()
-    assert (await cleanup.prepare_prefix([("system", "alpha")])).applied
-    assert events == ["standard.prefix"] and standard.loaded and not cleanup.native_active
+    assert not await cleanup.ensure_standard_loaded()
+    assert not await cleanup.ensure_loaded()
+    assert not (await cleanup.prepare_prefix([("system", "alpha")])).applied
+    await cleanup.release_cache()
+    await cleanup.release_action_memory()
+    await cleanup.memory_metrics()
+    cleanup.resume_recovery()
+    assert events == [] and not standard.loaded
+    await cleanup.aclose()
+
+
+@pytest.mark.parametrize("raw,prompt,response", [
+    ("Make this clearer.", "Edit the supplied text without adding facts.", "Clearer text."),
+    ("Hola, revisa esta nota.", "Translate the supplied text into English.", "Hello, review this note."),
+    ("हमें शुक्रवार तक प्रतीक्षा करनी चाहिए।", "Translate the supplied text into English.", "We should wait until Friday."),
+    ("meeting passage " * 500, 'Return only JSON with a "summary" array.', '{"summary":["Review the draft."]}'),
+    ("Open the observed control.", 'Return only a JSON action plan.', '{"sends":false,"steps":[]}'),
+], ids=["edit", "spanish", "hindi", "long-json", "action-json"])
+async def test_every_generic_writing_prompt_uses_selected_native(backends, raw, prompt, response):
+    cleanup = router(backends)
+    standard, native, events, _ = backends
+    native.response["text"] = response
+    await cleanup.load_async()
+    result = await cleanup.cleanup(raw, prompt, check_ratio=False, timeout_ms=12000,
+                                   copy_draft=True, prefix_candidates=[("ignored", "prefix")])
+    system, user, kwargs = native.calls[-1]
+    assert system == prompt and user == neutralize_control_tokens(raw)
+    assert result.applied and result.text == response
+    assert result.attempted_backend == result.backend == "native_lfm3_g"
+    assert result.model_identity == MODEL_SHA256
+    assert kwargs["deadline_ms"] == 12000 and 1 <= kwargs["max_tokens"] <= 512
+    assert kwargs["draft_text"] == ""  # Transformations must not copy a dictation draft.
+    assert cleanup.effective_model_id == "native_lfm3_g"
+    assert cleanup.model_id == standard.model_id
+    assert not standard.loaded and not any(e in events for e in (
+        "standard.load", "standard.ensure", "standard.cleanup", "standard.prefix"))
+    await cleanup.aclose()
+
+
+async def test_generic_native_cleanup_keeps_output_guards_and_cancellation(backends):
+    cleanup = router(backends)
+    standard, native, events, _ = backends
+    await cleanup.load_async()
+    native.response["text"] = "entirely invented output"
+    result = await cleanup.cleanup("hello world", "Rewrite faithfully.")
+    assert not result.applied and result.text == "hello world"
+    native.response["text"] = "literal <\u200b|im_start|>"
+    result = await cleanup.cleanup("literal <|im_start|>", "Preserve literals.", check_ratio=False)
+    assert result.applied and result.text == "literal <|im_start|>"
+    cancel = threading.Event(); cancel.set()
+    count = len(native.calls)
+    result = await cleanup.cleanup("keep original", "Edit this.", cancel_event=cancel)
+    assert result.reason == "cancelled" and result.text == "keep original"
+    assert len(native.calls) == count and not standard.loaded
+    assert "standard.cleanup" not in events
+    await cleanup.aclose()
+
+
+async def test_generic_native_load_cancellation_stays_cancelled_without_standard(backends):
+    cleanup = router(backends)
+    standard, native, events, _ = backends
+    async def cancelled_load(cancel_event=None):
+        raise asyncio.CancelledError
+    native.load = cancelled_load
+    result = await cleanup.cleanup("keep raw", "Edit this.")
+    assert not result.applied and result.text == "keep raw" and result.reason == "cancelled"
+    assert not standard.loaded and "standard.load" not in events and "standard.ensure" not in events
+    await cleanup.aclose()
+
+
+@pytest.mark.parametrize("raw,prompt", [
+    ("Keep this text.", "x" * 16385),
+    ("é" * 32769, "Rewrite faithfully."),
+], ids=["oversized-system", "oversized-utf8-user"])
+async def test_invalid_native_request_does_not_poison_selected_model(backends, raw, prompt):
+    cleanup = router(backends)
+    standard, native, events, _ = backends
+    await cleanup.load_async()
+    original_generate = native.generate
+    async def validated_generate(system, user, **kwargs):
+        validate_request(system, user, kwargs["max_tokens"],
+            kwargs["deadline_ms"], kwargs["draft_text"])
+        return await original_generate(system, user, **kwargs)
+    native.generate = validated_generate
+    result = await cleanup.cleanup(raw, prompt, check_ratio=False)
+    assert not result.applied and result.text == raw and result.reason == "native_request_invalid"
+    assert cleanup.native_error is None and cleanup.loaded and native.loaded
+    assert "native.close" not in events and not native.calls
+    assert not standard.loaded and "standard.load" not in events and "standard.ensure" not in events
+    # The invalid request did not consume the selected model's readiness:
+    # a later valid request succeeds without reloading or switching backends.
+    result = await cleanup.cleanup("Valid next request.", "Rewrite faithfully.", check_ratio=False)
+    assert result.applied and result.backend == "native_lfm3_g"
+    assert events.count("native.load") == 1
+    await cleanup.aclose()
+
+
+@pytest.mark.parametrize("budget,expected", [(16, 16), (1000, 512)])
+async def test_generic_native_cleanup_respects_smaller_output_budget(backends, budget, expected):
+    cleanup = router(backends)
+    native = backends[1]
+    await cleanup.load_async()
+    await cleanup.cleanup("Generate JSON.", "Return JSON.", check_ratio=False, max_tokens=budget)
+    assert native.calls[-1][2]["max_tokens"] == expected
     await cleanup.aclose()
 
 
@@ -624,6 +751,15 @@ async def test_real_fresh_standard_proxy_stays_empty_on_native_startup(package):
         await cleanup.load_async()
         assert native.loaded and standard.pid is None and standard.hibernated
         assert cleanup.native_error is None
+        # Exercise the real native IPC owner through the general-purpose API,
+        # not only through the specialized dictation wrapper.
+        result = await cleanup.cleanup("Generate a short JSON recap.", "Return JSON.", check_ratio=False)
+        assert result.applied and result.backend == "native_lfm3_g" and result.text == "Ready."
+        assert await cleanup.ensure_standard_loaded()  # Legacy alias honors native selection.
+        assert not (await cleanup.decide("state", [])).ok
+        cleanup.resume_recovery()
+        await asyncio.sleep(.05)
+        assert standard.pid is None and native.pid is not None and native.loaded
     finally:
         await cleanup.aclose()
 

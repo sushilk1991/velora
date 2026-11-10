@@ -43,6 +43,19 @@ KILL_GRACE_S = 1.0
 POLL_S = .025
 
 
+def validate_request(system, user, max_tokens, deadline_ms, draft_text) -> None:
+    for key, value, limit, empty in (
+        ("system", system, 16384, False), ("user", user, 65536, False),
+        ("draft_text", draft_text, 65536, True),
+    ):
+        if not isinstance(value, str) or (not empty and not value) or len(value.encode("utf-8")) > limit:
+            raise ValueError("invalid native request field: " + key)
+    if type(max_tokens) is not int or not 1 <= max_tokens <= MAX_OUTPUT_TOKENS:
+        raise ValueError("invalid native max_tokens")
+    if type(deadline_ms) is not int or not 1 <= deadline_ms <= 120000:
+        raise ValueError("invalid native deadline_ms")
+
+
 def _json_object(data: bytes) -> dict[str, Any]:
     def pairs(items):
         result = {}
@@ -350,21 +363,8 @@ class NativeRuntime:
             await self._retire()
             raise
 
-    @staticmethod
-    def _validate_request(system, user, max_tokens, deadline_ms, draft_text) -> None:
-        for key, value, limit, empty in (
-            ("system", system, 16384, False), ("user", user, 65536, False),
-            ("draft_text", draft_text, 65536, True),
-        ):
-            if not isinstance(value, str) or (not empty and not value) or len(value.encode("utf-8")) > limit:
-                raise ValueError("invalid native request field: " + key)
-        if type(max_tokens) is not int or not 1 <= max_tokens <= MAX_OUTPUT_TOKENS:
-            raise ValueError("invalid native max_tokens")
-        if type(deadline_ms) is not int or not 1 <= deadline_ms <= 120000:
-            raise ValueError("invalid native deadline_ms")
-
     async def generate(self, system, user, *, max_tokens, deadline_ms, draft_text="", cancel_event=None) -> dict:
-        self._validate_request(system, user, max_tokens, deadline_ms, draft_text)
+        validate_request(system, user, max_tokens, deadline_ms, draft_text)
         if cancel_event is not None and cancel_event.is_set():
             return {"event": "result", "status": "cancelled", "text": "", "partial_text": ""}
         async with self._lock:

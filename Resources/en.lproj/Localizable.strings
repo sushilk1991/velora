@@ -71,7 +71,7 @@
 "English" = "English";
 "English and other languages" = "English and other languages";
 "English only" = "English only";
-"Experimental dictation" = "Experimental dictation";
+"Experimental writing model" = "Experimental writing model";
 "Experimental feature" = "Experimental feature";
 "Export" = "Export";
 "Export Dictionary" = "Export Dictionary";
@@ -220,7 +220,7 @@
 "System" = "System";
 "System Default" = "System Default";
 "Terminals" = "Terminals";
-"The local trial package is unavailable. Turn this off to use standard cleanup." = "The local trial package is unavailable. Turn this off to use standard cleanup.";
+"LFM3 Native is unavailable. Restore the local package or turn this off to choose another writing model." = "LFM3 Native is unavailable. Restore the local package or turn this off to choose another writing model.";
 "The settings file contains an invalid value for %@." = "The settings file contains an invalid value for %@.";
 "These are provisional words…" = "These are provisional words…";
 "This isn't a valid Velora settings file." = "This isn't a valid Velora settings file.";
@@ -231,7 +231,7 @@
 "Transcribing…" = "Transcribing…";
 "Try Again" = "Try Again";
 "Try it out" = "Try it out";
-"Try native cleanup for short English paragraphs in built-in modes. It may miss corrections or omit words. For other languages, turn this off or choose a language in Dictation. Dictation with line breaks, longer notes and other workflows use standard cleanup; switching models can take several seconds." = "Try native cleanup for short English paragraphs in built-in modes. It may miss corrections or omit words. For other languages, turn this off or choose a language in Dictation. Dictation with line breaks, longer notes and other workflows use standard cleanup; switching models can take several seconds.";
+"LFM3 handles every writing task and never switches models automatically. It is tuned for dictation; editing, translation, and other instructions may be less reliable. Review experimental output." = "LFM3 handles every writing task and never switches models automatically. It is tuned for dictation; editing, translation, and other instructions may be less reliable. Review experimental output.";
 "Updates" = "Updates";
 "Use a compact English model. Add other languages later." = "Use a compact English model. Add other languages later.";
 "Use a second dictation shortcut" = "Use a second dictation shortcut";
@@ -308,3 +308,13 @@
 "Preview could not be saved. Recording continues." = "Preview could not be saved. Recording continues.";
 "Shows recent audio blocks, not word-level timing. Me is your microphone; Them is Mac audio." = "Shows recent audio blocks, not word-level timing. Me is your microphone; Them is Mac audio.";
 "Preview may skip audio while models are busy. Final transcription uses the complete recording." = "Preview may skip audio while models are busy. Final transcription uses the complete recording.";
+"Writing model" = "Writing model";
+"Saved writing model" = "Saved writing model";
+"Turn off LFM3 Native to use or change the saved writing model." = "Turn off LFM3 Native to use or change the saved writing model.";
+"Saved choice" = "Saved choice";
+"LFM3 Native is loaded for all writing tasks." = "LFM3 Native is loaded for all writing tasks.";
+"LFM3 Native is selected but not loaded." = "LFM3 Native is selected but not loaded.";
+"Selected writing model is loaded." = "Selected writing model is loaded.";
+"Selected writing model is not loaded. Dictation can still transcribe speech." = "Selected writing model is not loaded. Dictation can still transcribe speech.";
+"Switching to the saved writing model…" = "Switching to the saved writing model…";
+"Waiting for the engine to confirm the change…" = "Waiting for the engine to confirm the change…";

@@ -1888,12 +1888,12 @@ async def test_set_model_commits_first(home, fake_stt, monkeypatch, caplog):
 
 
 def _fail_model_saves(monkeypatch, config: Config, key: str) -> None:
-    """Make `config` fail every save of `key` alone, as set_model saves its
+    """Make `config` fail every save containing `key`, as set_model saves its
     choice, the way a full disk does."""
     save = config.save
 
     def save_unless_the_model(*, keys: set[str] | None = None) -> None:
-        if keys == {key}:
+        if keys is None or key in keys:
             raise OSError("disk full")
         save(keys=keys)
 

@@ -1,7 +1,7 @@
-"""Exclusive cleanup-backend owner for the opt-in native dictation trial.
+"""One selected writing backend for dictation, edits, notes and actions.
 
-The selected MLX model remains the owner of actions, edits and decisions. Only
-supported trial dictation contexts use the pinned native student contract.
+The standard model stays parked while native is selected. Requests that need
+different prompts still use native; failures never select another model.
 """
 
 from __future__ import annotations
@@ -24,7 +24,7 @@ from .cleanup import (
 )
 from .cleanup_process import CleanupProcess
 from .decisions import DecisionResult, STATUS_UNAVAILABLE
-from .native_runtime import MODEL_SHA256, NativePackage, NativeRuntime
+from .native_runtime import MAX_OUTPUT_TOKENS, MODEL_SHA256, NativePackage, NativeRuntime, validate_request
 
 
 log = logging.getLogger("velora.native_cleanup")
@@ -94,6 +94,10 @@ class NativeCleanupRouter:
         return self.standard.model_id
 
     @property
+    def effective_model_id(self) -> str:
+        return NATIVE_BACKEND if self.native_enabled else self.standard.model_id
+
+    @property
     def native_loaded(self) -> bool:
         return self._native_owned and bool(self.runtime.loaded)
 
@@ -103,29 +107,29 @@ class NativeCleanupRouter:
 
     @property
     def pid(self) -> int | None:
-        return self.runtime.pid if self.native_active else self.standard.pid
+        return self.runtime.pid if self.native_enabled or self.native_active else self.standard.pid
 
     @property
     def loaded(self) -> bool:
         if self._closed:
             return False
-        return self.native_loaded if self.native_active else self.standard.loaded
+        return (self.native_loaded and self.native_error is None) if self.native_enabled else self.standard.loaded
 
     @property
     def unhealthy(self) -> bool:
-        return bool(self.runtime.unhealthy) if self.native_active else self.standard.unhealthy
+        return bool(self.runtime.unhealthy) if self.native_enabled else self.standard.unhealthy
 
     @property
     def recovering(self) -> bool:
-        return False if self.native_active else self.standard.recovering
+        return False if self.native_enabled else self.standard.recovering
 
     @property
     def hibernated(self) -> bool:
-        return self._hibernated or (not self.native_active and self.standard.hibernated)
+        return self._hibernated or (not self.native_enabled and self.standard.hibernated)
 
     @property
     def recovery_deadline(self) -> float | None:
-        return None if self.native_active else self.standard.recovery_deadline
+        return None if self.native_enabled else self.standard.recovery_deadline
 
     @staticmethod
     def load_bound_s() -> float:
@@ -142,7 +146,7 @@ class NativeCleanupRouter:
                 raise RuntimeError("native cleanup retirement incomplete")
             self._native_owned = False
 
-    async def _retire_native_for_fallback(self) -> None:
+    async def _retire_native_after_request(self) -> None:
         """Finish a reap despite repeated cancels; retain failed ownership."""
         stopping = asyncio.create_task(self._stop_native())
         while not stopping.done():
@@ -218,46 +222,56 @@ class NativeCleanupRouter:
     async def load_async(self, warm_system_prompt: str | None = None) -> None:
         async with self._lock:
             self._warm_system_prompt = warm_system_prompt
-            if self.native_enabled and not self.native_error:
+            if self.native_enabled:
                 try:
-                    if await self._activate_native():
-                        return
+                    if self.native_error:
+                        raise RuntimeError(self.native_error)
+                    if not await self._activate_native():
+                        raise RuntimeError("native cleanup failed to become ready")
                 except Exception as exc:
                     self.native_error = str(exc) or type(exc).__name__
                     log.warning("native cleanup startup failed: %s", type(exc).__name__)
+                    raise
+                return
             await self._activate_standard(initial_load=True)
+
+    async def _native_unavailable_reason_locked(self, cancel_event=None) -> str | None:
+        if self._closed or (cancel_event is not None and cancel_event.is_set()):
+            return "cancelled"
+        if not self.native_enabled or self.native_error:
+            return "native_unavailable"
+        try:
+            if await self._activate_native(cancel_event):
+                return None
+            return "cancelled" if cancel_event is not None and cancel_event.is_set() else "native_unavailable"
+        except asyncio.CancelledError:
+            return "cancelled"
+        except Exception as exc:
+            self.native_error = str(exc) or type(exc).__name__
+            return "native_unavailable"
+
+    async def _ensure_native_locked(self, cancel_event=None) -> bool:
+        return await self._native_unavailable_reason_locked(cancel_event) is None
 
     async def ensure_native_loaded(self, cancel_event=None) -> bool:
         async with self._lock:
-            if not self.native_enabled or self.native_error or self._closed:
-                return False
-            try:
-                return await self._activate_native(cancel_event)
-            except asyncio.CancelledError:
-                return False
-            except Exception as exc:
-                self.native_error = str(exc) or type(exc).__name__
-                return False
+            return await self._ensure_native_locked(cancel_event)
 
     async def ensure_loaded(self, cancel_event=None) -> bool:
         async with self._lock:
             if self._closed:
                 return False
-            if self.native_enabled and not self.native_error:
-                try:
-                    if await self._activate_native(cancel_event):
-                        return True
-                except asyncio.CancelledError:
-                    return False
-                except Exception as exc:
-                    self.native_error = str(exc) or type(exc).__name__
+            if self.native_enabled:
+                return await self._ensure_native_locked(cancel_event)
             return await self._activate_standard(cancel_event)
 
     async def ensure_standard_loaded(self, cancel_event=None) -> bool:
-        """Explicit non-dictation work must load the selected standard model."""
+        """Compatibility alias; ordinary work must use the selected backend."""
         async with self._lock:
             if self._closed:
                 return False
+            if self.native_enabled:
+                return await self._ensure_native_locked(cancel_event)
             return await self._activate_standard(cancel_event, initial_load=True)
 
     async def set_enabled(self, enabled: bool, cancel_event=None) -> None:
@@ -278,9 +292,10 @@ class NativeCleanupRouter:
             except BaseException as exc:
                 self.native_enabled = previous
                 self.native_error = str(exc) or type(exc).__name__
-                if enabled:
+                if enabled and not previous:
                     # Roll back only after native reap succeeds. If it fails,
-                    # leave the owner intact and never start the other model.
+                    # leave the owner intact. Retrying an already selected
+                    # native model must never select standard as a side effect.
                     try:
                         await self._activate_standard(initial_load=not self.standard.loaded)
                     except Exception:
@@ -291,6 +306,11 @@ class NativeCleanupRouter:
 
     async def cleanup(self, raw: str, system_prompt: str, **kwargs) -> TrialCleanupResult:
         async with self._lock:
+            if self.native_enabled:
+                unavailable = await self._native_unavailable_result(raw, kwargs.get("cancel_event"))
+                if unavailable is not None:
+                    return unavailable
+                return await self._generate_native(raw, system_prompt, neutralize_control_tokens(raw), **kwargs)
             return await self._cleanup_standard(raw, system_prompt, **kwargs)
 
     async def _cleanup_standard(self, raw: str, system_prompt: str, **kwargs) -> TrialCleanupResult:
@@ -306,6 +326,11 @@ class NativeCleanupRouter:
 
     async def decide(self, *args, **kwargs):
         async with self._lock:
+            if self.native_enabled:
+                # The pinned native protocol does not expose option logits.
+                # Callers may use their existing validated generative path on
+                # this same backend; never invent probability mass or wake MLX.
+                return DecisionResult(STATUS_UNAVAILABLE, reason="native_decisions_unavailable")
             try:
                 await self._activate_standard(kwargs.get("cancel_event"))
             except Exception:
@@ -315,34 +340,50 @@ class NativeCleanupRouter:
     async def cleanup_dictation(self, raw: str, system_prompt: str, context: dict,
                                 **kwargs) -> TrialCleanupResult:
         async with self._lock:
-            cancel_event = kwargs.get("cancel_event")
-            if self.native_enabled and not self.native_error:
-                if cancel_event is not None and cancel_event.is_set():
-                    return _result(CleanupResult(raw, False, 0, "cancelled"), NATIVE_BACKEND, MODEL_SHA256)
-                try:
-                    native = await self._activate_native(cancel_event)
-                except asyncio.CancelledError:
-                    return _result(CleanupResult(raw, False, 0, "cancelled"), NATIVE_BACKEND, MODEL_SHA256)
-                except Exception as exc:
-                    self.native_error = str(exc) or type(exc).__name__
-                    native = False
-                if native:
-                    return await self._cleanup_native(raw, context, **kwargs)
+            if self.native_enabled:
+                unavailable = await self._native_unavailable_result(raw, kwargs.get("cancel_event"))
+                if unavailable is not None:
+                    return unavailable
+                return await self._cleanup_native(raw, context, **kwargs)
             return await self._cleanup_standard(raw, system_prompt, **kwargs)
 
+    async def _native_unavailable_result(self, raw: str, cancel_event=None) -> TrialCleanupResult | None:
+        reason = await self._native_unavailable_reason_locked(cancel_event)
+        if reason is None:
+            return None
+        return _result(CleanupResult(raw, False, 0, reason), NATIVE_BACKEND, MODEL_SHA256)
+
     async def _cleanup_native(self, raw: str, context: dict, **kwargs) -> TrialCleanupResult:
+        return await self._generate_native(raw, SYSTEM_PROMPT, _student_user(context, raw), **kwargs)
+
+    async def _generate_native(self, raw: str, system_prompt: str, user: str, **kwargs) -> TrialCleanupResult:
         started = time.perf_counter()
         check_ratio = kwargs.get("check_ratio", True)
         cancel_event = kwargs.get("cancel_event")
         timeout_ms = kwargs.get("timeout_ms")
         if timeout_ms is None:
             timeout_ms = adaptive_timeout_ms(raw)
+        max_tokens = kwargs.get("max_tokens")
+        if max_tokens is None:
+            max_tokens = min(MAX_OUTPUT_TOKENS, max(96, math.ceil(len(raw.encode("utf-8")) * 1.8)))
+        elif type(max_tokens) is not int or max_tokens < 1:
+            return _result(CleanupResult(raw, False, 0, "invalid_max_tokens"), NATIVE_BACKEND, MODEL_SHA256)
+        else:
+            max_tokens = min(MAX_OUTPUT_TOKENS, max_tokens)
+        draft_text = neutralize_control_tokens(raw) if check_ratio and kwargs.get("copy_draft", False) else ""
+        try:
+            # Validate the caller's frame before invoking the runtime. Its
+            # admission errors are not a broken worker and must not retire a
+            # healthy selected model or latch recovery off for later requests.
+            validate_request(system_prompt, user, max_tokens, timeout_ms, draft_text)
+        except ValueError:
+            return _result(CleanupResult(raw, False, 0, "native_request_invalid"), NATIVE_BACKEND, MODEL_SHA256)
         try:
             response = await self.runtime.generate(
-                SYSTEM_PROMPT, _student_user(context, raw),
-                max_tokens=min(512, max(96, math.ceil(len(raw.encode("utf-8")) * 1.8))),
+                system_prompt, user,
+                max_tokens=max_tokens,
                 deadline_ms=timeout_ms,
-                draft_text=raw if check_ratio and kwargs.get("copy_draft", False) else "",
+                draft_text=draft_text,
                 cancel_event=cancel_event,
             )
             cancelled = self._closed or (cancel_event is not None and cancel_event.is_set())
@@ -369,12 +410,12 @@ class NativeCleanupRouter:
                 result = (CleanupResult(raw, False, ms, reason, **metrics) if reason
                           else CleanupResult(text.strip(), True, ms, **metrics))
         except asyncio.CancelledError:
-            await self._retire_native_for_fallback()
+            await self._retire_native_after_request()
             elapsed = int((time.perf_counter() - started) * 1000)
             result = CleanupResult(raw, False, elapsed, "cancelled", wall_ms=elapsed)
         except Exception as exc:
             self.native_error = "native_transport_failure"
-            await self._retire_native_for_fallback()
+            await self._retire_native_after_request()
             elapsed = int((time.perf_counter() - started) * 1000)
             result = CleanupResult(raw, False, elapsed, "native_transport_failure", wall_ms=elapsed)
             log.warning("native cleanup request failed: %s", type(exc).__name__)
@@ -382,23 +423,23 @@ class NativeCleanupRouter:
 
     async def prepare_prefix(self, candidates, cancel_event=None) -> PrefixPreparation:
         async with self._lock:
-            if self.native_active or (self.native_enabled and not self.native_error):
+            if self.native_enabled or self.native_active:
                 return PrefixPreparation(False, 0, 0, "native_cleanup_enabled")
             return await self.standard.prepare_prefix(candidates, cancel_event=cancel_event)
 
     async def release_cache(self) -> None:
         async with self._lock:
-            if not self.native_active:
+            if not self.native_enabled and not self.native_active:
                 await self.standard.release_cache()
 
     async def release_action_memory(self) -> None:
         async with self._lock:
-            if not self.native_active:
+            if not self.native_enabled and not self.native_active:
                 await self.standard.release_action_memory()
 
     async def memory_metrics(self, reset_peak: bool = False) -> CleanupMemory:
         async with self._lock:
-            if self.native_active:
+            if self.native_enabled or self.native_active:
                 # These are MLX allocator counters, not whole-process RAM.
                 return CleanupMemory(0, 0, 0)
             return await self.standard.memory_metrics(reset_peak=reset_peak)
@@ -407,7 +448,7 @@ class NativeCleanupRouter:
         async with self._lock:
             if self._closed:
                 return False
-            if self.native_active:
+            if self.native_enabled or self.native_active:
                 await self._stop_native()
                 self._hibernated = True
                 return True
@@ -426,13 +467,14 @@ class NativeCleanupRouter:
 
     async def defer_recovery(self) -> None:
         async with self._lock:
-            await self.standard.defer_recovery()
+            if not self.native_enabled:
+                await self.standard.defer_recovery()
 
     def resume_recovery(self) -> None:
         # Every standard-to-native handoff parks the standard owner before
         # releasing the lock. Its hibernation state also prevents this sync
         # server hook from accidentally spawning beside native generation.
-        if not self.native_active and not self._closed:
+        if not self.native_enabled and not self.native_active and not self._closed:
             self.standard.resume_recovery()
 
     async def _shutdown(self) -> None:

@@ -51,9 +51,9 @@ from .cleanup import (
     adaptive_timeout_ms,
 )
 from .cleanup_process import CleanupProcess, respawn_backoff_s
-from .native_cleanup import NativeCleanupRouter
+from .native_cleanup import NATIVE_BACKEND, NativeCleanupRouter
 from .native_contract import build_native_context
-from .native_runtime import discover_package
+from .native_runtime import MODEL_SHA256 as NATIVE_MODEL_SHA256, discover_package
 from .trial_diagnostics import record_trial_run
 from .downloads import DownloadCoordinator, DownloadError, DownloadResult
 from .config import Config, MAX_MODE_NAME_CHARS, velora_home
@@ -998,7 +998,8 @@ class Engine:
             resume()
 
     def _new_cleanup_process(self, model_id: str, *,
-                             local_model_path: str | None = None) -> CleanupProcess | NativeCleanupRouter:
+                             local_model_path: str | None = None,
+                             native: bool | None = None) -> CleanupProcess | NativeCleanupRouter:
         # Keep logical identity public; every real load/respawn uses the
         # coordinator's verified source rather than acquiring inside a child.
         standard = CleanupProcess(
@@ -1006,11 +1007,13 @@ class Engine:
             local_model_path=local_model_path,
             on_unhealthy=self._queue_cleanup_unhealthy_restart,
         )
-        if self.config.experimental_native_cleanup:
+        use_native = self.config.experimental_native_cleanup if native is None else native
+        if use_native:
             package = discover_package(self.config.home)
             if package is not None:
                 return NativeCleanupRouter(standard, package)
-            self._native_cleanup_error = "The native trial package is unavailable. Using standard cleanup."
+            self._native_cleanup_error = "The selected native writing model is unavailable. Retry or choose another writing model."
+            raise RuntimeError("selected native writing model is unavailable")
         return standard
 
     def _queue_cleanup_unhealthy_restart(self) -> None:
@@ -1323,8 +1326,10 @@ class Engine:
         failure = None
         cleanup_stop_started = False
         startup_cleanup = kind == "cleanup" and origin is _ModelJobOrigin.startup
+        native_cleanup = (kind == "cleanup" and self.config.experimental_native_cleanup
+                          and origin is not _ModelJobOrigin.selection)
         try:
-            if not fake_stt_enabled():
+            if not fake_stt_enabled() and not native_cleanup:
                 result = await self._downloads.ensure(model, kind)
                 await self._publish_downloads()
             if (result is not None and not Path(model).expanduser().exists()
@@ -1355,8 +1360,10 @@ class Engine:
                         if candidate is None:
                             # Fake-STT fixtures have no acquisition result;
                             # production proxies always receive a verified source.
-                            candidate = (self._new_cleanup_process(model, local_model_path=result.path)
-                                         if result is not None else self._new_cleanup_process(model))
+                            options = {"local_model_path": result.path} if result is not None else {}
+                            if native_cleanup != self.config.experimental_native_cleanup:
+                                options["native"] = native_cleanup
+                            candidate = self._new_cleanup_process(model, **options)
                         self._cleanup_loading = candidate
                         loading_candidate = candidate
                         async with self._cleanup_load_lock:
@@ -1377,7 +1384,10 @@ class Engine:
                     self.config.reload()
                     if kind == "stt":
                         candidate.language = self.config.language
-                    self._save_model_choice("stt_model" if kind == "stt" else "cleanup_model", model)
+                    if kind == "cleanup" and origin is _ModelJobOrigin.selection:
+                        self._save_model_choice("cleanup_model", model, native_selected=False)
+                    else:
+                        self._save_model_choice("stt_model" if kind == "stt" else "cleanup_model", model)
                     old = self.stt if kind == "stt" else self.cleanup
                     if kind == "stt":
                         self.stt = candidate
@@ -1428,7 +1438,7 @@ class Engine:
                         "retryable": False})
             await self._publish_downloads()
             log.warning("%s model acquisition failed: %s (%s)", kind, model, type(error).__name__)
-            if (result is not None and kind == "cleanup" and self.cleanup is None
+            if ((result is not None or native_cleanup) and kind == "cleanup" and self.cleanup is None
                     and self.config.cleanup_enabled and not self.shutdown.is_set()):
                 retry_cleanup = True
             failure = error
@@ -1648,7 +1658,11 @@ class Engine:
             # Loading an uncached model would download it inside the worker,
             # without progress UI; a failed download waits for the next launch.
             model_id = self.config.cleanup_model
-            if not await asyncio.to_thread(models.is_cached, model_id):
+            native_cleanup = self.config.experimental_native_cleanup
+            if native_cleanup and discover_package(self.config.home) is None:
+                log.warning("selected native writing model is unavailable; stopped retrying")
+                return True
+            if not native_cleanup and not await asyncio.to_thread(models.is_cached, model_id):
                 log.warning("writing model %s is not downloaded; stopped retrying", model_id)
                 return True
 
@@ -1659,7 +1673,7 @@ class Engine:
                 if self.cleanup is not None:
                     return True
                 result = None
-                if not fake_stt_enabled():
+                if not fake_stt_enabled() and not native_cleanup:
                     item = next((item for item in self._downloads.snapshot()["downloads"]
                                  if item["model"] == model_id and item["kind"] == "cleanup"), None)
                     if item is not None and item["state"] in ("failed", "retry_wait"):
@@ -4252,10 +4266,7 @@ class Engine:
                 and not (session is not None and session.chunk_tasks)):
             native_context = build_native_context(
                 gate, config, raw, app_name=app_name, entities=entities)
-        desired_loaded = (
-            router.native_loaded if router is not None and native_context is not None
-            else router.standard.loaded if router is not None
-            else bool(self.cleanup and self.cleanup.loaded))
+        desired_loaded = bool(self.cleanup and self.cleanup.loaded)
         load_needed = (session is not None and gate.use_llm
                        and self.cleanup is not None and not desired_loaded)
         if load_needed:
@@ -4517,10 +4528,6 @@ class Engine:
         yields within one token — a dictation's cleanup never waits multiple
         seconds behind background mining (review finding)."""
         engine = self.cleanup
-        if (getattr(engine, "native_enabled", False)
-                and not getattr(engine, "native_error", None)):
-            # Background extraction must not wake a second cleanup model.
-            return ""
         if engine is None or not engine.loaded:
             return ""
         self._mine_cancel.clear()
@@ -4537,10 +4544,13 @@ class Engine:
         """Persist text-free provenance after delivery, outside stop-to-paste."""
         if not self.config.experimental_native_cleanup:
             return
+        native_selected = isinstance(self.cleanup, NativeCleanupRouter) and self.cleanup.native_enabled
+        selected_backend = NATIVE_BACKEND if native_selected else "standard"
+        selected_identity = NATIVE_MODEL_SHA256 if native_selected else self.config.cleanup_model
         usage = session.cleanup_trial_usage or {
-            "backend": "standard" if applied else "raw",
-            "attempted_backend": "standard" if cleanup_ms or applied else "bypass",
-            "model_identity": self.config.cleanup_model if cleanup_ms or applied else "",
+            "backend": selected_backend if applied else "raw",
+            "attempted_backend": selected_backend if cleanup_ms or applied else "bypass",
+            "model_identity": selected_identity if cleanup_ms or applied else "",
         }
 
         async def write() -> None:
@@ -4614,8 +4624,8 @@ class Engine:
         if enabled and package is None:
             await reject("The native trial package is not installed or valid.")
             return
-        if enabled and (not self.config.cleanup_enabled or self.cleanup is None):
-            await reject("Enable standard cleanup and wait for its model before starting the trial.")
+        if enabled and not self.config.cleanup_enabled:
+            await reject("Enable AI writing before choosing its model.")
             return
         previous = self.config.experimental_native_cleanup
         original = self.cleanup
@@ -4631,8 +4641,12 @@ class Engine:
                     await self._cancel_idle_mining()
                     self._cancel_action_cleanup()
                     if enabled and not isinstance(candidate, NativeCleanupRouter):
-                        candidate = NativeCleanupRouter(original, package, enabled=False)
-                    if isinstance(candidate, NativeCleanupRouter):
+                        if original is None:
+                            candidate = self._new_cleanup_process(self.config.cleanup_model, native=True)
+                            await candidate.load_async(STATIC_SYSTEM_PROMPT)
+                        else:
+                            candidate = NativeCleanupRouter(original, package, enabled=False)
+                    if isinstance(candidate, NativeCleanupRouter) and original is not None:
                         await candidate.set_enabled(enabled)
                     if self.shutdown.is_set():
                         raise RuntimeError("engine is shutting down")
@@ -4644,7 +4658,17 @@ class Engine:
                                               client_generation=self._client_gen)
         except (Exception, asyncio.CancelledError) as exc:
             self.config.data["experimental_native_cleanup"] = previous
-            if isinstance(candidate, NativeCleanupRouter):
+            if original is None and candidate is not None:
+                try:
+                    await candidate.aclose()
+                except BaseException:
+                    # Keep an unreaped owner reachable so a later selection
+                    # cannot load a second writing model beside it.
+                    self.cleanup = candidate
+                    log.warning("fresh native cleanup retirement did not settle", exc_info=True)
+                else:
+                    self.cleanup = None
+            elif isinstance(candidate, NativeCleanupRouter):
                 try:
                     await candidate.set_enabled(previous)
                 except BaseException:
@@ -4676,6 +4700,8 @@ class Engine:
                     self.config.language_scope),
                 "cleanup_enabled": self.config.cleanup_enabled,
                 "cleanup_loaded": bool(self.cleanup and self.cleanup.loaded),
+                "active_cleanup_model": (getattr(self.cleanup, "effective_model_id", self.cleanup.model_id)
+                                         if self.cleanup is not None else None),
                 "native_cleanup_available": discover_package(self.config.home) is not None,
                 "native_cleanup_enabled": self.config.experimental_native_cleanup,
                 "native_cleanup_switching": self._native_cleanup_switching,
@@ -4774,18 +4800,25 @@ class Engine:
             if isinstance(error, Exception):
                 raise error
 
-    def _save_model_choice(self, key: str, model_id: str) -> None:
+    def _save_model_choice(self, key: str, model_id: str, *, native_selected: bool | None = None) -> None:
         """Save `model_id` as the config's `key`.
 
         A save that fails, on a full disk say, leaves the in-memory config
         as it was, so it never names a model the switch did not put in place.
         """
         previous = self.config.data.get(key)
+        previous_native = self.config.data.get("experimental_native_cleanup")
         self.config.data[key] = model_id
+        keys = {key}
+        if native_selected is not None:
+            self.config.data["experimental_native_cleanup"] = native_selected
+            keys.add("experimental_native_cleanup")
         try:
-            self.config.save(keys={key})
+            self.config.save(keys=keys)
         except Exception:
             self.config.data[key] = previous
+            if native_selected is not None:
+                self.config.data["experimental_native_cleanup"] = previous_native
             raise
 
     async def _close_replaced(self, old: CleanupProcess) -> None:
@@ -5152,9 +5185,9 @@ class Engine:
             return False
         if isinstance(cleanup, NativeCleanupRouter):
             try:
-                return bool(await cleanup.ensure_standard_loaded(cancel_event=cancel_event))
+                return bool(await cleanup.ensure_loaded(cancel_event=cancel_event))
             except Exception:
-                log.exception("standard cleanup could not be restored from the native trial")
+                log.exception("selected writing model could not be restored")
                 return False
         if getattr(cleanup, "loaded", True):
             return True

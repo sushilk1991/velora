@@ -76,6 +76,13 @@ adjusts — then stops rather than guess when the window it expects isn't there.
 
 Settings also offers optional provisional dictation words, keyboard-language
 routes to installed speech models, and writing-model idle memory choices.
+The writing-model choice applies to dictation cleanup, editing, recipes,
+meeting notes, and action planning. With LFM3 Native selected, those tasks use
+LFM3; the saved standard model stays unloaded. A failed request preserves the
+original text or reports an error instead of switching models. The native
+backend remains experimental, with a 4,096-token context and 512-token output
+limit. It is tuned for dictation; other writing instructions may be less
+reliable. Speech recognition has its own separate model choice.
 Dictionary can expand explicitly saved phrases into literal snippets.
 Modes also supports website assignments and optional ordered steps for cleanup
 without a writing model. Invalid edits retain the last valid configuration.

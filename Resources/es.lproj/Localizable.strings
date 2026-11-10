@@ -70,7 +70,7 @@
 "English" = "Inglés";
 "English and other languages" = "Inglés y otros idiomas";
 "English only" = "Solo inglés";
-"Experimental dictation" = "Dictado experimental";
+"Experimental writing model" = "Modelo de escritura experimental";
 "Experimental feature" = "Función experimental";
 "Export" = "Exportar";
 "Export Dictionary" = "Exportar diccionario";
@@ -219,7 +219,7 @@
 "System" = "Sistema";
 "System Default" = "Predeterminado del sistema";
 "Terminals" = "Terminales";
-"The local trial package is unavailable. Turn this off to use standard cleanup." = "El paquete de prueba local no está disponible. Desactívalo para usar la mejora estándar.";
+"LFM3 Native is unavailable. Restore the local package or turn this off to choose another writing model." = "LFM3 Native no está disponible. Restaura el paquete local o desactívalo para elegir otro modelo de escritura.";
 "The settings file contains an invalid value for %@." = "El archivo de ajustes contiene un valor no válido para %@.";
 "These are provisional words…" = "Estas palabras son provisionales…";
 "This isn't a valid Velora settings file." = "Este archivo de ajustes de Velora no es válido.";
@@ -230,7 +230,7 @@
 "Transcribing…" = "Transcribiendo…";
 "Try Again" = "Reintentar";
 "Try it out" = "Pruébalo";
-"Try native cleanup for short English paragraphs in built-in modes. It may miss corrections or omit words. For other languages, turn this off or choose a language in Dictation. Dictation with line breaks, longer notes and other workflows use standard cleanup; switching models can take several seconds." = "Prueba la mejora nativa para párrafos cortos en inglés con los modos incluidos. Puede omitir correcciones o palabras. Para otros idiomas, desactívala o elige un idioma en Dictado. Los saltos de línea, las notas largas y otros flujos usan la mejora estándar; cambiar de modelo puede tardar varios segundos.";
+"LFM3 handles every writing task and never switches models automatically. It is tuned for dictation; editing, translation, and other instructions may be less reliable. Review experimental output." = "LFM3 se usa para todas las tareas de escritura y nunca cambia de modelo automáticamente. Está ajustado para dictado; la edición, la traducción y otras instrucciones pueden ser menos fiables. Revisa los resultados experimentales.";
 "Updates" = "Actualizaciones";
 "Use a compact English model. Add other languages later." = "Usa un modelo compacto de inglés. Puedes añadir otros idiomas después.";
 "Use a second dictation shortcut" = "Usar un segundo atajo de dictado";
@@ -304,3 +304,13 @@
 "Preview could not be saved. Recording continues." = "No se pudo guardar la vista previa. La grabación continúa.";
 "Shows recent audio blocks, not word-level timing. Me is your microphone; Them is Mac audio." = "Muestra bloques de audio recientes, sin tiempos por palabra. «Yo» es tu micrófono; «Otros» es el audio del Mac.";
 "Preview may skip audio while models are busy. Final transcription uses the complete recording." = "La vista previa puede omitir audio si los modelos están ocupados. La transcripción final usa la grabación completa.";
+"Writing model" = "Modelo de escritura";
+"Saved writing model" = "Modelo de escritura guardado";
+"Turn off LFM3 Native to use or change the saved writing model." = "Desactiva LFM3 Native para usar o cambiar el modelo de escritura guardado.";
+"Saved choice" = "Selección guardada";
+"LFM3 Native is loaded for all writing tasks." = "LFM3 Native está cargado para todas las tareas de escritura.";
+"LFM3 Native is selected but not loaded." = "LFM3 Native está seleccionado, pero no está cargado.";
+"Selected writing model is loaded." = "El modelo de escritura seleccionado está cargado.";
+"Selected writing model is not loaded. Dictation can still transcribe speech." = "El modelo de escritura seleccionado no está cargado. El dictado puede seguir transcribiendo voz.";
+"Switching to the saved writing model…" = "Cambiando al modelo de escritura guardado…";
+"Waiting for the engine to confirm the change…" = "Esperando a que el motor confirme el cambio…";

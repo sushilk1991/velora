@@ -1,5 +1,24 @@
 # Native cleanup personal trial — 7 November 2026
 
+> Current selection policy, updated 10 November: LFM3 Native now selects the
+> writing backend for all writing tasks. Generic prompts stay on LFM3 and
+> failures do not activate Qwen. The native context/output limits remain
+> 4,096/512 tokens. The hybrid routing and timings below describe the earlier
+> trial; they do not qualify the quality of every newly routed task.
+
+## Exclusive selection check — 10 November
+
+The pinned native runtime completed six synthetic requests without spawning or
+loading the saved Qwen model. Basic dictation, meeting-note JSON, and a simple
+action-plan JSON succeeded; no action was executed. The broader prompts exposed
+quality limits: Spanish translation returned the English input, a bullet-list
+request remained prose, and a grammar edit copied extra text from a prompt
+example. These tasks now use the selected model, but this checkpoint is not
+qualified for reliable general editing or translation. Existing validation and
+original-text recovery remain necessary.
+
+## Earlier hybrid trial
+
 The signed personal build offers **Models → LFM3 Native — Experimental** when
 its verified local kit is installed. The switch defaults off and changes only
 after engine acknowledgement. Turn it off to return to the selected standard
