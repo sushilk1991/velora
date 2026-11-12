@@ -327,6 +327,7 @@ final class EngineSupervisor: NSObject, EngineClientDelegate {
     private var engineUpdatePending = false
 
     private var process: Process?
+    private weak var requestedRestart: Process?
     private var connectTimer: Timer?
     private static let connectInterval: TimeInterval = 0.5
     private var outputLog: OutputLog?
@@ -390,6 +391,9 @@ final class EngineSupervisor: NSObject, EngineClientDelegate {
         get { restartAttempts }
         set { restartAttempts = newValue }
     }
+    func simulateProcessExitForSelftest(_ exited: Process) {
+        handleProcessExit(process: exited, status: exited.terminationStatus)
+    }
 
     /// Hard-crash only our live child's dedicated process group, including
     /// uv's Python child. Never select processes from global argv matches.
@@ -409,13 +413,14 @@ final class EngineSupervisor: NSObject, EngineClientDelegate {
     /// Replace an unresponsive process while keeping normal crash recovery.
     /// The termination handler owns respawn and its connection handshake.
     func restartForStall() {
-        if let restartSink {
+        if let restartSink, process == nil {
             stallRestartCount += 1
             restartSink()
             return
         }
         guard !isQuitting, let proc = process, proc.isRunning else { return }
         stallRestartCount += 1
+        requestedRestart = proc
         client.disconnect(notify: false)
         state = .launching
         stopConnectLoop()
@@ -539,7 +544,7 @@ final class EngineSupervisor: NSObject, EngineClientDelegate {
         proc.terminationHandler = { [weak self] p in
             log.finish(capture)
             DispatchQueue.main.async {
-                self?.handleProcessExit(status: p.terminationStatus)
+                self?.handleProcessExit(process: p, status: p.terminationStatus)
             }
         }
 
@@ -604,7 +609,10 @@ final class EngineSupervisor: NSObject, EngineClientDelegate {
         if newState == .connecting { downloads.connect() }
     }
 
-    private func handleProcessExit(status: Int32) {
+    private func handleProcessExit(process exited: Process, status: Int32) {
+        guard process === exited else { return }
+        let requested = requestedRestart === exited
+        requestedRestart = nil
         process = nil
         guard !isQuitting else { return }
         // A crash mid-download must not leave a stale "Downloading…" line
@@ -613,29 +621,33 @@ final class EngineSupervisor: NSObject, EngineClientDelegate {
         updateLoading(phase: nil, fraction: nil)
         client.disconnect(notify: false)
         stopConnectLoop()
-        restartAttempts = Self.nextRestartAttempt(status: status, current: restartAttempts)
-        let delay = Self.restartDelay(status: status, attempt: restartAttempts)
+        restartAttempts = Self.nextRestartAttempt(status: status, current: restartAttempts, requested: requested)
+        let delay = Self.restartDelay(status: status, attempt: restartAttempts, requested: requested)
         if delay == 0 {
             state = .launching
-            NSLog("Velora: cleanup worker requested immediate engine restart")
+            NSLog("Velora: requested immediate engine restart")
         } else {
             state = .degraded("Engine stopped (status \(status)). Restarting in \(Int(delay))s")
             NSLog("Velora: engine exited status=%d, restart in %.0fs", status, delay)
         }
         DispatchQueue.main.asyncAfter(deadline: .now() + delay) { [weak self] in
             guard let self, !self.isQuitting else { return }
+            if let restartSink = self.restartSink {
+                restartSink()
+                return
+            }
             self.spawnEngineProcess()
             self.beginConnectLoop()
         }
     }
 
-    static func restartDelay(status: Int32, attempt: Int) -> TimeInterval {
-        if status == cleanupRestartExitStatus { return 0 }
+    static func restartDelay(status: Int32, attempt: Int, requested: Bool = false) -> TimeInterval {
+        if requested || status == cleanupRestartExitStatus { return 0 }
         return min(30.0, pow(2.0, Double(min(max(attempt, 1), 5))))
     }
 
-    static func nextRestartAttempt(status: Int32, current: Int) -> Int {
-        status == cleanupRestartExitStatus ? current : current + 1
+    static func nextRestartAttempt(status: Int32, current: Int, requested: Bool = false) -> Int {
+        requested || status == cleanupRestartExitStatus ? current : current + 1
     }
 
     private func terminateProcess() {

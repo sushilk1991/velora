@@ -14660,6 +14660,16 @@ private final class RecordingOutputVolume: OutputVolumeControlling {
     }
 
     private static func testFileRestart() {
+        final class Observer: EngineSupervisorDelegate {
+            let transcriber: FileTranscriber
+            var states: [EngineSupervisor.State] = []
+            init(_ transcriber: FileTranscriber) { self.transcriber = transcriber }
+            func engineSupervisor(_ supervisor: EngineSupervisor, didChangeState state: EngineSupervisor.State) {
+                states.append(state)
+                transcriber.handleEngineStateChange(state)
+            }
+            func engineSupervisor(_ supervisor: EngineSupervisor, didReceive event: EngineEvent) {}
+        }
         let directory = FileManager.default.temporaryDirectory
             .appendingPathComponent("velora-file-restart-\(UUID().uuidString)")
         try! FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
@@ -14668,22 +14678,50 @@ private final class RecordingOutputVolume: OutputVolumeControlling {
         try! Data("wave".utf8).write(to: source)
         var commands: [[String: Any]] = []
         var completions = 0
+        var replacements = 0
         let supervisor = EngineSupervisor.forSelftest(
             commandSink: { commands.append($0) },
-            readyOverride: { true }, restartSink: {})
+            readyOverride: { true }, restartSink: { replacements += 1 },
+            logURL: directory.appendingPathComponent("engine.log"))
+        defer { supervisor.stop() }
+        let child = Process()
+        child.executableURL = URL(fileURLWithPath: "/bin/sleep")
+        child.arguments = ["30"]
+        supervisor.simulateSpawn(firstBootstrap: false, engineRefreshed: false, process: child)
+        child.terminationHandler = { [weak supervisor] exited in
+            DispatchQueue.main.async { supervisor?.simulateProcessExitForSelftest(exited) }
+        }
+        do { try child.run() } catch {
+            expect(false, "the restart fixture starts its own disposable child")
+            return
+        }
+        supervisor.simulateState(.ready)
+        waitUntil(timeout: 0.02, { false }) // Drain setup notifications before the file job exists.
         let transcriber = FileTranscriber(
             supervisor: supervisor, hud: HUDPanel(pillEnabled: { false }),
             hudIsFree: { false })
+        let observer = Observer(transcriber)
+        supervisor.delegate = observer
         transcriber.transcribeForAgent(
             url: source, mode: nil, requestID: UUID()) { _ in completions += 1 }
         expect(commands.filter { $0["cmd"] as? String == "transcribe_file" }.count == 1,
                "a file job sends its first request")
         supervisor.restartForStall()
-        transcriber.handleEngineStateChange(.launching)
-        expect(completions == 0, "stall restart retains the file request")
-        transcriber.handleEngineStateChange(.ready)
+        waitUntil(timeout: 3) { replacements > 0 || completions > 0 }
+        expect(!child.isRunning && replacements == 1 && completions == 0
+                   && supervisor.restartAttemptsForSelftest == 0,
+               "a requested process exit immediately replaces the engine without failing its file job")
+        expect(!observer.states.contains(where: { if case .degraded = $0 { return true }; return false }),
+               "a requested process exit never reports a crash to the file retry")
+        supervisor.simulateState(.ready)
+        waitUntil(timeout: 0.1) {
+            commands.filter { $0["cmd"] as? String == "transcribe_file" }.count == 2
+        }
         expect(commands.filter { $0["cmd"] as? String == "transcribe_file" }.count == 2,
                "the ready engine receives the file request once more")
+        supervisor.simulateProcessExitForSelftest(child)
+        expect(supervisor.state == .ready && replacements == 1,
+               "a stale process exit cannot tear down the replacement's readiness")
         transcriber.handleEngineStateChange(.degraded("crash"))
         expect(completions == 1 && !transcriber.isTranscribing,
                "a later ordinary crash retains the existing file failure behavior")
@@ -17222,6 +17260,11 @@ private final class RecordingOutputVolume: OutputVolumeControlling {
     }
 
     private static func testEngineRestartDelay() {
+        for status: Int32 in [0, 9, 15] {
+            expect(EngineSupervisor.restartDelay(status: status, attempt: 4, requested: true) == 0
+                       && EngineSupervisor.nextRestartAttempt(status: status, current: 4, requested: true) == 4,
+                   "requested restarts skip crash backoff for clean, killed, and terminated exits")
+        }
         var item = recoveryItem(state: "ready")
         item["active_model"] = item["model"]
         let snapshot = DownloadSnapshot.parse(recoveryWire([item]))!

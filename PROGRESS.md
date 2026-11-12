@@ -12,6 +12,8 @@
   and final verification remain immediate.
 - Done: entering supervisor readiness resets crash backoff, whichever
   authoritative readiness message arrived first.
+- Done: requested engine exits bypass crash backoff/degradation, preserving
+  the file retry; stale process exits are fenced by process identity.
 - Verified: 80 miner tests pass before and after. A synthetic batch reads
   `learned.json` once instead of twice with identical terms/candidates.
   Baseline `make test`: 4,259 Swift checks, 2,414 engine tests (3 skips),
@@ -24,7 +26,10 @@
   These are local transfer-overhead measurements, not network throughput.
   Readiness regressions failed through both download/status messages before
   the fix; all 4,263 Swift checks now pass.
-- Next: distinguish requested supervisor restarts from crashes,
+  A real owned dummy child's requested exit failed three file-retry checks
+  before the fix. All 4,268 Swift checks now pass, including retry, stale
+  exit, and clean/SIGTERM/SIGKILL restart-policy cases.
+- Next: remove the dead meeting-presentation type and duplicate teardown,
   run focused checks per commit and the full gate on the final result.
 
 ## Updater and release notes (2026-11-03)
