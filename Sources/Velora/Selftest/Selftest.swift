@@ -17222,6 +17222,23 @@ private final class RecordingOutputVolume: OutputVolumeControlling {
     }
 
     private static func testEngineRestartDelay() {
+        var item = recoveryItem(state: "ready")
+        item["active_model"] = item["model"]
+        let snapshot = DownloadSnapshot.parse(recoveryWire([item]))!
+        for event in [EngineEvent.downloadStatus(snapshot), .status(["stt_ready": true])] {
+            let supervisor = EngineSupervisor.forSelftest(
+                commandSink: { _ in }, readyOverride: { false }, restartSink: {})
+            supervisor.simulateState(.connecting)
+            supervisor.restartAttemptsForSelftest = 3
+            supervisor.engineClient(supervisor.client, didReceive: event)
+            expect(supervisor.state == .ready && supervisor.restartAttemptsForSelftest == 0,
+                   "every readiness path resets crash backoff on entering ready")
+            supervisor.engineClient(supervisor.client, didReceive: .ready(
+                setupComplete: false, sttModel: nil, reprocessJobs: nil))
+            expect(supervisor.restartAttemptsForSelftest == 0,
+                   "a later ready handshake retains the reset crash budget")
+            supervisor.stop()
+        }
         expect(
             EngineSupervisor.restartDelay(
                 status: EngineSupervisor.cleanupRestartExitStatus, attempt: 1) == 0,

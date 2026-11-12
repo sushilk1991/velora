@@ -251,7 +251,10 @@ final class EngineSupervisor: NSObject, EngineClientDelegate {
                 downloads.disconnect()
             }
             if case .degraded = state { downloads.disconnect() }
-            if state == .ready { engineUpdatePending = false }
+            if state == .ready {
+                engineUpdatePending = false
+                restartAttempts = 0
+            }
             quietSince = Date()
             let s = state
             DispatchQueue.main.async { [weak self] in
@@ -383,6 +386,10 @@ final class EngineSupervisor: NSObject, EngineClientDelegate {
 
     #if !VELORA_DISTRIBUTION
     var onSpawnForSelftest: (() -> Void)?
+    var restartAttemptsForSelftest: Int {
+        get { restartAttempts }
+        set { restartAttempts = newValue }
+    }
 
     /// Hard-crash only our live child's dedicated process group, including
     /// uv's Python child. Never select processes from global argv matches.
@@ -716,10 +723,7 @@ final class EngineSupervisor: NSObject, EngineClientDelegate {
             NotificationCenter.default.post(name: .veloraEngineReprocessSnapshot,
                 object: reprocessJobs ?? [], userInfo: ["valid": reprocessJobs != nil])
             downloads.readiness(speech: true, writing: nil)
-            if state != .ready {
-                restartAttempts = 0
-                state = .ready
-            }
+            state = .ready
             if let activeSTTModel, !activeSTTModel.isEmpty,
                activeSTTModel != AppConfig.shared.sttModel {
                 // The engine can fall back from an experimental backend after

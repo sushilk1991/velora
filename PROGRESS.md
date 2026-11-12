@@ -10,6 +10,8 @@
   second stored flag and its contradictory combinations.
 - Done: download workers pace byte-only updates at 10 Hz; phase transitions
   and final verification remain immediate.
+- Done: entering supervisor readiness resets crash backoff, whichever
+  authoritative readiness message arrived first.
 - Verified: 80 miner tests pass before and after. A synthetic batch reads
   `learned.json` once instead of twice with identical terms/candidates.
   Baseline `make test`: 4,259 Swift checks, 2,414 engine tests (3 skips),
@@ -20,7 +22,9 @@
   recovery, and server-download tests pass. Synthetic 8 MiB/16-file A-B-B-A:
   132 -> 4 events, 160.6 ms -> 11.7/11.4 ms, identical SHA-256 and final bytes.
   These are local transfer-overhead measurements, not network throughput.
-- Next: reproduce the independent audit's supervisor restart findings,
+  Readiness regressions failed through both download/status messages before
+  the fix; all 4,263 Swift checks now pass.
+- Next: distinguish requested supervisor restarts from crashes,
   run focused checks per commit and the full gate on the final result.
 
 ## Updater and release notes (2026-11-03)
