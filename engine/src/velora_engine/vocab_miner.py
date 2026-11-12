@@ -412,32 +412,6 @@ class VocabMiner:
             return [], False
         return fetched[:BATCH_ROWS], len(fetched) > BATCH_ROWS
 
-    def _learned_wrong_sides(self) -> set[str]:
-        """Spellings the user explicitly corrected must never be auto-learned.
-
-        Both hard and context-gated corrections carry a trusted wrong side.
-        Treating either as a vocabulary candidate would create a closed loop:
-        STT mistake -> user correction -> idle miner -> Whisper prompt.
-        """
-        path = self.home / "learned.json"
-        try:
-            data = json.loads(path.read_text())
-        except (FileNotFoundError, json.JSONDecodeError, OSError):
-            return set()
-        if not isinstance(data, dict):
-            return set()
-        wrong_sides = {
-            str(key).lower()
-            for field in ("replacements", "soft_replacements")
-            for key in (data.get(field) or {})
-            if str(key)
-        }
-        for key in (data.get("counts") or {}):
-            wrong, separator, right = str(key).partition("\u2192")
-            if separator and wrong and right:
-                wrong_sides.add(wrong.lower())
-        return wrong_sides
-
     def _dictionary(self) -> tuple[set[str], list[str]]:
         """The user's own spellings, which mining must never contradict.
 
@@ -460,8 +434,15 @@ class VocabMiner:
             spellings += [str(v) for v in data.get("vocabulary") or [] if str(v)]
             for field in ("replacements", "soft_replacements"):
                 spellings += [str(v) for v in (data.get(field) or {}).values() if str(v)]
-            if name == "config.json":
-                heard.update(str(k).lower() for k in (data.get("replacements") or {}) if str(k))
+                if name == "learned.json" or field == "replacements":
+                    heard.update(str(k).lower() for k in (data.get(field) or {}) if str(k))
+            if name == "learned.json":
+                # Pending corrections also carry trusted wrong sides. Mining
+                # them would feed a corrected STT mistake back into its prompt.
+                for key in (data.get("counts") or {}):
+                    wrong, separator, right = str(key).partition("\u2192")
+                    if separator and wrong and right:
+                        heard.add(wrong.lower())
         return heard, spellings
 
     # ---- the mining step --------------------------------------------------
@@ -511,7 +492,6 @@ class VocabMiner:
 
         terms: list[str] = [str(t) for t in state.get("terms", []) or []]
         banned_low = {str(b).lower() for b in state.get("banned", []) or []}
-        banned_low.update(self._learned_wrong_sides())
         heard_sides, user_spellings = self._dictionary()
         banned_low.update(heard_sides)
         candidates: dict[str, dict] = {
