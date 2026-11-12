@@ -121,13 +121,12 @@ struct StreamDraftPlan {
     }
 
     private(set) var rendered: String?
-    private(set) var isAbandoned = false
     private(set) var abandonment: Abandonment?
+    var isAbandoned: Bool { abandonment != nil }
 
     mutating func next(_ text: String, ownershipValid: Bool) -> Operation {
         guard !isAbandoned else { return .abandon }
         guard ownershipValid else {
-            isAbandoned = true
             abandonment = .ownershipLost
             return .abandon
         }
@@ -142,7 +141,6 @@ struct StreamDraftPlan {
     }
 
     mutating func abandon() {
-        isAbandoned = true
         if abandonment == nil {
             abandonment = rendered == nil ? .unavailable : .ownershipLost
         }
@@ -151,7 +149,6 @@ struct StreamDraftPlan {
     mutating func abandonAfterFailedDelivery(
         postedUTF16Units: Int, ownershipStillValid: Bool
     ) {
-        isAbandoned = true
         abandonment = rendered != nil || postedUTF16Units > 0 || !ownershipStillValid
             ? .ownershipLost : .unavailable
     }

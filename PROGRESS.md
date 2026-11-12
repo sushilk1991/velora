@@ -6,11 +6,15 @@
   installed-app, private-data, or release changes.
 - Done: vocabulary mining gathers correction spellings and wrong sides in
   one pass; removed its duplicate correction-file reader.
+- Done: live drafts derive abandonment from its typed reason, removing a
+  second stored flag and its contradictory combinations.
 - Verified: 80 miner tests pass before and after. A synthetic batch reads
   `learned.json` once instead of twice with identical terms/candidates.
   Baseline `make test`: 4,259 Swift checks, 2,414 engine tests (3 skips),
   plus site, plugin, signing, publishing, bootstrap, and update checks.
-- Next: collapse duplicated live-draft state, audit remaining candidates,
+  Draft-state change: all 4,259 Swift checks pass, including existing
+  provisional-write, ownership-loss, and cancellation checks.
+- Next: pace redundant worker progress, audit remaining candidates,
   run focused checks per commit and the full gate on the final result.
 
 ## Updater and release notes (2026-11-03)
