@@ -62,6 +62,43 @@ def setup_file(tmp_path):
     return cache, spec, file
 
 
+def test_transfer_paces_bytes_but_publishes_verification(tmp_path, monkeypatch):
+    import io
+    import time
+    from velora_engine import download_worker
+
+    payload = b"x" * (50 * 1024)
+    cache = _Cache(tmp_path, "example/model")
+    file = _File("weights.bin", len(payload), hashlib.sha256(payload).hexdigest(), "sha256")
+    spec = _Manifest("example/model", "a" * 40, (file,))
+    cache._save_manifest(spec)
+    clock = 0.0
+
+    class Response(io.BytesIO):
+        status = HTTPStatus.OK
+        headers = {}
+
+        def read1(self, size):
+            nonlocal clock
+            clock += 0.02
+            return super().read1(min(size, 1024))
+
+    monkeypatch.setattr(time, "monotonic", lambda: clock)
+    monkeypatch.setattr(download_worker.urllib.request, "urlopen", lambda *a, **kw: Response(payload))
+    events = []
+    _transfer_file(cache, spec, file, "http://fixture/weights", "stable",
+                   lambda event: events.append((clock, event)))
+
+    updates = [(at, event) for at, event in events
+               if event["state"] == "downloading" and event["bytes_received"] > 0]
+    assert updates, "long transfers must still publish intermediate byte progress"
+    assert all(later[0] - earlier[0] >= 0.1 - 1e-9
+               for earlier, later in zip(updates, updates[1:]))
+    assert [event["state"] for _, event in events[-2:]] == ["verifying", "verifying"]
+    assert all(event["bytes_received"] == len(payload) for _, event in events[-2:])
+    assert cache._complete(spec, file).read_bytes() == payload
+
+
 def test_body_resume_relaunch(tmp_path, transport):
     url, state = transport
     cache, spec, file = setup_file(tmp_path)

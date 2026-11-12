@@ -8,13 +8,19 @@
   one pass; removed its duplicate correction-file reader.
 - Done: live drafts derive abandonment from its typed reason, removing a
   second stored flag and its contradictory combinations.
+- Done: download workers pace byte-only updates at 10 Hz; phase transitions
+  and final verification remain immediate.
 - Verified: 80 miner tests pass before and after. A synthetic batch reads
   `learned.json` once instead of twice with identical terms/candidates.
   Baseline `make test`: 4,259 Swift checks, 2,414 engine tests (3 skips),
   plus site, plugin, signing, publishing, bootstrap, and update checks.
   Draft-state change: all 4,259 Swift checks pass, including existing
   provisional-write, ownership-loss, and cancellation checks.
-- Next: pace redundant worker progress, audit remaining candidates,
+  Download change: pacing regression failed before the fix; 157 download,
+  recovery, and server-download tests pass. Synthetic 8 MiB/16-file A-B-B-A:
+  132 -> 4 events, 160.6 ms -> 11.7/11.4 ms, identical SHA-256 and final bytes.
+  These are local transfer-overhead measurements, not network throughput.
+- Next: reproduce the independent audit's supervisor restart findings,
   run focused checks per commit and the full gate on the final result.
 
 ## Updater and release notes (2026-11-03)

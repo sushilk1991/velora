@@ -6,6 +6,7 @@ import json
 import os
 import shutil
 import sys
+import time
 import urllib.error
 import urllib.request
 from pathlib import Path
@@ -16,6 +17,7 @@ from .download_cache import _Cache, _File, _Manifest, _ManifestError, _REVISION_
 _METADATA_S = 60
 _READ_S = 60
 _STREAM_CHUNK = 64 * 1024
+_PROGRESS_S = 0.1
 _RANGE_REQUEST_LIMIT = 2
 _AUTH_STATUS = {HTTPStatus.UNAUTHORIZED, HTTPStatus.FORBIDDEN}
 _RETRY_STATUS = {
@@ -139,6 +141,7 @@ def _transfer_file(cache, spec, file, url, etag, emit):
             _progress(cache, spec, emit, resume=resume)
             # read1 exposes short body fragments immediately; a blocked read is
             # bounded by the parent's byte-stall watchdog, not worker heartbeats.
+            last_progress = time.monotonic()
             with part.open("ab" if offset else "wb", buffering=0) as handle:
                 while True:
                     chunk = response.read1(_STREAM_CHUNK)
@@ -152,7 +155,12 @@ def _transfer_file(cache, spec, file, url, etag, emit):
                         if not written:
                             raise OSError(errno.EIO, "partial file write failed")
                         view = view[written:]
-                    _progress(cache, spec, emit, resume=resume)
+                    # Each update scans the manifest's files and crosses a
+                    # process boundary. Pace bytes, but never phase changes.
+                    now = time.monotonic()
+                    if now - last_progress >= _PROGRESS_S:
+                        _progress(cache, spec, emit, resume=resume)
+                        last_progress = now
                 # Persist data before atomic promotion; relaunch still rehashes it.
                 handle.flush()
                 os.fsync(handle.fileno())
