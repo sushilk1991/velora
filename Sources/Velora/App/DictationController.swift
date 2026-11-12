@@ -2747,7 +2747,7 @@ final class DictationController: NSObject {
         let generation = supervisor.processGeneration
         graceTimer?.invalidate()
         // The old engine owns its spool through the grace. A late final may
-        // still insert; replacing the process afterwards uses crash recovery.
+        // still insert; replacement afterwards is immediate, without crash backoff.
         graceTimer = scheduleGrace(Self.lateFinalGrace) { [weak self] in
             guard let self, self.graceSessionID == stalledSession,
                   self.supervisor.processGeneration == generation else { return }

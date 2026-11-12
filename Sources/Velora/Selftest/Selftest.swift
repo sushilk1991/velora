@@ -14705,7 +14705,8 @@ private final class RecordingOutputVolume: OutputVolumeControlling {
         expect(commands.filter { $0["cmd"] as? String == "transcribe_file" }.count == 1,
                "a file job sends its first request")
         supervisor.restartForStall()
-        waitUntil(timeout: 3) { replacements > 0 || completions > 0 }
+        // Wait for both exit observation and replacement, regardless of callback timing.
+        waitUntil(timeout: 3) { (replacements > 0 && !child.isRunning) || completions > 0 }
         expect(!child.isRunning && replacements == 1 && completions == 0
                    && supervisor.restartAttemptsForSelftest == 0,
                "a requested process exit immediately replaces the engine without failing its file job")
@@ -14717,9 +14718,6 @@ private final class RecordingOutputVolume: OutputVolumeControlling {
         }
         expect(commands.filter { $0["cmd"] as? String == "transcribe_file" }.count == 2,
                "the ready engine receives the file request once more")
-        supervisor.simulateProcessExitForSelftest(child)
-        expect(supervisor.state == .ready && replacements == 1,
-               "a stale process exit cannot tear down the replacement's readiness")
         transcriber.handleEngineStateChange(.degraded("crash"))
         expect(completions == 1 && !transcriber.isTranscribing,
                "a later ordinary crash retains the existing file failure behavior")
@@ -14735,6 +14733,25 @@ private final class RecordingOutputVolume: OutputVolumeControlling {
             url: source, mode: nil, requestID: UUID()) { _ in completions += 1 }
         expect(transcriber.isTranscribing,
                "a new file job starts after replacement failure")
+        transcriber.cancelForTermination()
+        supervisor.delegate = nil
+
+        let replacement = Process()
+        replacement.executableURL = URL(fileURLWithPath: "/bin/sleep")
+        replacement.arguments = ["30"]
+        defer {
+            if replacement.isRunning { replacement.terminate(); replacement.waitUntilExit() }
+        }
+        supervisor.simulateSpawn(firstBootstrap: false, engineRefreshed: false, process: replacement)
+        do { try replacement.run() } catch {
+            expect(false, "the stale-exit fixture starts its own replacement child")
+            return
+        }
+        supervisor.simulateState(.ready)
+        let priorReplacements = replacements
+        supervisor.simulateProcessExitForSelftest(child)
+        expect(supervisor.state == .ready && replacement.isRunning && replacements == priorReplacements,
+               "a stale process exit cannot tear down a live replacement's readiness")
     }
 
     /// Drive finalization through capture and engine events. The fake source
@@ -17274,10 +17291,6 @@ private final class RecordingOutputVolume: OutputVolumeControlling {
             supervisor.engineClient(supervisor.client, didReceive: event)
             expect(supervisor.state == .ready && supervisor.restartAttemptsForSelftest == 0,
                    "every readiness path resets crash backoff on entering ready")
-            supervisor.engineClient(supervisor.client, didReceive: .ready(
-                setupComplete: false, sttModel: nil, reprocessJobs: nil))
-            expect(supervisor.restartAttemptsForSelftest == 0,
-                   "a later ready handshake retains the reset crash budget")
             supervisor.stop()
         }
         expect(

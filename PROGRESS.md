@@ -29,16 +29,21 @@
   132 -> 4 events, 160.6 ms -> 11.7/11.4 ms, identical SHA-256 and final bytes.
   These are local transfer-overhead measurements, not network throughput.
   Readiness regressions failed through both download/status messages before
-  the fix; all 4,263 Swift checks now pass.
+  the fix; all 4,263 Swift checks passed for that change.
   A real owned dummy child's requested exit failed three file-retry checks
-  before the fix. All 4,268 Swift checks now pass, including retry, stale
+  before the fix. All 4,268 Swift checks passed, including retry, stale
   exit, and clean/SIGTERM/SIGKILL restart-policy cases.
   Dead-type removal compiles; no references remain.
   Full gate: 4,267 Swift checks, 2,415 engine tests (3 skips), all script
-  checks pass. Distribution configuration builds with the harness excluded.
-- Review: no correctness findings; strengthen the stale-exit fixture with
-  a live replacement, remove redundant assertions, and refresh comments.
-- Next: verify review adjustments, commit, and push main.
+  checks pass. Distribution configuration builds with the harness excluded;
+  its stripped executable passes the distribution validator.
+- Review: no correctness findings. Strengthened the stale-exit fixture with
+  a live replacement, removed redundant assertions, and refreshed comments.
+  Weakening the identity guard fails exactly the stale-exit regression;
+  the correct guard passes all 4,265 final Swift checks. The process fixture
+  waits for both exit observation and replacement rather than callback order.
+- Remaining verification: live microphone/insertion and meeting UI flows
+  were not exercised. No further small changes selected for this audit.
 
 ## Updater and release notes (2026-11-03)
 

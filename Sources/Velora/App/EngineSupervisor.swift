@@ -410,7 +410,7 @@ final class EngineSupervisor: NSObject, EngineClientDelegate {
     }
     #endif
 
-    /// Replace an unresponsive process while keeping normal crash recovery.
+    /// Replace an unresponsive process immediately without consuming crash backoff.
     /// The termination handler owns respawn and its connection handshake.
     func restartForStall() {
         if let restartSink, process == nil {
