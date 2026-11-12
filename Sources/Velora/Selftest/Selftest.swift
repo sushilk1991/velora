@@ -8777,8 +8777,6 @@ enum Selftest {
         expect(MeetingTranscriptCard.loads(status: .processing, reprocessing: true, notesPending: false)
                && MeetingTranscriptCard.loads(status: .processing, reprocessing: false, notesPending: true),
                "a Recreate or a notes retry keeps the finished transcript readable")
-        expect(MeetingCoordinator.systemAudioFailurePresentation == .hud,
-               "computer-audio degradation stays in the compact HUD instead of opening a modal")
         expect(MeetingCoordinator.State.preparing(title: "Starting…").isActive
                && MeetingCoordinator.State.recording(
                     id: "m1", title: "Call", startedAt: Date(), systemAudio: true,

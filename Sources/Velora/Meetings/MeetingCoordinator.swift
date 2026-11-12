@@ -10,13 +10,8 @@ final class MeetingCoordinator: ObservableObject {
         case failed
     }
 
-    enum SystemAudioFailurePresentation: Equatable {
-        case hud
-    }
-
     static let consentDescription =
         "Records your mic and Mac audio locally. Make sure everyone knows."
-    static let systemAudioFailurePresentation: SystemAudioFailurePresentation = .hud
 
     /// The one name for a recording's sources, in the Meetings pane, the
     /// HUD and VoiceOver: "Mic + Mac audio", or "Mic only" when Mac audio
