@@ -16,6 +16,8 @@
   the file retry; stale process exits are fenced by process identity.
 - Done: removed the unused one-case system-audio presentation enum and the
   assertion that only compared its constant with its sole case.
+- Done: suggestion acceptance, dismissal, and call-end dismissal share the
+  existing watch teardown, including scope and microphone-evidence reset.
 - Verified: 80 miner tests pass before and after. A synthetic batch reads
   `learned.json` once instead of twice with identical terms/candidates.
   Baseline `make test`: 4,259 Swift checks, 2,414 engine tests (3 skips),
@@ -32,8 +34,11 @@
   before the fix. All 4,268 Swift checks now pass, including retry, stale
   exit, and clean/SIGTERM/SIGKILL restart-policy cases.
   Dead-type removal compiles; no references remain.
-- Next: consolidate duplicate meeting-suggestion teardown,
-  run focused checks per commit and the full gate on the final result.
+  Full gate: 4,267 Swift checks, 2,415 engine tests (3 skips), all script
+  checks pass. Distribution configuration builds with the harness excluded.
+- Review: no correctness findings; strengthen the stale-exit fixture with
+  a live replacement, remove redundant assertions, and refresh comments.
+- Next: verify review adjustments, commit, and push main.
 
 ## Updater and release notes (2026-11-03)
 

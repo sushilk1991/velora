@@ -361,7 +361,7 @@ final class MeetingCoordinator: ObservableObject {
     func acceptSuggestion() {
         guard !terminating, case .suggesting = state,
               let candidate = pendingCandidate else { return }
-        detector.setEndWatch(false)
+        settleEndWatch()
         state = .preparing(title: "Checking call…")
         detector.revalidate(candidate) { [weak self] current in
             guard let self, !self.terminating,
@@ -407,9 +407,7 @@ final class MeetingCoordinator: ObservableObject {
     private func dismissSuggestion(reason: String, rearm: Bool = false) {
         guard case .suggesting = state else { return }
         pendingCandidate = nil
-        detector.setEndWatch(false)
-        endWatch = MeetingEndWatch()
-        watchScope = .unknown
+        settleEndWatch()
         // Yield happens before dictation preflight. If that preflight fails,
         // the still-live call must be eligible for another prompt; an explicit
         // user dismissal intentionally keeps the detector's episode debounce.
@@ -443,12 +441,7 @@ final class MeetingCoordinator: ObservableObject {
         case .suggesting:
             if case .ended = endWatch.observe(present: present) {
                 // The call ended before the user answered the record prompt.
-                veloraLog("Velora: meeting ended before consent — dismissing suggestion")
-                pendingCandidate = nil
-                detector.setEndWatch(false)
-                endWatch = MeetingEndWatch()
-                watchScope = .unknown
-                state = .idle
+                dismissSuggestion(reason: "ended before consent")
             }
         case .recording(
             let id, let title, let startedAt, let systemAudio, let endDetected
