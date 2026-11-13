@@ -2,8 +2,8 @@
 
 ## Release 0.32.2 (2026-11-13)
 
-- Prepared: patch version and three user-facing recovery/cancellation notes;
-  release PR #50.
+- Published: patch release [0.32.2](https://github.com/sushilk1991/velora/releases/tag/v0.32.2)
+  after release PR #50. Tag and build 472 use source `4b65c7b`.
 - Fixed: the restart fixture waits for its delivered startup readiness.
   Pending startup events reproduced CI's failure in 3/3 trials; the fixed
   fixture passed 100 trials (800 checks).
@@ -12,9 +12,16 @@
   failed both during the wait and before its queued notification arrived.
   Normal cancellation still waits for the engine acknowledgement; late
   failures from cancelled jobs cannot affect a new job. All 4,273 Swift
-  checks now pass.
-- Next: finish CI and review, merge, build the signed/notarized DMG, archive
-  private symbols, publish GitHub and Homebrew, and verify Homebrew fetch.
+  checks passed locally. Final CI passed 4,289 Swift checks, 2,415 engine
+  tests (3 skips), all script gates, and the distribution build.
+- Verified: Developer ID signature, iCloud provisioning, notarization,
+  stapling, Gatekeeper, stripped binary, CLI/MCP, and fresh bundled-engine
+  bootstrap. Private symbols are archived outside the repository.
+- Verified: GitHub's latest release serves the exact DMG, SHA-256
+  `2ab86932256547a826df0417737dbb834d98d215f0c583589ac3513a94148a4a`.
+  Homebrew tap commit `615d0d9` publishes the same version and checksum.
+- Verified: `brew update` and `brew fetch --cask sushilk1991/tap/velora`
+  passed. The downloaded DMG's size and SHA-256 match the signed local DMG.
 - Unverified: live microphone/insertion and meeting UI.
 
 ## Small-code audit (2026-11-13)
