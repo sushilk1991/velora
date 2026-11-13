@@ -254,8 +254,8 @@ final class FileTranscriber {
 
     func cancel() {
         guard isTranscribing, let jobID else { return }
-        // Do not wait for an engine acknowledgement while this job waits to retry.
-        if retryAfterRestart {
+        // The restart counter changes before its queued state notification arrives.
+        if retryAfterRestart || supervisor.stallRestartCount > seenStallRestarts {
             fail("cancelled")
             return
         }

@@ -8,8 +8,11 @@
   Pending startup events reproduced CI's failure in 3/3 trials; the fixed
   fixture passed 100 trials (800 checks).
 - Fixed: cancelling a file job waiting for a replacement engine completes
-  locally, releases its slot, and ignores late readiness. Two regression
-  checks failed before the fix; all 4,268 Swift checks now pass.
+  locally, releases its slot, and ignores late readiness. The regression
+  failed both during the wait and before its queued notification arrived.
+  Normal cancellation still waits for the engine acknowledgement; late
+  failures from cancelled jobs cannot affect a new job. All 4,273 Swift
+  checks now pass.
 - Next: finish CI and review, merge, build the signed/notarized DMG, archive
   private symbols, publish GitHub and Homebrew, and verify Homebrew fetch.
 - Unverified: live microphone/insertion and meeting UI.

@@ -14736,30 +14736,50 @@ private final class RecordingOutputVolume: OutputVolumeControlling {
         transcriber.handleEngineStateChange(.degraded("load failed"))
         expect(completions == 2 && !transcriber.isTranscribing,
                "a degraded replacement fails the waiting file job")
-        let cancelID = UUID()
-        var cancelledDuringRestart = false
-        transcriber.transcribeForAgent(
-            url: source, mode: nil, requestID: cancelID) { result in
-                completions += 1
-                if case .failure(.cancelled) = result { cancelledDuringRestart = true }
-            }
-        expect(transcriber.isTranscribing,
-               "a new file job starts after replacement failure")
-        supervisor.restartForStall()
-        transcriber.handleEngineStateChange(.launching)
-        transcriber.cancelAgentRequest(cancelID)
-        expect(completions == 3 && cancelledDuringRestart && !transcriber.isTranscribing,
-               "Cancel completes a file job locally while its replacement engine is not ready")
-        let requestsAfterCancel = commands.filter { $0["cmd"] as? String == "transcribe_file" }.count
-        transcriber.handleEngineStateChange(.ready)
-        expect(completions == 3
-                   && commands.filter { $0["cmd"] as? String == "transcribe_file" }.count == requestsAfterCancel,
-               "late readiness cannot resend or complete a cancelled file job")
+        var cancelledJobs: [String] = []
+        for deliverRestart in [true, false] {
+            let cancelID = UUID()
+            let expectedCompletions = completions + 1
+            var cancelledDuringRestart = false
+            transcriber.transcribeForAgent(
+                url: source, mode: nil, requestID: cancelID) { result in
+                    completions += 1
+                    if case .failure(.cancelled) = result { cancelledDuringRestart = true }
+                }
+            expect(transcriber.isTranscribing,
+                   "a new file job starts after replacement failure or cancellation")
+            if let id = commands.last?["id"] as? String { cancelledJobs.append(id) }
+            supervisor.restartForStall()
+            if deliverRestart { transcriber.handleEngineStateChange(.launching) }
+            transcriber.cancelAgentRequest(cancelID)
+            expect(completions == expectedCompletions && cancelledDuringRestart && !transcriber.isTranscribing,
+                   "Cancel completes locally with restart notification delivered=\(deliverRestart)")
+            let requestsAfterCancel = commands.filter { $0["cmd"] as? String == "transcribe_file" }.count
+            transcriber.handleEngineStateChange(.launching)
+            transcriber.handleEngineStateChange(.ready)
+            expect(completions == expectedCompletions
+                       && commands.filter { $0["cmd"] as? String == "transcribe_file" }.count == requestsAfterCancel,
+                   "late readiness cannot resend or complete a cancelled file job")
+        }
+        let completionsBeforeRunningJob = completions
+        let requestsBeforeRunningJob = commands.filter { $0["cmd"] as? String == "transcribe_file" }.count
         transcriber.transcribeForAgent(
             url: source, mode: nil, requestID: UUID()) { _ in completions += 1 }
-        expect(transcriber.isTranscribing && completions == 3
-                   && commands.filter { $0["cmd"] as? String == "transcribe_file" }.count == requestsAfterCancel + 1,
-               "cancelling during an engine restart releases the file slot")
+        let runningJob = commands.last?["id"] as? String
+        for id in cancelledJobs {
+            transcriber.handle(.transcribeFailed(id: id, error: "cancelled"))
+        }
+        expect(transcriber.isTranscribing && completions == completionsBeforeRunningJob
+                   && commands.filter { $0["cmd"] as? String == "transcribe_file" }.count == requestsBeforeRunningJob + 1,
+               "a new file job owns its slot and ignores late failures from cancelled jobs")
+        transcriber.cancel()
+        expect(transcriber.isTranscribing && completions == completionsBeforeRunningJob
+                   && commands.last?["cmd"] as? String == "transcribe_cancel"
+                   && commands.last?["id"] as? String == runningJob,
+               "a running file job sends Cancel and waits for its engine acknowledgement")
+        transcriber.handle(.transcribeFailed(id: runningJob, error: "cancelled"))
+        expect(!transcriber.isTranscribing && completions == completionsBeforeRunningJob + 1,
+               "the engine acknowledgement completes an ordinary cancellation")
         transcriber.cancelForTermination()
         supervisor.delegate = nil
 
