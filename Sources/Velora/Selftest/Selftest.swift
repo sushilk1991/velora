@@ -14736,10 +14736,30 @@ private final class RecordingOutputVolume: OutputVolumeControlling {
         transcriber.handleEngineStateChange(.degraded("load failed"))
         expect(completions == 2 && !transcriber.isTranscribing,
                "a degraded replacement fails the waiting file job")
+        let cancelID = UUID()
+        var cancelledDuringRestart = false
         transcriber.transcribeForAgent(
-            url: source, mode: nil, requestID: UUID()) { _ in completions += 1 }
+            url: source, mode: nil, requestID: cancelID) { result in
+                completions += 1
+                if case .failure(.cancelled) = result { cancelledDuringRestart = true }
+            }
         expect(transcriber.isTranscribing,
                "a new file job starts after replacement failure")
+        supervisor.restartForStall()
+        transcriber.handleEngineStateChange(.launching)
+        transcriber.cancelAgentRequest(cancelID)
+        expect(completions == 3 && cancelledDuringRestart && !transcriber.isTranscribing,
+               "Cancel completes a file job locally while its replacement engine is not ready")
+        let requestsAfterCancel = commands.filter { $0["cmd"] as? String == "transcribe_file" }.count
+        transcriber.handleEngineStateChange(.ready)
+        expect(completions == 3
+                   && commands.filter { $0["cmd"] as? String == "transcribe_file" }.count == requestsAfterCancel,
+               "late readiness cannot resend or complete a cancelled file job")
+        transcriber.transcribeForAgent(
+            url: source, mode: nil, requestID: UUID()) { _ in completions += 1 }
+        expect(transcriber.isTranscribing && completions == 3
+                   && commands.filter { $0["cmd"] as? String == "transcribe_file" }.count == requestsAfterCancel + 1,
+               "cancelling during an engine restart releases the file slot")
         transcriber.cancelForTermination()
         supervisor.delegate = nil
 
