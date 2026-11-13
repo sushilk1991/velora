@@ -14682,6 +14682,11 @@ private final class RecordingOutputVolume: OutputVolumeControlling {
             readyOverride: { true }, restartSink: { replacements += 1 },
             logURL: directory.appendingPathComponent("engine.log"))
         defer { supervisor.stop() }
+        let transcriber = FileTranscriber(
+            supervisor: supervisor, hud: HUDPanel(pillEnabled: { false }),
+            hudIsFree: { false })
+        let observer = Observer(transcriber)
+        supervisor.delegate = observer
         let child = Process()
         child.executableURL = URL(fileURLWithPath: "/bin/sleep")
         child.arguments = ["30"]
@@ -14694,12 +14699,12 @@ private final class RecordingOutputVolume: OutputVolumeControlling {
             return
         }
         supervisor.simulateState(.ready)
-        waitUntil(timeout: 0.02, { false }) // Drain setup notifications before the file job exists.
-        let transcriber = FileTranscriber(
-            supervisor: supervisor, hud: HUDPanel(pillEnabled: { false }),
-            hudIsFree: { false })
-        let observer = Observer(transcriber)
-        supervisor.delegate = observer
+        // Startup notifications must arrive before the job; a fixed sleep can
+        // leave an old launching/ready pair to be mistaken for its restart.
+        guard waitUntil({ observer.states.last == .ready }) else {
+            expect(false, "the restart fixture delivers startup readiness")
+            return
+        }
         transcriber.transcribeForAgent(
             url: source, mode: nil, requestID: UUID()) { _ in completions += 1 }
         expect(commands.filter { $0["cmd"] as? String == "transcribe_file" }.count == 1,
@@ -14709,7 +14714,9 @@ private final class RecordingOutputVolume: OutputVolumeControlling {
         waitUntil(timeout: 3) { (replacements > 0 && !child.isRunning) || completions > 0 }
         expect(!child.isRunning && replacements == 1 && completions == 0
                    && supervisor.restartAttemptsForSelftest == 0,
-               "a requested process exit immediately replaces the engine without failing its file job")
+               "a requested process exit immediately replaces the engine without failing its file job "
+                   + "(running=\(child.isRunning), replacements=\(replacements), completions=\(completions), "
+                   + "attempts=\(supervisor.restartAttemptsForSelftest), states=\(observer.states))")
         expect(!observer.states.contains(where: { if case .degraded = $0 { return true }; return false }),
                "a requested process exit never reports a crash to the file retry")
         supervisor.simulateState(.ready)
