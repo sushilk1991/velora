@@ -254,6 +254,11 @@ final class FileTranscriber {
 
     func cancel() {
         guard isTranscribing, let jobID else { return }
+        // The restart counter changes before its queued state notification arrives.
+        if retryAfterRestart || supervisor.stallRestartCount > seenStallRestarts {
+            fail("cancelled")
+            return
+        }
         supervisor.send(["cmd": "transcribe_cancel", "id": jobID])
     }
 

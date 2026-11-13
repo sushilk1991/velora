@@ -14682,6 +14682,11 @@ private final class RecordingOutputVolume: OutputVolumeControlling {
             readyOverride: { true }, restartSink: { replacements += 1 },
             logURL: directory.appendingPathComponent("engine.log"))
         defer { supervisor.stop() }
+        let transcriber = FileTranscriber(
+            supervisor: supervisor, hud: HUDPanel(pillEnabled: { false }),
+            hudIsFree: { false })
+        let observer = Observer(transcriber)
+        supervisor.delegate = observer
         let child = Process()
         child.executableURL = URL(fileURLWithPath: "/bin/sleep")
         child.arguments = ["30"]
@@ -14694,12 +14699,12 @@ private final class RecordingOutputVolume: OutputVolumeControlling {
             return
         }
         supervisor.simulateState(.ready)
-        waitUntil(timeout: 0.02, { false }) // Drain setup notifications before the file job exists.
-        let transcriber = FileTranscriber(
-            supervisor: supervisor, hud: HUDPanel(pillEnabled: { false }),
-            hudIsFree: { false })
-        let observer = Observer(transcriber)
-        supervisor.delegate = observer
+        // Startup notifications must arrive before the job; a fixed sleep can
+        // leave an old launching/ready pair to be mistaken for its restart.
+        guard waitUntil({ observer.states.last == .ready }) else {
+            expect(false, "the restart fixture delivers startup readiness")
+            return
+        }
         transcriber.transcribeForAgent(
             url: source, mode: nil, requestID: UUID()) { _ in completions += 1 }
         expect(commands.filter { $0["cmd"] as? String == "transcribe_file" }.count == 1,
@@ -14709,7 +14714,9 @@ private final class RecordingOutputVolume: OutputVolumeControlling {
         waitUntil(timeout: 3) { (replacements > 0 && !child.isRunning) || completions > 0 }
         expect(!child.isRunning && replacements == 1 && completions == 0
                    && supervisor.restartAttemptsForSelftest == 0,
-               "a requested process exit immediately replaces the engine without failing its file job")
+               "a requested process exit immediately replaces the engine without failing its file job "
+                   + "(running=\(child.isRunning), replacements=\(replacements), completions=\(completions), "
+                   + "attempts=\(supervisor.restartAttemptsForSelftest), states=\(observer.states))")
         expect(!observer.states.contains(where: { if case .degraded = $0 { return true }; return false }),
                "a requested process exit never reports a crash to the file retry")
         supervisor.simulateState(.ready)
@@ -14729,10 +14736,50 @@ private final class RecordingOutputVolume: OutputVolumeControlling {
         transcriber.handleEngineStateChange(.degraded("load failed"))
         expect(completions == 2 && !transcriber.isTranscribing,
                "a degraded replacement fails the waiting file job")
+        var cancelledJobs: [String] = []
+        for deliverRestart in [true, false] {
+            let cancelID = UUID()
+            let expectedCompletions = completions + 1
+            var cancelledDuringRestart = false
+            transcriber.transcribeForAgent(
+                url: source, mode: nil, requestID: cancelID) { result in
+                    completions += 1
+                    if case .failure(.cancelled) = result { cancelledDuringRestart = true }
+                }
+            expect(transcriber.isTranscribing,
+                   "a new file job starts after replacement failure or cancellation")
+            if let id = commands.last?["id"] as? String { cancelledJobs.append(id) }
+            supervisor.restartForStall()
+            if deliverRestart { transcriber.handleEngineStateChange(.launching) }
+            transcriber.cancelAgentRequest(cancelID)
+            expect(completions == expectedCompletions && cancelledDuringRestart && !transcriber.isTranscribing,
+                   "Cancel completes locally with restart notification delivered=\(deliverRestart)")
+            let requestsAfterCancel = commands.filter { $0["cmd"] as? String == "transcribe_file" }.count
+            transcriber.handleEngineStateChange(.launching)
+            transcriber.handleEngineStateChange(.ready)
+            expect(completions == expectedCompletions
+                       && commands.filter { $0["cmd"] as? String == "transcribe_file" }.count == requestsAfterCancel,
+                   "late readiness cannot resend or complete a cancelled file job")
+        }
+        let completionsBeforeRunningJob = completions
+        let requestsBeforeRunningJob = commands.filter { $0["cmd"] as? String == "transcribe_file" }.count
         transcriber.transcribeForAgent(
             url: source, mode: nil, requestID: UUID()) { _ in completions += 1 }
-        expect(transcriber.isTranscribing,
-               "a new file job starts after replacement failure")
+        let runningJob = commands.last?["id"] as? String
+        for id in cancelledJobs {
+            transcriber.handle(.transcribeFailed(id: id, error: "cancelled"))
+        }
+        expect(transcriber.isTranscribing && completions == completionsBeforeRunningJob
+                   && commands.filter { $0["cmd"] as? String == "transcribe_file" }.count == requestsBeforeRunningJob + 1,
+               "a new file job owns its slot and ignores late failures from cancelled jobs")
+        transcriber.cancel()
+        expect(transcriber.isTranscribing && completions == completionsBeforeRunningJob
+                   && commands.last?["cmd"] as? String == "transcribe_cancel"
+                   && commands.last?["id"] as? String == runningJob,
+               "a running file job sends Cancel and waits for its engine acknowledgement")
+        transcriber.handle(.transcribeFailed(id: runningJob, error: "cancelled"))
+        expect(!transcriber.isTranscribing && completions == completionsBeforeRunningJob + 1,
+               "the engine acknowledgement completes an ordinary cancellation")
         transcriber.cancelForTermination()
         supervisor.delegate = nil
 
