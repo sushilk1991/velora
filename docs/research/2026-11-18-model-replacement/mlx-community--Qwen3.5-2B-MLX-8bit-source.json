@@ -1,0 +1,25 @@
+{
+  "id": "mlx-community/Qwen3.5-2B-MLX-8bit",
+  "sha": "e6ffd0033d03c9efa880984e611028e0da63905f",
+  "lastModified": "2026-03-02T14:19:12.000Z",
+  "cardData": {
+    "base_model": "Qwen/Qwen3.5-2B",
+    "library_name": "mlx",
+    "tags": [
+      "mlx",
+      "qwen3.5",
+      "vision-language-model",
+      "quantized",
+      "8bit"
+    ],
+    "license": "apache-2.0"
+  },
+  "safetensors": {
+    "parameters": {
+      "U32": 1881276416,
+      "BF16": 331964960,
+      "F32": 288
+    },
+    "total": 2213241664
+  }
+}

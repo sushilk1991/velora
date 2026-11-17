@@ -1,0 +1,40 @@
+{
+  "path": "/Users/sushil/.cache/huggingface/hub/models--Muesli-HQ--qwen35-0.8b-muesli-cleanup-v12-mlx-8bit/snapshots/d557e9528ba42a47026372d372e071e6f2db33e2",
+  "snapshot": "d557e9528ba42a47026372d372e071e6f2db33e2",
+  "files": {
+    "config.json": {
+      "bytes": 2772,
+      "sha256": "4b8cb0d8dc56e1148e9615295399435f04f51c58c502cb3efe1d3336940ef972"
+    },
+    "generation_config.json": {
+      "bytes": 116,
+      "sha256": "290866a6d7d4a4442fe83ba2434a31517446f40a01de500ff97b4354e7e5d082"
+    },
+    "model.safetensors": {
+      "bytes": 799973748,
+      "sha256": "9bb3f251da42cd5806f25bda751e232e204ef2104d9fc590a28b051de7fe2602"
+    },
+    "model.safetensors.index.json": {
+      "bytes": 60784,
+      "sha256": "6d0e74ad17103021d9748ca2279ff13a5cae9a3b3e1f9e6422d18cb39dac3150"
+    },
+    "tokenizer.json": {
+      "bytes": 19989339,
+      "sha256": "a5cd9732badce41de57e6efce8302930ded1c1188c5f81feb2bd6c24c4a1941f"
+    },
+    "tokenizer_config.json": {
+      "bytes": 1502,
+      "sha256": "4d2fc7899270dc76b57a7aa1d5ec3234e6a25934c6e2aea6166f989f1d453892"
+    }
+  },
+  "artifact_bytes": 820028261,
+  "weight_bytes": 799973748,
+  "logical_parameters_all_tensors": 752393024,
+  "logical_parameters_text": 752393024,
+  "tied_duplicate_parameters": 0,
+  "quantization": {
+    "group_size": 64,
+    "bits": 8,
+    "mode": "affine"
+  }
+}

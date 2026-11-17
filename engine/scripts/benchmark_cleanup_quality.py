@@ -319,7 +319,7 @@ CASES = (
 )
 
 
-def s1_mini_prompt(case: Case) -> tuple[str, str]:
+def s1_mini_prompt(case: Case, source: str | None = None) -> tuple[str, str]:
     """Return S1-mini's documented input using production-observable context.
 
     Velora has no explicit S1 prose/list preference today. The benchmark must
@@ -345,7 +345,7 @@ def s1_mini_prompt(case: Case) -> tuple[str, str]:
     control = (
         f"[Styling: {styling}] [Structure: {structure}] [Context: {context}]"
     )
-    return S1_MINI_SYSTEM_PROMPT, f"{control}\n{case.raw}"
+    return S1_MINI_SYSTEM_PROMPT, f"{control}\n{case.raw if source is None else source}"
 
 
 def resolve_benchmark_model(model_id: str) -> str:
@@ -640,7 +640,9 @@ async def _run_model(
                     ):
                         case_failures.add(f"missing_prompt:{case.required_prompt}")
                     if model_id == S1_MINI_MODEL_ID:
-                        request_prompt, request_text = s1_mini_prompt(case)
+                        request_prompt, request_text = s1_mini_prompt(
+                            case, gate.text if gate.romanize else encode_breaks(gate.text)
+                        )
                         control = request_text.split("\n", 1)[0]
                         candidates = [
                             (request_prompt, control + "\ntranscript"),

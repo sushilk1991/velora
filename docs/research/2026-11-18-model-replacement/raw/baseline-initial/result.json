@@ -1,0 +1,87 @@
+{
+  "model_id": "mlx-community/Qwen3.5-4B-MLX-8bit",
+  "prompt_style": "production",
+  "model_snapshot": "5319bbbe4f1cbe6c0b3c80f4f7de4f0338c3906d",
+  "command": [
+    "/Users/sushil/Code/Github/velora/engine/.venv/bin/python",
+    "engine/scripts/benchmark_model_replacement.py",
+    "--model-id",
+    "mlx-community/Qwen3.5-4B-MLX-8bit",
+    "--model-path",
+    "/Users/sushil/.cache/huggingface/hub/.velora-downloads/15402d3d1555d0f44d9d7d265c6d779320e0c307f89dc65cb0cb9d91314c4b6b/snapshots/5319bbbe4f1cbe6c0b3c80f4f7de4f0338c3906d",
+    "--output",
+    "docs/research/2026-11-18-model-replacement/raw/baseline-initial"
+  ],
+  "source_sha256": {
+    "benchmark_model_replacement.py": "88ea4b50b79b4739ba04045f2aaed2117a349b8652289cdc0e002e8696cd7eae",
+    "benchmark_cleanup_quality.py": "d01e03900097709b7d0d65c799ccfb45e3b4a42e7e09f2a9e5be09ecfa72893c",
+    "cleanup.py": "e35d522c34a4cfd29196c9353de8440c481f64045af5914f81706213e16cfe0a",
+    "formatting.py": "abadb2f08ea5720a4052edab5ed323a6b0192e1b82ed3a9bf0133ca6bd0ce8f1"
+  },
+  "copy_draft_requested": true,
+  "copy_draft_allowlist_override": false,
+  "cache_limit_mb_override": null,
+  "repeats": 2,
+  "requests": 54,
+  "error": null,
+  "percentiles_wall_ms": {
+    "p50": 1416.1487084999999,
+    "p95": 2285.99380395,
+    "p99": 2519.35820873
+  },
+  "peak_rss_bytes": 3279126528,
+  "summary": {
+    "event": "summary",
+    "model": "mlx-community/Qwen3.5-4B-MLX-8bit",
+    "resolved_revision": "5319bbbe4f1cbe6c0b3c80f4f7de4f0338c3906d",
+    "weight_sha256": {
+      "model.safetensors": "87c362fdb36bdee8e32ff5961bdceca58d26c2d9b00738543cc0e17e985b46ce"
+    },
+    "cases": 27,
+    "failed_cases": [
+      "names_and_numbers",
+      "implicit_feedback_list",
+      "natural_launch_plan",
+      "mismatched_ordinal_counted_list",
+      "hindi_counted_list",
+      "chinese_counted_list",
+      "note_ordinal_priorities",
+      "counted_narrative_becomes_list"
+    ],
+    "load_ms": 11409,
+    "p50_wall_ms": 1653.0,
+    "p95_wall_ms": 2047.1,
+    "p50_ttft_ms": 350.0,
+    "p95_ttft_ms": 699.6,
+    "mlx_after_load": {
+      "active_bytes": 4605320714,
+      "peak_bytes": 5166602284,
+      "cache_bytes": 36361988
+    },
+    "mlx_inference": {
+      "active_bytes": 4744519178,
+      "peak_bytes": 5412389544,
+      "cache_bytes": 538359324
+    },
+    "footprint_after_load": {
+      "current_bytes": 5350347600,
+      "peak_bytes": 5937386320
+    },
+    "footprint_after_inference": {
+      "current_bytes": 6014587800,
+      "peak_bytes": 6626792320
+    }
+  },
+  "contamination": [
+    "host_load1_ge_20",
+    "host_memory_pressure",
+    "host_swapouts",
+    "host_swap_used_growth"
+  ],
+  "host_monitor_errors": [],
+  "runtime": {
+    "mlx": "0.31.2",
+    "mlx-lm": "0.31.3",
+    "transformers": "5.3.0"
+  }
+}

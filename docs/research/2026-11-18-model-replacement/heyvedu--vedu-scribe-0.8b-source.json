@@ -1,0 +1,31 @@
+{
+  "id": "heyvedu/vedu-scribe-0.8b",
+  "sha": "7dced5841c58d7d6e0118c4c123f222b35057871",
+  "lastModified": "2026-10-17T11:09:48.000Z",
+  "cardData": {
+    "language": [
+      "en"
+    ],
+    "license": "apache-2.0",
+    "library_name": "mlx",
+    "pipeline_tag": "text-generation",
+    "base_model": "Qwen/Qwen3.5-0.8B",
+    "base_model_relation": "finetune",
+    "tags": [
+      "mlx",
+      "dictation",
+      "speech-to-text",
+      "transcript-cleanup",
+      "text-normalization",
+      "on-device"
+    ]
+  },
+  "safetensors": {
+    "parameters": {
+      "U32": 751894528,
+      "BF16": 498208,
+      "F32": 288
+    },
+    "total": 752393024
+  }
+}

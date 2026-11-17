@@ -1,0 +1,64 @@
+{
+  "path": "/Users/sushil/.cache/huggingface/hub/.velora-downloads/15402d3d1555d0f44d9d7d265c6d779320e0c307f89dc65cb0cb9d91314c4b6b/snapshots/5319bbbe4f1cbe6c0b3c80f4f7de4f0338c3906d",
+  "snapshot": "5319bbbe4f1cbe6c0b3c80f4f7de4f0338c3906d",
+  "files": {
+    ".gitattributes": {
+      "bytes": 1570,
+      "sha256": "34448b82c17d60fec9b65b1f093c115ddbaadc04beb1b0140b6bfed2e012a930"
+    },
+    "README.md": {
+      "bytes": 2241,
+      "sha256": "8a1152be0b46729c95034bb69f6df138c02f9eeea4d184d19a6a461f1c1ae5d5"
+    },
+    "chat_template.jinja": {
+      "bytes": 7756,
+      "sha256": "a4aee8afcf2e0711942cf848899be66016f8d14a889ff9ede07bca099c28f715"
+    },
+    "config.json": {
+      "bytes": 3366,
+      "sha256": "bf914114dbc055c4355acadea0304ee2cc86e9c1f3ddfe51677c524f22c9d132"
+    },
+    "model.safetensors": {
+      "bytes": 5136696107,
+      "sha256": "87c362fdb36bdee8e32ff5961bdceca58d26c2d9b00738543cc0e17e985b46ce"
+    },
+    "model.safetensors.index.json": {
+      "bytes": 101944,
+      "sha256": "24e5e2d23c6c29787a4ed61032b082fa37d95e103c90e97372f200617c59d778"
+    },
+    "preprocessor_config.json": {
+      "bytes": 390,
+      "sha256": "27225450ac9c6529872ee1924fcb0962ff5634834f817040f444118116f4e516"
+    },
+    "processor_config.json": {
+      "bytes": 1300,
+      "sha256": "14932921ca485d458a04dafd8069fbb0a4505622a48208d19ed247115801385b"
+    },
+    "tokenizer.json": {
+      "bytes": 19989343,
+      "sha256": "87a7830d63fcf43bf241c3c5242e96e62dd3fdc29224ca26fed8ea333db72de4"
+    },
+    "tokenizer_config.json": {
+      "bytes": 1139,
+      "sha256": "e98f1901ac6f0adff67b1d540bfa0c36ac1a0cf59eb72ed78146ef89aafa1182"
+    },
+    "video_preprocessor_config.json": {
+      "bytes": 385,
+      "sha256": "7768af27c1fafa9cc9011c1dc20067e03f8915e03b63504550e11d5066986d13"
+    },
+    "vocab.json": {
+      "bytes": 6722759,
+      "sha256": "ce99b4cb2983d118806ce0a8b777a35b093e2000a503ebde25853284c9dfa003"
+    }
+  },
+  "artifact_bytes": 5163528300,
+  "weight_bytes": 5136696107,
+  "logical_parameters_all_tensors": 4539265536,
+  "logical_parameters_text": 4205751296,
+  "tied_duplicate_parameters": 0,
+  "quantization": {
+    "group_size": 64,
+    "bits": 8,
+    "mode": "affine"
+  }
+}

@@ -1,0 +1,44 @@
+{
+  "id": "LiquidAI/LFM3-1.7B-MLX-8bit",
+  "sha": "4d6d94c9c2c2f249f1f740f4f08e071b0dbfe099",
+  "lastModified": "2026-11-05T19:33:08.000Z",
+  "cardData": {
+    "library_name": "mlx",
+    "license": "other",
+    "license_name": "lfm1.0",
+    "license_link": "LICENSE",
+    "pipeline_tag": "text-generation",
+    "tags": [
+      "liquid",
+      "lfm3",
+      "mlx"
+    ],
+    "language": [
+      "en",
+      "ar",
+      "zh",
+      "fr",
+      "de",
+      "it",
+      "ja",
+      "ko",
+      "pt",
+      "es",
+      "vi",
+      "th",
+      "id",
+      "hi",
+      "ru",
+      "pl"
+    ],
+    "base_model": "LiquidAI/LFM3-1.7B",
+    "base_model_relation": "quantized"
+  },
+  "safetensors": {
+    "parameters": {
+      "U32": 1728413696,
+      "BF16": 387840
+    },
+    "total": 1728801536
+  }
+}

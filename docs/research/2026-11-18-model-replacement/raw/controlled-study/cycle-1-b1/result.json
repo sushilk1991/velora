@@ -1,0 +1,122 @@
+{
+  "model_id": "mlx-community/Qwen3.5-2B-MLX-4bit",
+  "prompt_style": "production",
+  "model_snapshot": "93760be4f1f69842a46bc13dbdc0f19e291392a3",
+  "command": [
+    "/Users/sushil/Code/Github/velora/engine/.venv/bin/python",
+    "/Users/sushil/Code/Github/velora-model-study-2026-11-18/engine/scripts/benchmark_model_replacement.py",
+    "--model-id",
+    "mlx-community/Qwen3.5-2B-MLX-4bit",
+    "--model-path",
+    "/Users/sushil/.cache/huggingface/hub/models--mlx-community--Qwen3.5-2B-MLX-4bit/snapshots/93760be4f1f69842a46bc13dbdc0f19e291392a3",
+    "--prompt-style",
+    "production",
+    "--output",
+    "docs/research/2026-11-18-model-replacement/raw/controlled-study/cycle-1-b1"
+  ],
+  "source_sha256": {
+    "benchmark_model_replacement.py": "65db195e2792ecc4afad880345805710dfbde25ac87178b900c10bfaeae3cb7c",
+    "benchmark_cleanup_quality.py": "c8f85d095872b1e841e27a785739965ef07c436390e88a22f2f4ce28f47f58d2",
+    "cleanup.py": "e35d522c34a4cfd29196c9353de8440c481f64045af5914f81706213e16cfe0a",
+    "formatting.py": "abadb2f08ea5720a4052edab5ed323a6b0192e1b82ed3a9bf0133ca6bd0ce8f1",
+    "cleanup_process.py": "a1a62e07a0393912357f6231ed3ca815960881b9c5864aadb667d6cb119a4224",
+    "cleanup_worker.py": "69c2ba54bf9544e4dd2cf32f6ffe5e68b7d503590c629cdaa51b1738d6b3e2da"
+  },
+  "copy_draft_requested": true,
+  "copy_draft_allowlist_override": false,
+  "cache_limit_mb_override": null,
+  "expected_cases": [
+    "declarative",
+    "grammar",
+    "question",
+    "terminal_prose",
+    "terminal_meta_edit_correction",
+    "names_and_numbers",
+    "custom_mode_prompt",
+    "romanize_hindi_custom_mode",
+    "romanize_hindi_note_mode",
+    "long_meaning",
+    "implicit_issue_list",
+    "implicit_feedback_list",
+    "natural_launch_plan",
+    "implicit_counted_todo_list",
+    "mismatched_ordinal_counted_list",
+    "hindi_counted_list",
+    "chinese_counted_list",
+    "three_priorities_counterexample",
+    "explicit_separate_count_lines",
+    "note_ordinal_priorities",
+    "rambling_multi_problem_request",
+    "single_issue_stays_prose",
+    "temporal_narrative_stays_prose",
+    "ordinal_nouns_stay_prose",
+    "counted_narrative_becomes_list",
+    "ordinary_counting_stays_prose",
+    "new_topic_follows_implicit_list"
+  ],
+  "started_ns": 1794943432751601000,
+  "ended_ns": 1794943459111155000,
+  "worker_pids": [
+    53814
+  ],
+  "repeats": 2,
+  "requests": 54,
+  "error": null,
+  "percentiles_wall_ms": {
+    "p50": 345.0121245,
+    "p95": 668.7819915499994,
+    "p99": 969.2600407699999
+  },
+  "peak_rss_bytes": 1978859520,
+  "summary": {
+    "event": "summary",
+    "model": "mlx-community/Qwen3.5-2B-MLX-4bit",
+    "resolved_revision": "93760be4f1f69842a46bc13dbdc0f19e291392a3",
+    "weight_sha256": {
+      "model.safetensors": "713fe7e5d3c3965f7106b0d0ee17615f7869c23c8d327996df8c1196fbcf07d5"
+    },
+    "cases": 27,
+    "failed_cases": [
+      "question",
+      "terminal_meta_edit_correction",
+      "names_and_numbers",
+      "implicit_counted_todo_list",
+      "hindi_counted_list",
+      "chinese_counted_list",
+      "rambling_multi_problem_request",
+      "single_issue_stays_prose",
+      "ordinal_nouns_stay_prose",
+      "ordinary_counting_stays_prose"
+    ],
+    "load_ms": 4742,
+    "p50_wall_ms": 338.5,
+    "p95_wall_ms": 637.9,
+    "p50_ttft_ms": 186.5,
+    "p95_ttft_ms": 270.9,
+    "mlx_after_load": {
+      "active_bytes": 1110532298,
+      "peak_bytes": 1612038962,
+      "cache_bytes": 43654028
+    },
+    "mlx_inference": {
+      "active_bytes": 1163124938,
+      "peak_bytes": 1940142816,
+      "cache_bytes": 78445454
+    },
+    "footprint_after_load": {
+      "current_bytes": 1908476328,
+      "peak_bytes": 2389248424
+    },
+    "footprint_after_inference": {
+      "current_bytes": 2020329944,
+      "peak_bytes": 2729085400
+    }
+  },
+  "contamination": [],
+  "host_monitor_errors": [],
+  "runtime": {
+    "mlx": "0.31.2",
+    "mlx-lm": "0.31.3",
+    "transformers": "5.3.0"
+  }
+}

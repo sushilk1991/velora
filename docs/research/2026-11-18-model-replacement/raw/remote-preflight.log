@@ -1,0 +1,60 @@
+Python 3.12.3
+Filesystem      Size  Used Avail Use% Mounted on
+/dev/root        79G   31G   44G  42% /
+/dev/vdb         20G   16G  4.4G  78% /data
+{"time":"2026-11-17T18:44:32.695724729Z","lanes":[{"name":"build","used":1,"total":1,"configured_total":1},{"name":"encode","used":0,"total":1,"configured_total":1},{"name":"install","used":0,"total":1,"configured_total":1},{"name":"ml","used":0,"total":1,"configured_total":1},{"name":"render","used":0,"total":1,"configured_total":1}],"running":[{"id":"2ec2ac2f22ec443acb32176a21be7940","signature":"352d828667c6f4c1b45907771a748c9b34af6c521d482fe43751a7a417c1bc60","lane":"build","label":"bash","agent":"terminal","cwd":"/data/jobs/20261117T184429Z-velora-model-study-2026-11-18-c3fcb1c9/src","repo":"","user":"sushil","owner_pid":157293,"pid":157301,"process_start":"e53eab7c-4515-1443-a7d0-af0b243748f9:3105942","weight":1,"queue_sequence":74,"priority":"normal","phase":"running","queued":"2026-11-17T18:44:32.658415321Z","start":"2026-11-17T18:44:32.683369369Z","end":"0001-01-01T00:00:00Z","wait_ns":24954048,"exit_code":0,"memory_bytes":3221225472,"rss_bytes":3645440,"peak_rss_bytes":3645440,"cache_hit":false,"nested":false,"runtime_ns":12355360}],"queue":[],"memory":{"pressure":"normal","total_bytes":8351281152,"available_bytes":7934693376,"swap_total_bytes":4294963200,"swap_used_bytes":61829120,"some_avg10":0}}
+"""STT backends behind one interface.
+
+- ParakeetBackend: parakeet-mlx — each pause-bounded segment is decoded whole
+  DURING recording, so stop→transcript only decodes the tail.
+- WhisperBackend: mlx-whisper — accumulates PCM, batch-transcribes on stop,
+  with hallucination guard (compression/repetition checks, repeated-tail trim).
+  Long recordings are additionally decoded in pause-aligned SEGMENTS during
+  recording (smartness-v2 §2): live partials for the HUD, and past
+  LONG_DICTATION_S the final text is stitched from those segments so the
+  stop→final latency stays flat instead of growing with the dictation.
+- FakeBackend: for tests (VELORA_FAKE_STT=1), no model downloads.
+
+All heavy imports are lazy (inside load()) so tests never touch MLX.
+"""
+
+from __future__ import annotations
+
+import contextlib
+import functools
+import logging
+import math
+import os
+import re
+import time
+import zlib
+"""Cleanup-model prompt preparation, cache reuse, and deadline behavior."""
+
+from __future__ import annotations
+
+from typing import Any
+import asyncio
+import contextlib
+import threading
+import time
+from types import SimpleNamespace
+
+import pytest
+
+import velora_engine.cleanup as cleanup_mod
+from velora_engine.cleanup import (
+    CleanupEngine,
+    CleanupResult,
+    COPY_DRAFT_PASS_TOKENS,
+    _PrefixCancelled,
+    _copy_draft,
+    _restore_prompt_cache,
+    _snapshot_prompt_cache,
+)
+
+
+class CharacterTokenizer:
+    """Deterministic tokenizer whose token boundaries are visible in tests."""
+
+    @staticmethod
+    def apply_chat_template(messages, **_kwargs):

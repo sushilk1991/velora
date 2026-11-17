@@ -1,0 +1,142 @@
+baton: waiting for a free ml slot
+baton: waiting for a free ml slot
+baton: waiting for a free ml slot
+baton: waiting for a free ml slot
+baton: waiting for memory before ml (pressure normal · 7.1 GiB available · swap 16.5 GiB/18.0 GiB)
+baton: waiting for memory before ml (pressure warn · 7.6 GiB available · swap 16.5 GiB/18.0 GiB)
+baton: waiting for memory before ml (pressure warn · 7.8 GiB available · swap 16.5 GiB/18.0 GiB)
+baton: waiting for memory before ml (pressure warn · 9.2 GiB available · swap 16.5 GiB/18.0 GiB)
+baton: waiting for memory before ml (pressure normal · 9.5 GiB available · swap 16.5 GiB/18.0 GiB)
+baton: waiting for a free ml slot
+baton: waiting for a free ml slot
+baton: waiting for a free ml slot
+baton: waiting for a free ml slot
+baton: waiting for a free ml slot
+baton: waiting for a free ml slot
+baton: waiting for a free ml slot
+baton: waiting for a free ml slot
+baton: waiting for a free ml slot
+baton: waiting for a free ml slot
+baton: waiting for a free ml slot
+baton: waiting for a free ml slot
+baton: waiting for a free ml slot
+baton: waiting for a free ml slot
+baton: waiting for a free ml slot
+baton: waiting for a free ml slot
+baton: waiting for a free ml slot
+baton: waiting for a free ml slot
+baton: waiting for a free ml slot
+baton: waiting for a free ml slot
+baton: waiting for a free ml slot
+baton: waiting for a free ml slot
+baton: waiting for a free ml slot
+baton: waiting for a free ml slot
+baton: waiting for a free ml slot
+baton: waiting for a free ml slot
+baton: waiting for a free ml slot
+baton: waiting for a free ml slot
+baton: waiting for a free ml slot
+baton: waiting for a free ml slot
+baton: waiting for a free ml slot
+baton: waiting for a free ml slot
+baton: waiting for a free ml slot
+baton: waiting for a free ml slot
+baton: waiting for a free ml slot
+baton: waiting for a free ml slot
+baton: waiting for a free ml slot
+baton: waiting for a free ml slot
+baton: waiting for a free ml slot
+baton: waiting for a free ml slot
+baton: waiting for a free ml slot
+baton: waiting for a free ml slot
+baton: waiting for a free ml slot
+baton: waiting for a free ml slot
+baton: waiting for a free ml slot
+baton: waiting for a free ml slot
+baton: waiting for a free ml slot
+baton: waiting for a free ml slot
+baton: waiting for a free ml slot
+baton: waiting for a free ml slot
+baton: waiting for a free ml slot
+baton: waiting for a free ml slot
+baton: waiting for a free ml slot
+baton: waiting for a free ml slot
+baton: waiting for a free ml slot
+baton: waiting for a free ml slot
+baton: waiting for a free ml slot
+baton: waiting for a free ml slot
+baton: waiting for a free ml slot
+baton: waiting for a free ml slot
+baton: waiting for a free ml slot
+baton: waiting for a free ml slot
+baton: waiting for a free ml slot
+baton: waiting for a free ml slot
+baton: waiting for a free ml slot
+baton: waiting for a free ml slot
+baton: waiting for a free ml slot
+baton: waiting for a free ml slot
+baton: waiting for a free ml slot
+baton: waiting for a free ml slot
+baton: waiting for a free ml slot
+baton: waiting for a free ml slot
+baton: waiting for a free ml slot
+baton: waiting for a free ml slot
+baton: waiting for a free ml slot
+baton: waiting for a free ml slot
+baton: waiting for a free ml slot
+baton: waiting for a free ml slot
+baton: waiting for a free ml slot
+baton: waiting for a free ml slot
+baton: waiting for a free ml slot
+baton: waiting for a free ml slot
+baton: waiting for a free ml slot
+baton: waiting for a free ml slot
+baton: waiting for a free ml slot
+baton: waiting for a free ml slot
+baton: waiting for a free ml slot
+baton: waiting for a free ml slot
+baton: waiting for a free ml slot
+baton: waiting for a free ml slot
+baton: waiting for a free ml slot
+baton: waiting for a free ml slot
+baton: waiting for a free ml slot
+baton: waiting for a free ml slot
+baton: waiting for a free ml slot
+baton: waiting for a free ml slot
+baton: waiting for a free ml slot
+baton: waiting for a free ml slot
+baton: waiting for a free ml slot
+baton: waiting for a free ml slot
+baton: waiting for a free ml slot
+baton: waiting for a free ml slot
+baton: waiting for a free ml slot
+baton: waiting for a free ml slot
+baton: waiting for a free ml slot
+baton: waiting for a free ml slot
+baton: waiting for a free ml slot
+baton: waiting for a free ml slot
+baton: waiting for a free ml slot
+baton: waiting for a free ml slot
+baton: waiting for a free ml slot
+baton: waiting for a free ml slot
+baton: waiting for a free ml slot
+baton: waiting for a free ml slot
+baton: waiting for a free ml slot
+baton: waiting for a free ml slot
+baton: waiting for a free ml slot
+baton: waiting for a free ml slot
+baton: waiting for a free ml slot
+baton: waiting for a free ml slot
+baton: waiting for a free ml slot
+baton: waiting for a free ml slot
+{"event": "run_start", "name": "baseline-a1", "model": "mlx-community/Qwen3.5-4B-MLX-8bit"}
+{"event": "run_end", "name": "baseline-a1", "exit_code": 0}
+{"event": "run_start", "name": "cycle-1-b1", "model": "mlx-community/Qwen3.5-2B-MLX-4bit"}
+{"event": "run_end", "name": "cycle-1-b1", "exit_code": 0}
+{"cycle": 1, "model": "mlx-community/Qwen3.5-2B-MLX-4bit", "hypothesis": "Reduce capacity and packed bandwidth while preserving the general instruction contract.", "options": [], "run_dir": "docs/research/2026-11-18-model-replacement/raw/controlled-study/cycle-1-b1", "quality_regressions": {"question": ["cleanup_not_applied", "missing_ending:?"], "terminal_meta_edit_correction": ["cleanup_not_applied", "forbidden:3pm", "forbidden:6pm not 3pm", "forbidden:change the previous line", "missing:let's meet at 6", "missing_ending:."], "names_and_numbers": ["missing:3:30", "missing:42,000"], "implicit_counted_todo_list": ["missing:dozen of eggs"], "hindi_counted_list": ["cleanup_not_applied", "missing:\u090f\u0915 \u0926\u0930\u094d\u091c\u0928 \u0905\u0902\u0921\u0947", "missing:\u0915\u093f\u0924\u093e\u092c\u0947\u0902", "missing:\u0924\u0940\u0928 \u0938\u0947\u092c", "numbered_items:0!=expected:3"], "chinese_counted_list": ["missing_ending:\u3002"], "rambling_multi_problem_request": ["numbered_items:3!=expected:2"], "single_issue_stays_prose": ["missing:everything else", "missing:only issue", "numbered_items:1!=expected:0", "unexpected_list_items"], "ordinal_nouns_stay_prose": ["cleanup_not_applied"], "ordinary_counting_stays_prose": ["numbered_items:1!=expected:0", "unexpected_list_items"]}, "baseline_passed": 26, "candidate_passed": 17, "contamination": [], "error": null, "nondeterministic_cases": []}
+{"event": "run_start", "name": "cycle-2-b1", "model": "Muesli-HQ/qwen35-2b-muesli-cleanup-v12-mlx-8bit"}
+{"event": "run_end", "name": "cycle-2-b1", "exit_code": 0}
+{"cycle": 2, "model": "Muesli-HQ/qwen35-2b-muesli-cleanup-v12-mlx-8bit", "hypothesis": "If general 2B loses cleanup quality, try task fine-tuning at higher precision and equal capacity.", "options": [], "run_dir": "docs/research/2026-11-18-model-replacement/raw/controlled-study/cycle-2-b1", "quality_regressions": {"declarative": ["cleanup_not_applied", "missing_ending:.", "startup_cache_miss"], "grammar": ["cleanup_not_applied", "missing:issues were", "missing_ending:.", "startup_cache_miss"], "question": ["cleanup_not_applied", "missing_ending:?", "startup_cache_miss"], "terminal_prose": ["cleanup_not_applied", "missing_ending:.", "startup_cache_miss"], "terminal_meta_edit_correction": ["cleanup_not_applied", "forbidden:3pm", "forbidden:6pm not 3pm", "forbidden:change the previous line", "missing:let's meet at 6", "missing_ending:.", "startup_cache_miss"], "names_and_numbers": ["cleanup_not_applied", "missing:3:30", "missing:42,000", "missing_ending:.", "startup_cache_miss"], "custom_mode_prompt": ["cleanup_not_applied", "missing_ending:.", "startup_cache_miss"], "romanize_hindi_custom_mode": ["cleanup_not_applied", "missing:Namaste", "missing:aaj", "romanization_kept_native_script"], "romanize_hindi_note_mode": ["cleanup_not_applied", "missing:Mujhe", "missing:aaj", "missing:bhejna", "missing:code", "missing:tay karna", "missing:teen kaam", "romanization_kept_native_script"], "long_meaning": ["cleanup_not_applied", "missing_ending:.", "startup_cache_miss"], "implicit_issue_list": ["cleanup_not_applied", "missing:correction messages", "missing:long dictations", "missing:one paragraph", "missing_ending:.", "numbered_items:0!=expected:3", "startup_cache_miss"], "implicit_feedback_list": ["cleanup_not_applied", "missing:error message", "missing:microphone picker", "missing:save action", "missing_ending:.", "numbered_items:0!=expected:3", "startup_cache_miss"], "natural_launch_plan": ["cleanup_not_applied", "missing:Maya", "missing:Sam", "missing:before lunch", "missing:metrics", "missing_ending:.", "numbered_items:0!=expected:3", "startup_cache_miss"], "implicit_counted_todo_list": ["cleanup_not_applied", "missing:buy apples", "missing:buy books", "missing:buy eggs", "missing:dozen of eggs", "numbered_items:0!=expected:3", "startup_cache_miss"], "mismatched_ordinal_counted_list": ["cleanup_not_applied", "startup_cache_miss"], "hindi_counted_list": ["cleanup_not_applied", "missing:\u090f\u0915 \u0926\u0930\u094d\u091c\u0928 \u0905\u0902\u0921\u0947", "missing:\u0915\u093f\u0924\u093e\u092c\u0947\u0902", "missing:\u0924\u0940\u0928 \u0938\u0947\u092c", "numbered_items:0!=expected:3", "startup_cache_miss"], "chinese_counted_list": ["cleanup_not_applied", "missing:\u4e00\u6253\u9e21\u86cb", "missing:\u4e09\u4e2a\u82f9\u679c", "missing:\u4e66", "numbered_items:0!=expected:3", "startup_cache_miss"], "three_priorities_counterexample": ["cleanup_not_applied", "missing:first comment on Hacker News", "missing:post it on Hacker News", "missing:update Velora", "numbered_items:0!=expected:3", "startup_cache_miss"], "explicit_separate_count_lines": ["cleanup_not_applied", "missing_line:1", "missing_line:2", "missing_line:3", "missing_line:4", "startup_cache_miss"], "note_ordinal_priorities": ["cleanup_not_applied", "missing:Hacker News", "missing:first comment", "missing:update Velora", "numbered_items:0!=expected:3", "startup_cache_miss"], "rambling_multi_problem_request": ["cleanup_not_applied", "missing:issue reports", "missing:longer dictations", "missing_ending:.", "numbered_items:0!=expected:2", "startup_cache_miss"], "single_issue_stays_prose": ["cleanup_not_applied", "missing_ending:.", "startup_cache_miss"], "temporal_narrative_stays_prose": ["cleanup_not_applied", "startup_cache_miss"], "ordinal_nouns_stay_prose": ["cleanup_not_applied", "startup_cache_miss"], "counted_narrative_becomes_list": ["cleanup_not_applied", "missing:badge", "missing:overslept", "missing:standup", "numbered_items:0!=expected:3", "startup_cache_miss"], "ordinary_counting_stays_prose": ["cleanup_not_applied", "startup_cache_miss"], "new_topic_follows_implicit_list": ["cleanup_not_applied", "missing:buy apples", "missing:buy books", "missing:buy eggs", "numbered_items:0!=expected:3", "startup_cache_miss"]}, "baseline_passed": 26, "candidate_passed": 0, "contamination": [], "error": null, "nondeterministic_cases": []}
+{"event": "run_start", "name": "cycle-3-b1", "model": "heyvedu/vedu-scribe-0.8b"}
+{"event": "run_end", "name": "cycle-3-b1", "exit_code": 0}
+{"cycle": 3, "model": "heyvedu/vedu-scribe-0.8b", "hypothesis": "Try a smaller specialist with explicit trained formatting controls.", "options": [], "run_dir": "docs/research/2026-11-18-model-replacement/raw/controlled-study/cycle-3-b1", "quality_regressions": {"terminal_meta_edit_correction": ["forbidden:change the previous line", "missing_ending:."], "romanize_hindi_custom_mode": ["missing:Namaste", "missing:aaj"], "romanize_hindi_note_mode": ["missing:Mujhe", "missing:aaj", "missing:bhejna", "missing:tay karna", "missing:teen kaam"], "implicit_feedback_list": ["missing:error message", "missing:microphone picker", "missing:save action", "numbered_items:0!=expected:3", "unexpected_non_numbered_list_items"], "natural_launch_plan": ["missing:Maya", "missing:Sam", "missing:before lunch", "missing:metrics", "numbered_items:0!=expected:3"], "hindi_counted_list": ["cleanup_not_applied", "missing:\u090f\u0915 \u0926\u0930\u094d\u091c\u0928 \u0905\u0902\u0921\u0947", "missing:\u0915\u093f\u0924\u093e\u092c\u0947\u0902", "missing:\u0924\u0940\u0928 \u0938\u0947\u092c", "missing_intro:\u0924\u0940\u0928 \u091a\u0940\u091c\u093c\u0947\u0902", "numbered_items:0!=expected:3"], "chinese_counted_list": ["missing_ending:\u3002"], "explicit_separate_count_lines": ["missing_line:1", "missing_line:2", "missing_line:3", "missing_line:4"], "rambling_multi_problem_request": ["missing:issue reports", "missing:longer dictations", "numbered_items:0!=expected:2"], "temporal_narrative_stays_prose": ["numbered_items:3!=expected:0", "unexpected_list_items"]}, "baseline_passed": 26, "candidate_passed": 17, "contamination": [], "error": null, "nondeterministic_cases": []}

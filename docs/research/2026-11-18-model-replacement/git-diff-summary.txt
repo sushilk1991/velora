@@ -1,0 +1,23 @@
+Base: fb700ce17eb88efa5bf696bebb6bb87457106fb2
+Branch: study/smaller-model-2026-11-18
+
+Winning model change: none; all five candidates regress quality.
+Production inference, model registry, configuration, Swift app and dependencies: unchanged.
+
+Code/progress diff:
+ PROGRESS.md                                      |  16 +
+ engine/scripts/benchmark_cleanup_quality.py      |   8 +-
+ engine/scripts/benchmark_model_replacement.py    | 393 +++++++++++++++++++++++
+ engine/scripts/compare_model_replacement.py      | 153 +++++++++
+ engine/scripts/run_model_replacement_study.py    | 171 ++++++++++
+ engine/tests/test_benchmark_model_replacement.py | 255 +++++++++++++++
+ 6 files changed, 993 insertions(+), 3 deletions(-)
+
+Research and raw evidence include exact console logs (with their original whitespace),
+request JSONL, host/worker samples, model manifests and all 27 output diffs.
+The overall diff excluding this summary is:
+ 132 files changed, 16533 insertions(+), 3 deletions(-)
+
+The benchmark-only S1 adapter now receives gated input. New tools capture raw request latency,
+model hashes/parameter counts, lifetime RSS, physical footprint and host telemetry; compare
+fail-closed paired rounds; and run five bounded candidate cycles with early quality rejection.

@@ -1,3 +1,19 @@
+# Smaller model study — 2026-11-18
+
+- Decision: retain production Qwen3.5-4B-MLX-8bit. Five candidate cycles all
+  regressed quality; baseline 26/27, best candidate general 2B8 19/27.
+- Evidence: docs/research/2026-11-18-model-replacement/README.md contains the
+  comparison, exact commands, raw logs and all 27 side-by-side public cases.
+- Verified: 2,438 native engine tests (3 skips), 4,293 Swift selftest checks,
+  all macOS script gates; final adapter changes pass 71 focused remote checks.
+- Scope: benchmark tools, a gated-source benchmark helper and research only.
+  Production model/config/runtime unchanged. No owner history/audio read.
+- User steering: installed Velora and all four descendants stopped on SIGTERM;
+  app remains closed. New temporary 2B8 download removed; existing caches retained.
+- Limits: candidates rejected before A-B-B-A/sustained-load qualification.
+  Initial host-contaminated baseline and incomplete specialist adapters are
+  retained as discarded diagnostics. No replacement or release is claimed.
+
 # Progress
 
 ## Release 0.32.2 (2026-11-13)

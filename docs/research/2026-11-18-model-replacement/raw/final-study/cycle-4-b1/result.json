@@ -1,0 +1,129 @@
+{
+  "model_id": "Muesli-HQ/qwen35-0.8b-muesli-cleanup-v12-mlx-8bit",
+  "prompt_style": "muesli",
+  "model_snapshot": "d557e9528ba42a47026372d372e071e6f2db33e2",
+  "command": [
+    "/Users/sushil/Code/Github/velora/engine/.venv/bin/python",
+    "/Users/sushil/Code/Github/velora-model-study-2026-11-18/engine/scripts/benchmark_model_replacement.py",
+    "--model-id",
+    "Muesli-HQ/qwen35-0.8b-muesli-cleanup-v12-mlx-8bit",
+    "--model-path",
+    "/Users/sushil/.cache/huggingface/hub/models--Muesli-HQ--qwen35-0.8b-muesli-cleanup-v12-mlx-8bit/snapshots/d557e9528ba42a47026372d372e071e6f2db33e2",
+    "--prompt-style",
+    "muesli",
+    "--output",
+    "docs/research/2026-11-18-model-replacement/raw/final-study/cycle-4-b1"
+  ],
+  "source_sha256": {
+    "benchmark_model_replacement.py": "242c244bb21d01ff0df0320a2bf024d070a589a60e37c4f180626e2723ba0634",
+    "benchmark_cleanup_quality.py": "c8f85d095872b1e841e27a785739965ef07c436390e88a22f2f4ce28f47f58d2",
+    "cleanup.py": "e35d522c34a4cfd29196c9353de8440c481f64045af5914f81706213e16cfe0a",
+    "formatting.py": "abadb2f08ea5720a4052edab5ed323a6b0192e1b82ed3a9bf0133ca6bd0ce8f1",
+    "cleanup_process.py": "a1a62e07a0393912357f6231ed3ca815960881b9c5864aadb667d6cb119a4224",
+    "cleanup_worker.py": "69c2ba54bf9544e4dd2cf32f6ffe5e68b7d503590c629cdaa51b1738d6b3e2da"
+  },
+  "copy_draft_requested": true,
+  "copy_draft_allowlist_override": false,
+  "cache_limit_mb_override": null,
+  "expected_cases": [
+    "declarative",
+    "grammar",
+    "question",
+    "terminal_prose",
+    "terminal_meta_edit_correction",
+    "names_and_numbers",
+    "custom_mode_prompt",
+    "romanize_hindi_custom_mode",
+    "romanize_hindi_note_mode",
+    "long_meaning",
+    "implicit_issue_list",
+    "implicit_feedback_list",
+    "natural_launch_plan",
+    "implicit_counted_todo_list",
+    "mismatched_ordinal_counted_list",
+    "hindi_counted_list",
+    "chinese_counted_list",
+    "three_priorities_counterexample",
+    "explicit_separate_count_lines",
+    "note_ordinal_priorities",
+    "rambling_multi_problem_request",
+    "single_issue_stays_prose",
+    "temporal_narrative_stays_prose",
+    "ordinal_nouns_stay_prose",
+    "counted_narrative_becomes_list",
+    "ordinary_counting_stays_prose",
+    "new_topic_follows_implicit_list"
+  ],
+  "started_ns": 1794944381741484000,
+  "ended_ns": 1794944402376430000,
+  "worker_pids": [
+    36739
+  ],
+  "repeats": 2,
+  "requests": 54,
+  "error": null,
+  "percentiles_wall_ms": {
+    "p50": 284.1706665,
+    "p95": 386.8056795,
+    "p99": 411.48735797999996
+  },
+  "peak_rss_bytes": 1816969216,
+  "summary": {
+    "event": "summary",
+    "model": "Muesli-HQ/qwen35-0.8b-muesli-cleanup-v12-mlx-8bit",
+    "resolved_revision": "d557e9528ba42a47026372d372e071e6f2db33e2",
+    "weight_sha256": {
+      "model.safetensors": "9bb3f251da42cd5806f25bda751e232e204ef2104d9fc590a28b051de7fe2602"
+    },
+    "cases": 27,
+    "failed_cases": [
+      "grammar",
+      "terminal_meta_edit_correction",
+      "romanize_hindi_custom_mode",
+      "romanize_hindi_note_mode",
+      "implicit_feedback_list",
+      "natural_launch_plan",
+      "implicit_counted_todo_list",
+      "mismatched_ordinal_counted_list",
+      "hindi_counted_list",
+      "chinese_counted_list",
+      "three_priorities_counterexample",
+      "explicit_separate_count_lines",
+      "note_ordinal_priorities",
+      "rambling_multi_problem_request",
+      "temporal_narrative_stays_prose",
+      "counted_narrative_becomes_list",
+      "new_topic_follows_implicit_list"
+    ],
+    "load_ms": 4559,
+    "p50_wall_ms": 283.5,
+    "p95_wall_ms": 383.6,
+    "p50_ttft_ms": 157.0,
+    "p95_ttft_ms": 230.2,
+    "mlx_after_load": {
+      "active_bytes": 822789770,
+      "peak_bytes": 1104659446,
+      "cache_bytes": 17402360
+    },
+    "mlx_inference": {
+      "active_bytes": 822789770,
+      "peak_bytes": 1024704364,
+      "cache_bytes": 47376210
+    },
+    "footprint_after_load": {
+      "current_bytes": 1691863296,
+      "peak_bytes": 1960118528
+    },
+    "footprint_after_inference": {
+      "current_bytes": 1737656576,
+      "peak_bytes": 1960118528
+    }
+  },
+  "contamination": [],
+  "host_monitor_errors": [],
+  "runtime": {
+    "mlx": "0.31.2",
+    "mlx-lm": "0.31.3",
+    "transformers": "5.3.0"
+  }
+}

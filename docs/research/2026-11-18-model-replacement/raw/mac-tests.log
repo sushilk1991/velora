@@ -1,0 +1,619 @@
+swift build
+Building for debugging...
+[Constructing description]
+[Planning deferred tasks]
+[8 / 13]
+[8 / 14] Velora-product
+[9 / 14] Velora-product
+[12 / 17] Velora-product
+[13 / 17] Velora-product
+/Users/sushil/Code/Github/velora/Sources/Velora/Selftest/Selftest.swift:10774:9: warning: 'abandoned' mutated after capture by sendable closure
+10771 |         var launchedApp: NSRunningApplication?
+10772 |         var launchFinished = false
+10773 |         var abandoned = false
+      |             `- note: variable defined here
+10774 |         defer {
+      |         `- warning: 'abandoned' mutated after capture by sendable closure
+10775 |             abandoned = true
+10776 |             launchedApp?.forceTerminate()
+      :
+10778 |         NSWorkspace.shared.open(
+10779 |             [fixtureURL], withApplicationAt: textEditURL, configuration: configuration
+10780 |         ) { openedApp, _ in
+      |           `- note: variable captured by sendable closure
+10781 |             guard !abandoned else {
+      |                    `- note: capturing use
+10782 |                 openedApp?.forceTerminate()
+10783 |                 return
+[15 / 17] Velora-product
+[17 / 17] Velora-product
+Build complete! (67.90 secs)
+.build/debug/Velora --selftest
+2026-11-18 00:26:58.570 Velora[29841:108194506] Velora: failed to persist learned.json: Error Domain=NSCocoaErrorDomain Code=516 "The file “not-a-directory” couldn’t be saved in the folder “velora-learning-save-518CB6C7-DEB0-4FF4-A8B1-65DA1BB4DD9F” because a file with the same name already exists." UserInfo={NSFilePath=/var/folders/r2/hxzthddn0vnd14jsz35qwcc40000gn/T/velora-learning-save-518CB6C7-DEB0-4FF4-A8B1-65DA1BB4DD9F/not-a-directory, NSURL=file:///var/folders/r2/hxzthddn0vnd14jsz35qwcc40000gn/T/velora-learning-save-518CB6C7-DEB0-4FF4-A8B1-65DA1BB4DD9F/not-a-directory, NSUnderlyingError=0x7592433660 {Error Domain=NSPOSIXErrorDomain Code=17 "File exists"}}
+2026-11-18 00:26:58.883 Velora[29841:108194506] Velora: failed to persist personal dictionary: tooManyEntries
+2026-11-18 00:26:58.935 Velora[29841:108194506] Velora: failed to persist learned.json: Error Domain=NSCocoaErrorDomain Code=516 "The file “blocked-learned” couldn’t be saved in the folder “velora-learned-projection-263F8AE9-5596-42BF-A2BF-E4D2759F8E10” because a file with the same name already exists." UserInfo={NSFilePath=/var/folders/r2/hxzthddn0vnd14jsz35qwcc40000gn/T/velora-learned-projection-263F8AE9-5596-42BF-A2BF-E4D2759F8E10/blocked-learned, NSURL=file:///var/folders/r2/hxzthddn0vnd14jsz35qwcc40000gn/T/velora-learned-projection-263F8AE9-5596-42BF-A2BF-E4D2759F8E10/blocked-learned, NSUnderlyingError=0x7592a25c50 {Error Domain=NSPOSIXErrorDomain Code=17 "File exists"}}
+2026-11-18 00:26:59.003 Velora[29841:108194506] Velora: failed to create auto-vocabulary directory: Error Domain=NSCocoaErrorDomain Code=516 "The file “blocked-auto” couldn’t be saved in the folder “velora-auto-projection-AC079E0E-2FCF-4494-A50C-A61827783D9F” because a file with the same name already exists." UserInfo={NSFilePath=/var/folders/r2/hxzthddn0vnd14jsz35qwcc40000gn/T/velora-auto-projection-AC079E0E-2FCF-4494-A50C-A61827783D9F/blocked-auto, NSURL=file:///var/folders/r2/hxzthddn0vnd14jsz35qwcc40000gn/T/velora-auto-projection-AC079E0E-2FCF-4494-A50C-A61827783D9F/blocked-auto, NSUnderlyingError=0x7592a25830 {Error Domain=NSPOSIXErrorDomain Code=17 "File exists"}}
+2026-11-18 00:26:59.110 Velora[29841:108194506] Velora: migrated settings.json from version 1 to version 2
+2026-11-18 00:26:59.137 Velora[29841:108194506] Velora: refusing to overwrite unreadable config.json
+2026-11-18 00:26:59.138 Velora[29841:108194506] Velora: refusing to overwrite unreadable config.json
+2026-11-18 00:26:59.141 Velora[29841:108194506] Velora: refusing to overwrite unreadable config.json
+2026-11-18 00:26:59.157 Velora[29841:108194506] Velora: recovered settings.json from its last-known-good copy
+2026-11-18 00:26:59.160 Velora[29841:108194506] Velora: settings.json was invalid and was preserved: invalidFile
+2026-11-18 00:26:59.163 Velora[29841:108194506] Velora: recovered settings.json from its last-known-good copy
+2026-11-18 00:26:59.168 Velora[29841:108194506] Velora: settings.json is from a newer app version; leaving it untouched
+2026-11-18 00:26:59.168 Velora[29841:108194506] Velora: settings change ignored because settings.json is write-protected
+2026-11-18 00:26:59.390 Velora[29841:108194506] Velora: failed to persist personal dictionary: Error Domain=NSCocoaErrorDomain Code=516 "The file “sync” couldn’t be saved in the folder “velora-repository-79C2BE33-A688-477F-9826-F7E10F172325” because a file with the same name already exists." UserInfo={NSFilePath=/var/folders/r2/hxzthddn0vnd14jsz35qwcc40000gn/T/velora-repository-79C2BE33-A688-477F-9826-F7E10F172325/sync, NSURL=file:///var/folders/r2/hxzthddn0vnd14jsz35qwcc40000gn/T/velora-repository-79C2BE33-A688-477F-9826-F7E10F172325/sync, NSUnderlyingError=0x7592a26400 {Error Domain=NSPOSIXErrorDomain Code=17 "File exists"}}
+2026-11-18 00:26:59.558 Velora[29841:108194506] Velora: failed to persist personal dictionary: Error Domain=NSCocoaErrorDomain Code=516 "The file “canonical” couldn’t be saved in the folder “velora-repository-A8C9076A-052B-4918-902A-9008AACA6AEA” because a file with the same name already exists." UserInfo={NSFilePath=/var/folders/r2/hxzthddn0vnd14jsz35qwcc40000gn/T/velora-repository-A8C9076A-052B-4918-902A-9008AACA6AEA/canonical, NSURL=file:///var/folders/r2/hxzthddn0vnd14jsz35qwcc40000gn/T/velora-repository-A8C9076A-052B-4918-902A-9008AACA6AEA/canonical, NSUnderlyingError=0x7592433930 {Error Domain=NSPOSIXErrorDomain Code=17 "File exists"}}
+2026-11-18 00:27:02.613 Velora[29841:108194506] Velora: failed to create config directory: Error Domain=NSCocoaErrorDomain Code=516 "The file “blocked-config” couldn’t be saved in the folder “velora-repository-8D95A930-D1F7-4CF1-9C58-CEA88AE4B3E9” because a file with the same name already exists." UserInfo={NSFilePath=/var/folders/r2/hxzthddn0vnd14jsz35qwcc40000gn/T/velora-repository-8D95A930-D1F7-4CF1-9C58-CEA88AE4B3E9/blocked-config, NSURL=file:///var/folders/r2/hxzthddn0vnd14jsz35qwcc40000gn/T/velora-repository-8D95A930-D1F7-4CF1-9C58-CEA88AE4B3E9/blocked-config, NSUnderlyingError=0x7592e446c0 {Error Domain=NSPOSIXErrorDomain Code=17 "File exists"}}
+2026-11-18 00:27:02.638 Velora[29841:108194506] Velora: failed to create config directory: Error Domain=NSCocoaErrorDomain Code=516 "The file “blocked-config” couldn’t be saved in the folder “velora-repository-8D95A930-D1F7-4CF1-9C58-CEA88AE4B3E9” because a file with the same name already exists." UserInfo={NSFilePath=/var/folders/r2/hxzthddn0vnd14jsz35qwcc40000gn/T/velora-repository-8D95A930-D1F7-4CF1-9C58-CEA88AE4B3E9/blocked-config, NSURL=file:///var/folders/r2/hxzthddn0vnd14jsz35qwcc40000gn/T/velora-repository-8D95A930-D1F7-4CF1-9C58-CEA88AE4B3E9/blocked-config, NSUnderlyingError=0x7592b00c90 {Error Domain=NSPOSIXErrorDomain Code=17 "File exists"}}
+2026-11-18 00:27:02.644 Velora[29841:108194506] Velora: failed to create config directory: Error Domain=NSCocoaErrorDomain Code=516 "The file “blocked-config” couldn’t be saved in the folder “velora-repository-8D95A930-D1F7-4CF1-9C58-CEA88AE4B3E9” because a file with the same name already exists." UserInfo={NSFilePath=/var/folders/r2/hxzthddn0vnd14jsz35qwcc40000gn/T/velora-repository-8D95A930-D1F7-4CF1-9C58-CEA88AE4B3E9/blocked-config, NSURL=file:///var/folders/r2/hxzthddn0vnd14jsz35qwcc40000gn/T/velora-repository-8D95A930-D1F7-4CF1-9C58-CEA88AE4B3E9/blocked-config, NSUnderlyingError=0x7592e448a0 {Error Domain=NSPOSIXErrorDomain Code=17 "File exists"}}
+2026-11-18 00:27:02.658 Velora[29841:108194506] Velora: failed to create config directory: Error Domain=NSCocoaErrorDomain Code=516 "The file “blocked-config” couldn’t be saved in the folder “velora-repository-8D95A930-D1F7-4CF1-9C58-CEA88AE4B3E9” because a file with the same name already exists." UserInfo={NSFilePath=/var/folders/r2/hxzthddn0vnd14jsz35qwcc40000gn/T/velora-repository-8D95A930-D1F7-4CF1-9C58-CEA88AE4B3E9/blocked-config, NSURL=file:///var/folders/r2/hxzthddn0vnd14jsz35qwcc40000gn/T/velora-repository-8D95A930-D1F7-4CF1-9C58-CEA88AE4B3E9/blocked-config, NSUnderlyingError=0x7592b00cf0 {Error Domain=NSPOSIXErrorDomain Code=17 "File exists"}}
+2026-11-18 00:27:02.665 Velora[29841:108194506] Velora: failed to create config directory: Error Domain=NSCocoaErrorDomain Code=516 "The file “blocked-config” couldn’t be saved in the folder “velora-repository-40AF5CF0-4E45-4E46-93EE-9FA086630D42” because a file with the same name already exists." UserInfo={NSFilePath=/var/folders/r2/hxzthddn0vnd14jsz35qwcc40000gn/T/velora-repository-40AF5CF0-4E45-4E46-93EE-9FA086630D42/blocked-config, NSURL=file:///var/folders/r2/hxzthddn0vnd14jsz35qwcc40000gn/T/velora-repository-40AF5CF0-4E45-4E46-93EE-9FA086630D42/blocked-config, NSUnderlyingError=0x7592b00f30 {Error Domain=NSPOSIXErrorDomain Code=17 "File exists"}}
+2026-11-18 00:27:02.684 Velora[29841:108194506] Velora: failed to create config directory: Error Domain=NSCocoaErrorDomain Code=516 "The file “blocked-config” couldn’t be saved in the folder “velora-repository-40AF5CF0-4E45-4E46-93EE-9FA086630D42” because a file with the same name already exists." UserInfo={NSFilePath=/var/folders/r2/hxzthddn0vnd14jsz35qwcc40000gn/T/velora-repository-40AF5CF0-4E45-4E46-93EE-9FA086630D42/blocked-config, NSURL=file:///var/folders/r2/hxzthddn0vnd14jsz35qwcc40000gn/T/velora-repository-40AF5CF0-4E45-4E46-93EE-9FA086630D42/blocked-config, NSUnderlyingError=0x7592e44a20 {Error Domain=NSPOSIXErrorDomain Code=17 "File exists"}}
+2026-11-18 00:27:02.695 Velora[29841:108194506] Velora: iCloud dictionary reconciliation failed: couldNotProject
+2026-11-18 00:27:02.915 Velora[29841:108194506] Velora: iCloud dictionary reconciliation failed: DecodingError.dataCorrupted: Data was corrupted. Debug description: The given data was not valid JSON.. Underlying error: Error Domain=NSCocoaErrorDomain Code=3840 "Unexpected character 'o' in expected null value around line 1, column 2." UserInfo={NSJSONSerializationErrorIndex=1, NSDebugDescription=Unexpected character 'o' in expected null value around line 1, column 2.}
+2026-11-18 00:27:03.419 Velora[29841:108194506] Velora: failed to persist learned.json: Error Domain=NSCocoaErrorDomain Code=516 "The file “account-learning” couldn’t be saved in the folder “velora-repository-D2C51559-E8CE-40B8-89CD-5BE1E0EBFB31” because a file with the same name already exists." UserInfo={NSFilePath=/var/folders/r2/hxzthddn0vnd14jsz35qwcc40000gn/T/velora-repository-D2C51559-E8CE-40B8-89CD-5BE1E0EBFB31/account-learning, NSURL=file:///var/folders/r2/hxzthddn0vnd14jsz35qwcc40000gn/T/velora-repository-D2C51559-E8CE-40B8-89CD-5BE1E0EBFB31/account-learning, NSUnderlyingError=0x7592451d40 {Error Domain=NSPOSIXErrorDomain Code=17 "File exists"}}
+2026-11-18 00:27:03.696 Velora[29841:108194506] Velora: failed to persist iCloud identity boundary: Error Domain=NSCocoaErrorDomain Code=516 "The file “blocked-identity” couldn’t be saved in the folder “velora-repository-A29085B6-3F9B-455A-9EFA-D3974D7AE71A” because a file with the same name already exists." UserInfo={NSFilePath=/var/folders/r2/hxzthddn0vnd14jsz35qwcc40000gn/T/velora-repository-A29085B6-3F9B-455A-9EFA-D3974D7AE71A/blocked-identity, NSURL=file:///var/folders/r2/hxzthddn0vnd14jsz35qwcc40000gn/T/velora-repository-A29085B6-3F9B-455A-9EFA-D3974D7AE71A/blocked-identity, NSUnderlyingError=0x7592e457d0 {Error Domain=NSPOSIXErrorDomain Code=17 "File exists"}}
+2026-11-18 00:27:03.881 Velora[29841:108194506] Velora: engine state → connecting
+2026-11-18 00:27:03.882 Velora[29841:108194506] Velora: engine state → ready
+2026-11-18 00:27:04.866 Velora[29841:108194506] Velora: engine state → connecting
+2026-11-18 00:27:05.013 Velora[29841:108194506] Velora: engine state → connecting
+2026-11-18 00:27:05.182 Velora[29841:108194506] Velora: engine state → connecting
+2026-11-18 00:27:05.779 Velora[29841:108194506] Velora: engine state → connecting
+2026-11-18 00:27:05.785 Velora[29841:108194506] Velora: engine state → ready
+2026-11-18 00:27:05.995 Velora[29841:108194506] Velora: engine state → connecting
+2026-11-18 00:27:06.734 Velora[29841:108194506] Velora: engine state → launching
+2026-11-18 00:27:06.740 Velora[29841:108194506] Velora: engine state → connecting
+2026-11-18 00:27:06.806 Velora[29841:108194506] Velora: engine state → launching
+2026-11-18 00:27:06.940 Velora[29841:108194506] Velora: engine state → connecting
+2026-11-18 00:27:07.102 Velora[29841:108194506] Velora: engine state → launching
+2026-11-18 00:27:07.106 Velora[29841:108194506] Velora: engine state → connecting
+2026-11-18 00:27:07.113 Velora[29841:108194506] Velora: engine state → launching
+2026-11-18 00:27:07.235 Velora[29841:108194506] Velora: engine state → connecting
+2026-11-18 00:27:07.362 Velora[29841:108194506] Velora: engine state → launching
+2026-11-18 00:27:07.370 Velora[29841:108194506] Velora: engine state → connecting
+2026-11-18 00:27:07.377 Velora[29841:108194506] Velora: engine state → launching
+2026-11-18 00:27:07.497 Velora[29841:108194506] Velora: engine state → connecting
+2026-11-18 00:27:07.620 Velora[29841:108194506] Velora: engine state → launching
+2026-11-18 00:27:07.635 Velora[29841:108194506] Velora: engine state → connecting
+2026-11-18 00:27:07.653 Velora[29841:108194506] Velora: engine state → launching
+2026-11-18 00:27:07.770 Velora[29841:108194506] Velora: engine state → connecting
+2026-11-18 00:27:07.895 Velora[29841:108194506] Velora: engine state → launching
+2026-11-18 00:27:07.905 Velora[29841:108194506] Velora: engine state → connecting
+2026-11-18 00:27:07.910 Velora[29841:108194506] Velora: engine state → launching
+2026-11-18 00:27:08.066 Velora[29841:108194506] Velora: engine state → connecting
+2026-11-18 00:27:08.161 Velora[29841:108194506] Velora: edit hotkey now ⇧⌘E
+2026-11-18 00:27:08.161 Velora[29841:108194506] Velora: edit hotkey combo matched ⇧⌘E (keyCode=14 flags=0x120000)
+2026-11-18 00:27:08.161 Velora[29841:108194506] Velora: edit hotkey down (source=nsevent)
+2026-11-18 00:27:08.161 Velora[29841:108194506] Velora: edit hotkey up (source=nsevent)
+2026-11-18 00:27:08.161 Velora[29841:108194506] Velora: proofread hotkey combo matched ⌃⇧G (keyCode=5 flags=0x60000)
+2026-11-18 00:27:08.161 Velora[29841:108194506] Velora: proofread hotkey down (source=nsevent)
+2026-11-18 00:27:08.161 Velora[29841:108194506] Velora: proofread hotkey up (source=nsevent)
+2026-11-18 00:27:08.161 Velora[29841:108194506] Velora: edit hotkey combo matched ⇧⌘E (keyCode=14 flags=0x120000)
+2026-11-18 00:27:08.161 Velora[29841:108194506] Velora: edit hotkey down (source=nsevent)
+2026-11-18 00:27:08.183 Velora[29841:108194506] Velora: edit hotkey up (source=nsevent)
+2026-11-18 00:27:08.201 Velora[29841:108194506] Velora: combo hotkey ignored — filtering event tap unavailable
+2026-11-18 00:27:18.563 Velora[29841:108194506] Velora: failed to open history database at /var/folders/r2/hxzthddn0vnd14jsz35qwcc40000gn/T/velora-history-failure-13A842DF-321A-484C-96FE-DE94A7332DEE/not-a-directory/history.sqlite3
+2026-11-18 00:27:18.580 Velora[29841:108204685] Velora: quality observation update failed: attempt to write a readonly database
+2026-11-18 00:27:18.580 Velora[29841:108204685] Velora: history insert failed: attempt to write a readonly database
+2026-11-18 00:27:18.652 Velora[29841:108194506] Velora: history trial invalidation failed: Couldn’t save feedback. Check that Velora can write to its local folder, then try again.
+2026-11-18 00:27:18.659 Velora[29841:108204686] Velora: history trial invalidation failed: Couldn’t save feedback. Check that Velora can write to its local folder, then try again.
+2026-11-18 00:27:19.832 Velora[29841:108194506] Velora: meeting 10C9EDDD-787D-4C05-BADA-E6937BD19D88 processing failed (transcription): Meeting audio is missing or unreadable
+2026-11-18 00:27:19.850 Velora[29841:108194506] Velora: meeting 650E5292-A66F-4131-A17A-A726F30819F8 processing failed (notes): local notes generation failed (timeout_hard)
+2026-11-18 00:27:20.027 Velora[29841:108194506] Velora: meeting 650E5292-A66F-4131-A17A-A726F30819F8 processing failed (recreate): decode failed
+2026-11-18 00:27:20.039 Velora[29841:108194506] Velora: meeting 650E5292-A66F-4131-A17A-A726F30819F8 processing failed (recreate): No speech was found in the Them audio; the previous transcript was kept
+2026-11-18 00:27:20.049 Velora[29841:108194506] Velora: meeting 650E5292-A66F-4131-A17A-A726F30819F8 processing cancelled
+2026-11-18 00:27:20.056 Velora[29841:108194506] Velora: meeting 650E5292-A66F-4131-A17A-A726F30819F8 processing cancelled
+2026-11-18 00:27:20.068 Velora[29841:108194506] Velora: meeting 650E5292-A66F-4131-A17A-A726F30819F8 processing cancelled
+2026-11-18 00:27:20.070 Velora[29841:108194506] Velora: meeting 2514706A-BF7D-45AF-8A5F-A91A0AD064E0 processing cancelled
+2026-11-18 00:27:20.078 Velora[29841:108194506] Velora: meeting F12D9A09-3D16-4165-815A-C952F3B41FE2 processing cancelled
+2026-11-18 00:27:20.172 Velora[29841:108194506] Velora: meeting F69BF20B-CB5A-4F1F-A5A9-82EE3A9F7A3A skipped the Me track: unsupported meeting audio format
+2026-11-18 00:27:20.254 Velora[29841:108194506] Velora: meeting 99C6A0A3-5E91-49B6-9682-E942CF5FDC1D skipped the Me track: unsupported meeting audio format
+2026-11-18 00:27:20.255 Velora[29841:108194506] Velora: meeting 99C6A0A3-5E91-49B6-9682-E942CF5FDC1D skipped the Them track: no audio in file
+2026-11-18 00:27:20.259 Velora[29841:108194506] Velora: meeting 99C6A0A3-5E91-49B6-9682-E942CF5FDC1D processing failed (transcription): unsupported meeting audio format
+2026-11-18 00:27:20.283 Velora[29841:108194506] Velora: meeting 7BF04E46-2701-423C-9B4C-3187EEF6D8E5 processing failed (transcription): transcription failed: metal out of memory
+2026-11-18 00:27:20.296 Velora[29841:108194506] Velora: meeting 98C8BE84-4FEC-4A6C-A83A-04D05EDD4039 audio could not be read (meeting audio conversion timed out); retry 1 of 3
+2026-11-18 00:27:20.297 Velora[29841:108194506] Velora: meeting 98C8BE84-4FEC-4A6C-A83A-04D05EDD4039 audio could not be read (meeting audio conversion timed out); retry 2 of 3
+2026-11-18 00:27:20.299 Velora[29841:108194506] Velora: meeting 98C8BE84-4FEC-4A6C-A83A-04D05EDD4039 audio could not be read (meeting audio conversion timed out); retry 3 of 3
+2026-11-18 00:27:20.300 Velora[29841:108194506] Velora: meeting 98C8BE84-4FEC-4A6C-A83A-04D05EDD4039 processing failed (transcription): meeting audio conversion timed out
+2026-11-18 00:27:20.313 Velora[29841:108194506] Velora: meeting D6AF59DC-446D-4912-93D9-A11183D1C378 audio could not be read (meeting audio conversion timed out); retry 1 of 3
+2026-11-18 00:27:20.314 Velora[29841:108194506] Velora: meeting D6AF59DC-446D-4912-93D9-A11183D1C378 processing cancelled
+2026-11-18 00:27:21.067 Velora[29841:108194506] Velora: meeting 1C9C76EB-2F52-42A1-8698-E0F84DC282FF processing failed (transcription): The audio file could not be read
+2026-11-18 00:27:21.103 Velora[29841:108194506] Velora: meeting A1407639-190D-4A0D-BF70-12720FBC65CA processing failed (notes): local notes generation failed (timeout_hard)
+2026-11-18 00:27:21.138 Velora[29841:108194506] Velora: meeting 01A4F6BB-2A61-4CC2-90E3-86C9170D7855 processing cancelled
+2026-11-18 00:27:21.152 Velora[29841:108194506] Velora: meeting A04485BB-EA85-4CF9-80E9-63342A632EF1 automatic notes retry could not be claimed
+2026-11-18 00:27:21.166 Velora[29841:108194506] Velora: meeting 4A5DEDD9-BC15-4A5E-9329-E7575C4C71AC processing cancelled
+2026-11-18 00:27:21.167 Velora[29841:108194506] Velora: meeting 4A5DEDD9-BC15-4A5E-9329-E7575C4C71AC cancel could not be saved; it will not restart in this run
+2026-11-18 00:27:21.238 Velora[29841:108194506] Velora: meeting 71478368-1007-4A3F-83AE-828F6FE9F11E processing failed (notes): local notes generation failed
+2026-11-18 00:27:21.262 Velora[29841:108194506] Velora: meeting notes save failed: injected write failure
+2026-11-18 00:27:21.263 Velora[29841:108194506] Velora: meeting 5C77F654-50A9-4664-AEF3-8A703E094CEC notes could not be saved; writing them again
+2026-11-18 00:27:22.266 Velora[29841:108194506] Velora: meeting notes save failed: injected write failure
+2026-11-18 00:27:22.266 Velora[29841:108194506] Velora: meeting 5C77F654-50A9-4664-AEF3-8A703E094CEC notes could not be saved; generating them again
+2026-11-18 00:27:22.266 Velora[29841:108194506] Velora: meeting notes save failed: injected write failure
+2026-11-18 00:27:22.267 Velora[29841:108194506] Velora: meeting 5C77F654-50A9-4664-AEF3-8A703E094CEC notes could not be saved; writing them again
+2026-11-18 00:27:23.269 Velora[29841:108194506] Velora: meeting notes save failed: injected write failure
+2026-11-18 00:27:23.274 Velora[29841:108194506] Velora: meeting 5C77F654-50A9-4664-AEF3-8A703E094CEC processing failed (notes): Meeting notes could not be saved
+2026-11-18 00:27:23.274 Velora[29841:108194506] Velora: meeting 5C77F654-50A9-4664-AEF3-8A703E094CEC failure could not be saved; it will not restart in this run
+2026-11-18 00:27:23.302 Velora[29841:108194506] Velora: meeting notes save failed: injected write failure
+2026-11-18 00:27:23.302 Velora[29841:108194506] Velora: meeting 194D3E71-ABA6-4449-B045-0891F7C9C289 notes could not be saved; writing them again
+2026-11-18 00:27:25.559 Velora[29841:108194506] Velora: meeting 34158A81-4BD0-4BBE-BCF6-2220CA34E28A processing failed (notes): Velora's speech engine kept restarting, so processing stopped. In Meetings, open this meeting and choose Retry Notes.
+2026-11-18 00:27:25.978 Velora[29841:108194506] Velora: meeting delete failed: refused
+2026-11-18 00:27:25.982 Velora[29841:108194506] Velora: meeting delete left meeting 7F7C97C4-895E-4C5A-A689-0D157ED9B2B6 in place
+2026-11-18 00:27:25.984 Velora[29841:108194506] Velora: meeting delete check failed (5): not an error
+2026-11-18 00:27:25.986 Velora[29841:108194506] Velora: meeting delete check failed (1): not an error
+2026-11-18 00:27:26.335 Velora[29841:108194506] Velora: meeting delete failed: refused
+2026-11-18 00:27:26.444 Velora[29841:108194506] Velora: meeting delete failed: refused
+2026-11-18 00:27:26.657 Velora[29841:108194506] Velora: meeting delete failed: refused
+2026-11-18 00:27:26.888 Velora[29841:108194506] Velora: meeting delete failed: refused
+2026-11-18 00:27:26.910 Velora[29841:108194506] Velora: meeting delete failed: refused
+2026-11-18 00:27:26.958 Velora[29841:108194506] Velora: meeting delete failed: refused
+2026-11-18 00:27:27.007 Velora[29841:108194506] Velora: meeting delete failed: refused
+2026-11-18 00:27:27.418 Velora[29841:108194506] Velora: meeting delete failed: refused
+2026-11-18 00:27:27.460 Velora[29841:108194506] Audio files cannot be non-interleaved. Ignoring setting AVLinearPCMIsNonInterleaved YES.
+2026-11-18 00:27:27.468 Velora[29841:108194506] Audio files cannot be non-interleaved. Ignoring setting AVLinearPCMIsNonInterleaved YES.
+2026-11-18 00:27:27.469 Velora[29841:108194506] Audio files cannot be non-interleaved. Ignoring setting AVLinearPCMIsNonInterleaved YES.
+2026-11-18 00:27:51.206 Velora[29841:108194506] Velora: local control socket ready
+2026-11-18 00:27:51.206 Velora[29841:108194506] Velora: control socket already owned by a running instance
+2026-11-18 00:27:52.019 Velora[29841:108194506] Velora: HUD position=bottomRight origin=(2884, 31) frame={{2884, 31}, {480, 160}}
+2026-11-18 00:27:55.246 Velora[29841:108194506] Velora: accessibility granted during onboarding
+2026-11-18 00:27:55.339 Velora[29841:108194506] Velora: engine state → connecting
+2026-11-18 00:28:00.304 Velora[29841:108194506] Velora: own-window insert — first responder is not a text target
+2026-11-18 00:28:00.304 Velora[29841:108194506] Velora: own-window insert — first responder is not a text target
+2026-11-18 00:28:00.307 Velora[29841:108194506] Velora: own-window insert via NSTextView chars=5
+2026-11-18 00:28:00.308 Velora[29841:108194506] Velora: own-window insert — text view is read-only
+2026-11-18 00:28:00.309 Velora[29841:108194506] Velora: own-window insert — first responder is not a text target
+2026-11-18 00:28:00.417 Velora[29841:108194506] Velora: error HUD — Selftest: start refused
+2026-11-18 00:28:00.816 Velora[29841:108194506] Velora: error HUD — Selftest: start refused
+2026-11-18 00:28:01.165 Velora[29841:108194506] Velora: error HUD — Selftest: start refused
+2026-11-18 00:28:01.548 Velora[29841:108194506] Velora: error HUD — Selftest: start refused
+2026-11-18 00:28:02.465 Velora[29841:108194506] Velora: recording refused — secure input active
+2026-11-18 00:28:02.465 Velora[29841:108194506] Velora: error HUD — Secure field. Can't dictate
+2026-11-18 00:28:02.466 Velora[29841:108194506] Velora: engine start session=21A11BC7-E96B-4B3A-BF2D-91FB3DD68B44 target=unknown
+2026-11-18 00:28:02.467 Velora[29841:108194506] Velora: phase idle → starting(locked)
+2026-11-18 00:28:02.467 Velora[29841:108194506] Velora: glossary refused=noWindow stage=pin reason=noTarget
+2026-11-18 00:28:02.489 Velora[29841:108194506] Velora: phase starting(locked) → recording(locked)
+2026-11-18 00:28:02.498 Velora[29841:108194506] Velora: stop-path session=21A11BC7-E96B-4B3A-BF2D-91FB3DD68B44 stage=requested elapsed_ms=0 uptime_ms=1015565565
+2026-11-18 00:28:02.499 Velora[29841:108194506] Velora: phase recording(locked) → transcribing
+2026-11-18 00:28:02.499 Velora[29841:108194506] Velora: stop-path session=21A11BC7-E96B-4B3A-BF2D-91FB3DD68B44 stage=capture-drained elapsed_ms=0 uptime_ms=1015565565
+2026-11-18 00:28:02.499 Velora[29841:108194506] Velora: engine stop session=21A11BC7-E96B-4B3A-BF2D-91FB3DD68B44
+2026-11-18 00:28:02.499 Velora[29841:108194506] Velora: stop-path session=21A11BC7-E96B-4B3A-BF2D-91FB3DD68B44 stage=stop-enqueued elapsed_ms=0 uptime_ms=1015565566
+2026-11-18 00:28:02.499 Velora[29841:108194506] Velora: hotkey found stalled transcription after 21.0s
+2026-11-18 00:28:02.499 Velora[29841:108194506] Velora: error HUD — Transcription timed out
+2026-11-18 00:28:02.499 Velora[29841:108194506] Velora: phase transcribing → idle
+2026-11-18 00:28:02.499 Velora[29841:108194506] Velora: stop-path session=21A11BC7-E96B-4B3A-BF2D-91FB3DD68B44 stage=final-received elapsed_ms=0 uptime_ms=1015565566
+2026-11-18 00:28:02.499 Velora[29841:108194506] Velora: engine final session=21A11BC7-E96B-4B3A-BF2D-91FB3DD68B44 chars=11 phase=idle
+2026-11-18 00:28:02.507 Velora[29841:108194506] Velora: staged final output chars=11 changeCount=1
+2026-11-18 00:28:02.507 Velora[29841:108194506] Velora: stop-path session=21A11BC7-E96B-4B3A-BF2D-91FB3DD68B44 stage=clipboard-staged elapsed_ms=8 uptime_ms=1015565573
+2026-11-18 00:28:02.508 Velora[29841:108194506] Velora: insert method=clipboard (nowhere to type) session=21A11BC7-E96B-4B3A-BF2D-91FB3DD68B44
+2026-11-18 00:28:02.512 Velora[29841:108194506] Velora: ignoring final for session=21A11BC7-E96B-4B3A-BF2D-91FB3DD68B44 (current=21A11BC7-E96B-4B3A-BF2D-91FB3DD68B44 cancelled=none consumed=21A11BC7-E96B-4B3A-BF2D-91FB3DD68B44)
+2026-11-18 00:28:02.513 Velora[29841:108194506] Velora: engine start session=DEF7FFA0-5D73-4812-AA58-DED02C90659C target=unknown
+2026-11-18 00:28:02.513 Velora[29841:108194506] Velora: phase idle → starting(locked)
+2026-11-18 00:28:02.513 Velora[29841:108194506] Velora: glossary refused=noWindow stage=pin reason=noTarget
+2026-11-18 00:28:02.561 Velora[29841:108194506] Velora: phase starting(locked) → recording(locked)
+2026-11-18 00:28:02.574 Velora[29841:108194506] Velora: phase recording(locked) → transcribing
+2026-11-18 00:28:02.574 Velora[29841:108194506] Velora: hotkey found stalled transcription after 21.0s
+2026-11-18 00:28:02.574 Velora[29841:108194506] Velora: error HUD — Transcription timed out
+2026-11-18 00:28:02.574 Velora[29841:108194506] Velora: phase transcribing → idle
+2026-11-18 00:28:02.576 Velora[29841:108194506] Velora: recovering interrupted dictation session=DEF7FFA0-5D73-4812-AA58-DED02C90659C
+2026-11-18 00:28:02.576 Velora[29841:108194506] Velora: engine start session=0C904ED4-BA01-40FF-BE60-75C79527C2B1 target=unknown
+2026-11-18 00:28:02.577 Velora[29841:108194506] Velora: phase idle → starting(locked)
+2026-11-18 00:28:02.577 Velora[29841:108194506] Velora: glossary refused=noWindow stage=pin reason=noTarget
+2026-11-18 00:28:02.724 Velora[29841:108194506] Velora: phase starting(locked) → recording(locked)
+2026-11-18 00:28:02.734 Velora[29841:108194506] Velora: stop-path session=0C904ED4-BA01-40FF-BE60-75C79527C2B1 stage=requested elapsed_ms=0 uptime_ms=1015565800
+2026-11-18 00:28:02.734 Velora[29841:108194506] Velora: phase recording(locked) → transcribing
+2026-11-18 00:28:02.734 Velora[29841:108194506] Velora: stop-path session=0C904ED4-BA01-40FF-BE60-75C79527C2B1 stage=capture-drained elapsed_ms=0 uptime_ms=1015565801
+2026-11-18 00:28:02.734 Velora[29841:108194506] Velora: engine stop session=0C904ED4-BA01-40FF-BE60-75C79527C2B1
+2026-11-18 00:28:02.734 Velora[29841:108194506] Velora: stop-path session=0C904ED4-BA01-40FF-BE60-75C79527C2B1 stage=stop-enqueued elapsed_ms=0 uptime_ms=1015565801
+2026-11-18 00:28:03.751 Velora[29841:108194506] Velora: stop-path session=0C904ED4-BA01-40FF-BE60-75C79527C2B1 stage=final-received elapsed_ms=1016 uptime_ms=1015566817
+2026-11-18 00:28:03.751 Velora[29841:108194506] Velora: engine final session=0C904ED4-BA01-40FF-BE60-75C79527C2B1 chars=9 phase=transcribing
+2026-11-18 00:28:03.751 Velora[29841:108194506] Velora: staged final output chars=9 changeCount=2
+2026-11-18 00:28:03.751 Velora[29841:108194506] Velora: stop-path session=0C904ED4-BA01-40FF-BE60-75C79527C2B1 stage=clipboard-staged elapsed_ms=1017 uptime_ms=1015566818
+2026-11-18 00:28:03.752 Velora[29841:108194506] Velora: insert method=clipboard (nowhere to type) session=0C904ED4-BA01-40FF-BE60-75C79527C2B1
+2026-11-18 00:28:03.752 Velora[29841:108194506] Velora: phase transcribing → idle
+2026-11-18 00:28:03.754 Velora[29841:108194506] Velora: engine start session=1CEA03F6-5FFD-436B-A885-C9784DE10C7B target=unknown
+2026-11-18 00:28:03.754 Velora[29841:108194506] Velora: phase idle → starting(locked)
+2026-11-18 00:28:03.754 Velora[29841:108194506] Velora: glossary refused=noWindow stage=pin reason=noTarget
+2026-11-18 00:28:03.844 Velora[29841:108194506] Velora: phase starting(locked) → recording(locked)
+2026-11-18 00:28:03.854 Velora[29841:108194506] Velora: stop-path session=1CEA03F6-5FFD-436B-A885-C9784DE10C7B stage=requested elapsed_ms=0 uptime_ms=1015566921
+2026-11-18 00:28:03.855 Velora[29841:108194506] Velora: phase recording(locked) → transcribing
+2026-11-18 00:28:03.855 Velora[29841:108194506] Velora: stop-path session=1CEA03F6-5FFD-436B-A885-C9784DE10C7B stage=capture-drained elapsed_ms=0 uptime_ms=1015566921
+2026-11-18 00:28:03.855 Velora[29841:108194506] Velora: engine stop session=1CEA03F6-5FFD-436B-A885-C9784DE10C7B
+2026-11-18 00:28:03.855 Velora[29841:108194506] Velora: stop-path session=1CEA03F6-5FFD-436B-A885-C9784DE10C7B stage=stop-enqueued elapsed_ms=0 uptime_ms=1015566921
+2026-11-18 00:28:03.855 Velora[29841:108194506] Velora: hotkey found stalled transcription after 21.0s
+2026-11-18 00:28:03.855 Velora[29841:108194506] Velora: error HUD — Transcription timed out
+2026-11-18 00:28:03.855 Velora[29841:108194506] Velora: phase transcribing → idle
+2026-11-18 00:28:03.855 Velora[29841:108194506] Velora: stop-path session=1CEA03F6-5FFD-436B-A885-C9784DE10C7B stage=final-received elapsed_ms=0 uptime_ms=1015566922
+2026-11-18 00:28:03.855 Velora[29841:108194506] Velora: engine final session=1CEA03F6-5FFD-436B-A885-C9784DE10C7B chars=10 phase=idle
+2026-11-18 00:28:03.856 Velora[29841:108194506] Velora: staged final output chars=10 changeCount=3
+2026-11-18 00:28:03.856 Velora[29841:108194506] Velora: stop-path session=1CEA03F6-5FFD-436B-A885-C9784DE10C7B stage=clipboard-staged elapsed_ms=1 uptime_ms=1015566922
+2026-11-18 00:28:03.856 Velora[29841:108194506] Velora: insert method=clipboard (nowhere to type) session=1CEA03F6-5FFD-436B-A885-C9784DE10C7B
+2026-11-18 00:28:03.857 Velora[29841:108194506] Velora: engine start session=2C8A2FBA-D307-440A-94CC-8A3D4972F164 target=unknown
+2026-11-18 00:28:03.857 Velora[29841:108194506] Velora: phase idle → starting(locked)
+2026-11-18 00:28:03.857 Velora[29841:108194506] Velora: glossary refused=noWindow stage=pin reason=noTarget
+2026-11-18 00:28:03.875 Velora[29841:108194506] Velora: phase starting(locked) → recording(locked)
+2026-11-18 00:28:03.946 Velora[29841:108194506] Velora: stop-path session=2C8A2FBA-D307-440A-94CC-8A3D4972F164 stage=requested elapsed_ms=0 uptime_ms=1015567013
+2026-11-18 00:28:03.946 Velora[29841:108194506] Velora: phase recording(locked) → transcribing
+2026-11-18 00:28:03.947 Velora[29841:108194506] Velora: stop-path session=2C8A2FBA-D307-440A-94CC-8A3D4972F164 stage=capture-drained elapsed_ms=0 uptime_ms=1015567013
+2026-11-18 00:28:03.947 Velora[29841:108194506] Velora: engine stop session=2C8A2FBA-D307-440A-94CC-8A3D4972F164
+2026-11-18 00:28:03.947 Velora[29841:108194506] Velora: stop-path session=2C8A2FBA-D307-440A-94CC-8A3D4972F164 stage=stop-enqueued elapsed_ms=0 uptime_ms=1015567013
+2026-11-18 00:28:03.947 Velora[29841:108194506] Velora: engine cancel session=2C8A2FBA-D307-440A-94CC-8A3D4972F164
+2026-11-18 00:28:03.947 Velora[29841:108194506] Velora: phase transcribing → idle
+2026-11-18 00:28:03.947 Velora[29841:108194506] Velora: engine state → launching
+2026-11-18 00:28:03.947 Velora[29841:108194506] Velora: engine start session=8A0E3F4F-2446-4DB7-8CB0-D9103C9B6F1A target=unknown
+2026-11-18 00:28:03.947 Velora[29841:108194506] Velora: phase idle → starting(locked)
+2026-11-18 00:28:03.947 Velora[29841:108194506] Velora: glossary refused=noWindow stage=pin reason=noTarget
+2026-11-18 00:28:03.965 Velora[29841:108194506] Velora: phase starting(locked) → recording(locked)
+2026-11-18 00:28:03.976 Velora[29841:108194506] Velora: stop-path session=8A0E3F4F-2446-4DB7-8CB0-D9103C9B6F1A stage=requested elapsed_ms=0 uptime_ms=1015567042
+2026-11-18 00:28:03.976 Velora[29841:108194506] Velora: phase recording(locked) → transcribing
+2026-11-18 00:28:03.976 Velora[29841:108194506] Velora: stop-path session=8A0E3F4F-2446-4DB7-8CB0-D9103C9B6F1A stage=capture-drained elapsed_ms=0 uptime_ms=1015567043
+2026-11-18 00:28:03.976 Velora[29841:108194506] Velora: engine stop session=8A0E3F4F-2446-4DB7-8CB0-D9103C9B6F1A
+2026-11-18 00:28:03.976 Velora[29841:108194506] Velora: stop-path session=8A0E3F4F-2446-4DB7-8CB0-D9103C9B6F1A stage=stop-enqueued elapsed_ms=0 uptime_ms=1015567043
+2026-11-18 00:28:03.976 Velora[29841:108194506] Velora: stop-path session=8A0E3F4F-2446-4DB7-8CB0-D9103C9B6F1A stage=final-received elapsed_ms=0 uptime_ms=1015567043
+2026-11-18 00:28:03.976 Velora[29841:108194506] Velora: engine final session=8A0E3F4F-2446-4DB7-8CB0-D9103C9B6F1A chars=10 phase=transcribing
+2026-11-18 00:28:03.977 Velora[29841:108194506] Velora: staged final output chars=10 changeCount=4
+2026-11-18 00:28:03.977 Velora[29841:108194506] Velora: stop-path session=8A0E3F4F-2446-4DB7-8CB0-D9103C9B6F1A stage=clipboard-staged elapsed_ms=1 uptime_ms=1015567044
+2026-11-18 00:28:03.978 Velora[29841:108194506] Velora: insert method=clipboard (nowhere to type) session=8A0E3F4F-2446-4DB7-8CB0-D9103C9B6F1A
+2026-11-18 00:28:03.978 Velora[29841:108194506] Velora: phase transcribing → idle
+2026-11-18 00:28:03.980 Velora[29841:108194506] Velora: ignoring final for session=2C8A2FBA-D307-440A-94CC-8A3D4972F164 (current=8A0E3F4F-2446-4DB7-8CB0-D9103C9B6F1A cancelled=2C8A2FBA-D307-440A-94CC-8A3D4972F164 consumed=8A0E3F4F-2446-4DB7-8CB0-D9103C9B6F1A)
+2026-11-18 00:28:03.981 Velora[29841:108194506] Velora: engine start session=B428CD11-93BE-4C62-B1FD-3033CE6652BC target=unknown
+2026-11-18 00:28:03.981 Velora[29841:108194506] Velora: phase idle → starting(locked)
+2026-11-18 00:28:03.981 Velora[29841:108194506] Velora: glossary refused=noWindow stage=pin reason=noTarget
+2026-11-18 00:28:04.004 Velora[29841:108194506] Velora: phase starting(locked) → recording(locked)
+2026-11-18 00:28:04.020 Velora[29841:108194506] Velora: stop-path session=B428CD11-93BE-4C62-B1FD-3033CE6652BC stage=requested elapsed_ms=0 uptime_ms=1015567086
+2026-11-18 00:28:04.020 Velora[29841:108194506] Velora: phase recording(locked) → transcribing
+2026-11-18 00:28:04.020 Velora[29841:108194506] Velora: stop-path session=B428CD11-93BE-4C62-B1FD-3033CE6652BC stage=capture-drained elapsed_ms=0 uptime_ms=1015567086
+2026-11-18 00:28:04.020 Velora[29841:108194506] Velora: engine stop session=B428CD11-93BE-4C62-B1FD-3033CE6652BC
+2026-11-18 00:28:04.020 Velora[29841:108194506] Velora: stop-path session=B428CD11-93BE-4C62-B1FD-3033CE6652BC stage=stop-enqueued elapsed_ms=0 uptime_ms=1015567087
+2026-11-18 00:28:04.020 Velora[29841:108194506] Velora: hotkey found stalled transcription after 21.0s
+2026-11-18 00:28:04.020 Velora[29841:108194506] Velora: error HUD — Transcription timed out
+2026-11-18 00:28:04.020 Velora[29841:108194506] Velora: phase transcribing → idle
+2026-11-18 00:28:04.020 Velora[29841:108194506] Velora: ignoring final for session=B428CD11-93BE-4C62-B1FD-3033CE6652BC (current=B428CD11-93BE-4C62-B1FD-3033CE6652BC cancelled=B428CD11-93BE-4C62-B1FD-3033CE6652BC consumed=8A0E3F4F-2446-4DB7-8CB0-D9103C9B6F1A)
+2026-11-18 00:28:04.021 Velora[29841:108194506] Velora: engine start session=F04EE1A2-94B3-48BF-8770-B8818BBC2464 target=unknown
+2026-11-18 00:28:04.021 Velora[29841:108194506] Velora: phase idle → starting(locked)
+2026-11-18 00:28:04.021 Velora[29841:108194506] Velora: glossary refused=noWindow stage=pin reason=noTarget
+2026-11-18 00:28:04.163 Velora[29841:108194506] Velora: phase starting(locked) → recording(locked)
+2026-11-18 00:28:04.163 Velora[29841:108194506] Velora: stop-path session=F04EE1A2-94B3-48BF-8770-B8818BBC2464 stage=requested elapsed_ms=0 uptime_ms=1015567230
+2026-11-18 00:28:04.163 Velora[29841:108194506] Velora: phase recording(locked) → transcribing
+2026-11-18 00:28:04.175 Velora[29841:108194506] Velora: stop-path session=F04EE1A2-94B3-48BF-8770-B8818BBC2464 stage=capture-drained elapsed_ms=11 uptime_ms=1015567241
+2026-11-18 00:28:04.175 Velora[29841:108194506] Velora: engine stop session=F04EE1A2-94B3-48BF-8770-B8818BBC2464
+2026-11-18 00:28:04.175 Velora[29841:108194506] Velora: stop-path session=F04EE1A2-94B3-48BF-8770-B8818BBC2464 stage=stop-enqueued elapsed_ms=11 uptime_ms=1015567241
+2026-11-18 00:28:04.175 Velora[29841:108194506] Velora: engine cancel session=F04EE1A2-94B3-48BF-8770-B8818BBC2464
+2026-11-18 00:28:04.175 Velora[29841:108194506] Velora: phase transcribing → idle
+2026-11-18 00:28:04.176 Velora[29841:108194506] Velora: recovering interrupted dictation session=DEF7FFA0-5D73-4812-AA58-DED02C90659C
+2026-11-18 00:28:04.179 Velora[29841:108194506] Velora: recovering interrupted dictation session=frozen-peer
+2026-11-18 00:28:04.180 Velora[29841:108194506] Velora: engine start session=6F62CAFA-E156-4A50-856D-20006A4B2379 target=unknown
+2026-11-18 00:28:04.180 Velora[29841:108194506] Velora: phase idle → starting(locked)
+2026-11-18 00:28:04.180 Velora[29841:108194506] Velora: glossary refused=noWindow stage=pin reason=noTarget
+2026-11-18 00:28:04.195 Velora[29841:108194506] Velora: phase starting(locked) → recording(locked)
+2026-11-18 00:28:04.211 Velora[29841:108194506] Velora: stop-path session=6F62CAFA-E156-4A50-856D-20006A4B2379 stage=requested elapsed_ms=0 uptime_ms=1015567277
+2026-11-18 00:28:04.211 Velora[29841:108194506] Velora: phase recording(locked) → transcribing
+2026-11-18 00:28:04.212 Velora[29841:108194506] Velora: stop-path session=6F62CAFA-E156-4A50-856D-20006A4B2379 stage=capture-drained elapsed_ms=1 uptime_ms=1015567278
+2026-11-18 00:28:04.212 Velora[29841:108194506] Velora: engine stop session=6F62CAFA-E156-4A50-856D-20006A4B2379
+2026-11-18 00:28:04.212 Velora[29841:108194506] Velora: stop-path session=6F62CAFA-E156-4A50-856D-20006A4B2379 stage=stop-enqueued elapsed_ms=1 uptime_ms=1015567279
+2026-11-18 00:28:04.212 Velora[29841:108194506] Velora: error HUD — Recovery stalled. Engine restarting
+2026-11-18 00:28:04.212 Velora[29841:108194506] Velora: phase transcribing → idle
+2026-11-18 00:28:04.213 Velora[29841:108194506] Velora: recovering interrupted dictation session=DEF7FFA0-5D73-4812-AA58-DED02C90659C
+2026-11-18 00:28:04.214 Velora[29841:108194506] Velora: recovering interrupted dictation session=frozen-peer
+2026-11-18 00:28:04.214 Velora[29841:108194506] Velora: engine start session=DCEA552E-818D-48DC-860F-2F531E6B6E10 target=unknown
+2026-11-18 00:28:04.214 Velora[29841:108194506] Velora: phase idle → starting(locked)
+2026-11-18 00:28:04.214 Velora[29841:108194506] Velora: glossary refused=noWindow stage=pin reason=noTarget
+2026-11-18 00:28:04.374 Velora[29841:108194506] Velora: phase starting(locked) → recording(locked)
+2026-11-18 00:28:04.384 Velora[29841:108194506] Velora: stop-path session=DCEA552E-818D-48DC-860F-2F531E6B6E10 stage=requested elapsed_ms=0 uptime_ms=1015567450
+2026-11-18 00:28:04.384 Velora[29841:108194506] Velora: phase recording(locked) → transcribing
+2026-11-18 00:28:04.384 Velora[29841:108194506] Velora: stop-path session=DCEA552E-818D-48DC-860F-2F531E6B6E10 stage=capture-drained elapsed_ms=0 uptime_ms=1015567451
+2026-11-18 00:28:04.384 Velora[29841:108194506] Velora: engine stop session=DCEA552E-818D-48DC-860F-2F531E6B6E10
+2026-11-18 00:28:04.384 Velora[29841:108194506] Velora: stop-path session=DCEA552E-818D-48DC-860F-2F531E6B6E10 stage=stop-enqueued elapsed_ms=0 uptime_ms=1015567451
+2026-11-18 00:28:04.384 Velora[29841:108194506] Velora: hotkey found stalled transcription after 21.0s
+2026-11-18 00:28:04.384 Velora[29841:108194506] Velora: error HUD — Transcription timed out
+2026-11-18 00:28:04.384 Velora[29841:108194506] Velora: phase transcribing → idle
+2026-11-18 00:28:04.386 Velora[29841:108194506] Velora: engine start session=BE71C26A-48FC-4994-9DB5-B09F85DDCE1A target=unknown
+2026-11-18 00:28:04.386 Velora[29841:108194506] Velora: phase idle → starting(locked)
+2026-11-18 00:28:04.386 Velora[29841:108194506] Velora: glossary refused=noWindow stage=pin reason=noTarget
+2026-11-18 00:28:04.423 Velora[29841:108194506] Velora: phase starting(locked) → recording(locked)
+2026-11-18 00:28:04.494 Velora[29841:108194506] Velora: stop-path session=BE71C26A-48FC-4994-9DB5-B09F85DDCE1A stage=requested elapsed_ms=0 uptime_ms=1015567560
+2026-11-18 00:28:04.494 Velora[29841:108194506] Velora: phase recording(locked) → transcribing
+2026-11-18 00:28:04.494 Velora[29841:108194506] Velora: stop-path session=BE71C26A-48FC-4994-9DB5-B09F85DDCE1A stage=capture-drained elapsed_ms=0 uptime_ms=1015567561
+2026-11-18 00:28:04.494 Velora[29841:108194506] Velora: engine stop session=BE71C26A-48FC-4994-9DB5-B09F85DDCE1A
+2026-11-18 00:28:04.494 Velora[29841:108194506] Velora: stop-path session=BE71C26A-48FC-4994-9DB5-B09F85DDCE1A stage=stop-enqueued elapsed_ms=0 uptime_ms=1015567561
+2026-11-18 00:28:04.494 Velora[29841:108194506] Velora: stop-path session=BE71C26A-48FC-4994-9DB5-B09F85DDCE1A stage=final-received elapsed_ms=0 uptime_ms=1015567561
+2026-11-18 00:28:04.494 Velora[29841:108194506] Velora: engine final session=BE71C26A-48FC-4994-9DB5-B09F85DDCE1A chars=16 phase=transcribing
+2026-11-18 00:28:04.495 Velora[29841:108194506] Velora: staged final output chars=16 changeCount=5
+2026-11-18 00:28:04.495 Velora[29841:108194506] Velora: stop-path session=BE71C26A-48FC-4994-9DB5-B09F85DDCE1A stage=clipboard-staged elapsed_ms=0 uptime_ms=1015567561
+2026-11-18 00:28:04.495 Velora[29841:108194506] Velora: insert method=clipboard (nowhere to type) session=BE71C26A-48FC-4994-9DB5-B09F85DDCE1A
+2026-11-18 00:28:04.495 Velora[29841:108194506] Velora: phase transcribing → idle
+2026-11-18 00:28:04.545 Velora[29841:108194506] Velora: screen context — 1 entities [title]
+2026-11-18 00:28:04.547 Velora[29841:108194506] Velora: engine start session=9E2E4E52-CA6C-417F-8B3F-7E9ED6B828C2 target=com.apple.loginwindow
+2026-11-18 00:28:04.547 Velora[29841:108194506] Velora: phase idle → starting(locked)
+2026-11-18 00:28:04.562 Velora[29841:108194506] Velora: phase starting(locked) → recording(locked)
+2026-11-18 00:28:04.577 Velora[29841:108194506] Velora: stop-path session=9E2E4E52-CA6C-417F-8B3F-7E9ED6B828C2 stage=requested elapsed_ms=0 uptime_ms=1015567644
+2026-11-18 00:28:04.578 Velora[29841:108194506] Velora: phase recording(locked) → transcribing
+2026-11-18 00:28:04.578 Velora[29841:108194506] Velora: stop-path session=9E2E4E52-CA6C-417F-8B3F-7E9ED6B828C2 stage=capture-drained elapsed_ms=0 uptime_ms=1015567644
+2026-11-18 00:28:04.578 Velora[29841:108194506] Velora: engine stop session=9E2E4E52-CA6C-417F-8B3F-7E9ED6B828C2
+2026-11-18 00:28:04.578 Velora[29841:108194506] Velora: stop-path session=9E2E4E52-CA6C-417F-8B3F-7E9ED6B828C2 stage=stop-enqueued elapsed_ms=0 uptime_ms=1015567644
+2026-11-18 00:28:04.578 Velora[29841:108194506] Velora: stop-path session=9E2E4E52-CA6C-417F-8B3F-7E9ED6B828C2 stage=final-received elapsed_ms=0 uptime_ms=1015567644
+2026-11-18 00:28:04.578 Velora[29841:108194506] Velora: engine final session=9E2E4E52-CA6C-417F-8B3F-7E9ED6B828C2 chars=13 phase=transcribing
+2026-11-18 00:28:04.581 Velora[29841:108194506] Velora: staged final output chars=13 changeCount=6
+2026-11-18 00:28:04.581 Velora[29841:108194506] Velora: stop-path session=9E2E4E52-CA6C-417F-8B3F-7E9ED6B828C2 stage=clipboard-staged elapsed_ms=3 uptime_ms=1015567647
+2026-11-18 00:28:04.602 Velora[29841:108194506] Velora: insert fallback session=9E2E4E52-CA6C-417F-8B3F-7E9ED6B828C2 — Focus changed. Copied
+2026-11-18 00:28:04.603 Velora[29841:108194506] Velora: phase transcribing → idle
+2026-11-18 00:28:04.645 Velora[29841:108213800] Velora: glossary refused=revoked stage=pin waited_ms=95
+2026-11-18 00:28:04.655 Velora[29841:108194506] Velora: engine state → launching
+2026-11-18 00:28:04.656 Velora[29841:108194506] Velora: engine state → ready
+2026-11-18 00:28:04.920 Velora[29841:108194506] Velora: transcribe_file requested (wav, 4 bytes)
+2026-11-18 00:28:04.920 Velora[29841:108194506] Velora: engine state → launching
+2026-11-18 00:28:04.923 Velora[29841:108194506] Velora: requested immediate engine restart
+2026-11-18 00:28:05.031 Velora[29841:108194506] Velora: engine state → ready
+2026-11-18 00:28:05.152 Velora[29841:108194506] Velora: transcribe_file requested (wav, 4 bytes)
+2026-11-18 00:28:05.152 Velora[29841:108194506] Velora: transcribe_file requested (wav, 4 bytes)
+2026-11-18 00:28:05.152 Velora[29841:108194506] Velora: transcribe_file requested (wav, 4 bytes)
+2026-11-18 00:28:05.152 Velora[29841:108194506] Velora: transcribe_file requested (wav, 4 bytes)
+2026-11-18 00:28:05.152 Velora[29841:108194506] Velora: transcribe_file failed: cancelled
+2026-11-18 00:28:05.152 Velora[29841:108194506] Velora: engine state → launching
+2026-11-18 00:28:05.154 Velora[29841:108194506] Velora: engine state → ready
+2026-11-18 00:28:05.161 Velora[29841:108194506] Velora: engine state → stopped
+2026-11-18 00:28:05.163 Velora[29841:108194506] Velora: own-window insert — text view is read-only
+2026-11-18 00:28:05.163 Velora[29841:108194506] Velora: own-window insert — first responder is not a text target
+2026-11-18 00:28:05.165 Velora[29841:108194506] Velora: own-window insert via NSTextView chars=5
+2026-11-18 00:28:12.671 Velora[29841:108194506] Velora: engine updated — uv may re-sync its dependencies first
+2026-11-18 00:28:12.671 Velora[29841:108194506] Velora: engine state → launching
+2026-11-18 00:28:12.671 Velora[29841:108194506] Velora: first-run engine bootstrap — venv creation may take several minutes
+2026-11-18 00:28:12.671 Velora[29841:108194506] Velora: engine state → launching
+2026-11-18 00:28:12.671 Velora[29841:108194506] Velora: engine state → launching
+2026-11-18 00:28:12.672 Velora[29841:108194506] Velora: engine state → ready
+2026-11-18 00:28:12.672 Velora[29841:108194506] Velora: engine state → launching
+2026-11-18 00:28:12.672 Velora[29841:108194506] Velora: engine state → ready
+2026-11-18 00:28:12.738 Velora[29841:108194506] Velora: engine state → degraded("Engine stopped (status 9). Restarting in 2s")
+2026-11-18 00:28:12.752 Velora[29841:108194506] Velora: engine state → connecting
+2026-11-18 00:28:13.465 Velora[29841:108194506] Velora: engine state → launching
+2026-11-18 00:28:14.472 Velora[29841:108194506] Velora: engine state → connecting
+2026-11-18 00:28:15.183 Velora[29841:108194506] Velora: engine state → stopped
+2026-11-18 00:28:15.183 Velora[29841:108194506] Velora: engine state → launching
+2026-11-18 00:28:15.184 Velora[29841:108194506] Velora: engine state → launching
+2026-11-18 00:28:15.205 Velora[29841:108194506] Velora: engine state → launching
+2026-11-18 00:28:15.416 Velora[29841:108194506] Velora: engine state → stopped
+2026-11-18 00:28:15.418 Velora[29841:108194506] Velora: engine state → launching
+2026-11-18 00:28:15.419 Velora[29841:108194506] Velora: engine state → stopped
+2026-11-18 00:28:15.419 Velora[29841:108194506] Velora: engine state → launching
+2026-11-18 00:28:15.420 Velora[29841:108194506] Velora: engine state → stopped
+2026-11-18 00:28:15.422 Velora[29841:108194506] Velora: engine state → launching
+2026-11-18 00:28:15.422 Velora[29841:108194506] Velora: engine state → stopped
+2026-11-18 00:28:15.422 Velora[29841:108194506] Velora: engine state → launching
+2026-11-18 00:28:15.424 Velora[29841:108194506] Velora: engine state → stopped
+2026-11-18 00:28:15.425 Velora[29841:108194506] Velora: engine state → stopped
+2026-11-18 00:28:16.104 Velora[29841:108194506] Velora: requested media pause for dictation
+2026-11-18 00:28:16.104 Velora[29841:108194506] Velora: media pause confirmed
+2026-11-18 00:28:16.104 Velora[29841:108194506] Velora: requested media restore after dictation
+2026-11-18 00:28:16.104 Velora[29841:108194506] Velora: requested media pause for dictation
+2026-11-18 00:28:16.104 Velora[29841:108194506] Velora: media pause confirmed
+2026-11-18 00:28:16.104 Velora[29841:108194506] Velora: requested media restore after dictation
+2026-11-18 00:28:16.104 Velora[29841:108194506] Velora: requested media pause for dictation
+2026-11-18 00:28:16.104 Velora[29841:108194506] Velora: media pause was not observed before the deadline; no resume will be sent
+2026-11-18 00:28:16.104 Velora[29841:108194506] Velora: requested media pause for dictation
+2026-11-18 00:28:16.104 Velora[29841:108194506] Velora: media pause confirmed
+2026-11-18 00:28:16.104 Velora[29841:108194506] Velora: requested media pause for dictation
+2026-11-18 00:28:16.104 Velora[29841:108194506] Velora: media pause targeted another player; reverted the toggle
+2026-11-18 00:28:16.105 Velora[29841:108194506] Velora: requested media pause for dictation
+2026-11-18 00:28:16.105 Velora[29841:108194506] Velora: requested media pause for dictation
+2026-11-18 00:28:16.105 Velora[29841:108194506] Velora: media pause confirmed
+2026-11-18 00:28:16.105 Velora[29841:108194506] Velora: requested media pause for dictation
+2026-11-18 00:28:16.105 Velora[29841:108194506] Velora: media pause confirmed
+2026-11-18 00:28:16.105 Velora[29841:108194506] Velora: requested media restore after dictation
+2026-11-18 00:28:16.105 Velora[29841:108194506] Velora: requested media pause for dictation
+2026-11-18 00:28:16.105 Velora[29841:108194506] Velora: media pause confirmed
+2026-11-18 00:28:16.105 Velora[29841:108194506] Velora: requested media restore after dictation
+2026-11-18 00:28:16.105 Velora[29841:108194506] Velora: requested media pause for dictation
+2026-11-18 00:28:16.105 Velora[29841:108194506] Velora: requested media restore after dictation
+2026-11-18 00:28:16.105 Velora[29841:108194506] Velora: media restore confirmed
+2026-11-18 00:28:16.105 Velora[29841:108194506] Velora: requested media pause for dictation
+2026-11-18 00:28:16.105 Velora[29841:108194506] Velora: media pause targeted another player; reverted the toggle
+2026-11-18 00:28:16.105 Velora[29841:108194506] Velora: requested media pause for dictation
+2026-11-18 00:28:16.105 Velora[29841:108194506] Velora: requested media restore after dictation
+2026-11-18 00:28:16.105 Velora[29841:108194506] Velora: requested media pause for dictation
+2026-11-18 00:28:16.105 Velora[29841:108194506] Velora: media pause confirmed
+2026-11-18 00:28:16.105 Velora[29841:108194506] Velora: requested media restore after dictation
+2026-11-18 00:28:16.105 Velora[29841:108194506] Velora: requested media pause for dictation
+2026-11-18 00:28:16.105 Velora[29841:108194506] Velora: media pause confirmed
+2026-11-18 00:28:16.105 Velora[29841:108194506] Velora: requested media restore after dictation
+2026-11-18 00:28:16.105 Velora[29841:108194506] Velora: requested media pause for dictation
+2026-11-18 00:28:16.105 Velora[29841:108194506] Velora: media pause confirmed
+2026-11-18 00:28:16.105 Velora[29841:108194506] Velora: requested media restore after dictation
+2026-11-18 00:28:16.105 Velora[29841:108194506] Velora: media restore targeted another player; reverted the toggle
+2026-11-18 00:28:16.105 Velora[29841:108194506] Velora: requested media pause for dictation
+2026-11-18 00:28:16.105 Velora[29841:108194506] Velora: media pause confirmed
+2026-11-18 00:28:16.105 Velora[29841:108194506] Velora: requested media pause for dictation
+2026-11-18 00:28:16.105 Velora[29841:108194506] Velora: media pause confirmed
+2026-11-18 00:28:16.105 Velora[29841:108194506] Velora: requested media restore after dictation
+2026-11-18 00:28:16.105 Velora[29841:108194506] Velora: reverted a misdirected media resume during termination
+2026-11-18 00:28:16.347 Velora[29841:108194506] Velora: engine state → connecting
+2026-11-18 00:28:16.347 Velora[29841:108194506] Velora: engine state → ready
+2026-11-18 00:28:16.347 Velora[29841:108194506] Velora: engine state → stopped
+2026-11-18 00:28:16.347 Velora[29841:108194506] Velora: engine state → connecting
+2026-11-18 00:28:16.347 Velora[29841:108194506] Velora: engine state → ready
+2026-11-18 00:28:16.347 Velora[29841:108194506] Velora: engine state → stopped
+2026-11-18 00:28:16.429 Velora[29841:108194506] Velora: staged final output chars=17 changeCount=2
+2026-11-18 00:28:16.431 Velora[29841:108194506] Velora: staged final output chars=29 changeCount=3
+2026-11-18 00:28:16.432 Velora[29841:108194506] Velora: staged final output chars=19 changeCount=6
+2026-11-18 00:28:16.433 Velora[29841:108194506] Velora: staged final output chars=27 changeCount=8
+2026-11-18 00:28:16.434 Velora[29841:108194506] Velora: insert method=paste target=unknown trusted=yes changeCount 10→11
+2026-11-18 00:28:16.435 Velora[29841:108194506] Velora: paste aborted before Command-V — clipboard restored
+2026-11-18 00:28:16.436 Velora[29841:108194506] Velora: clipboard capture — 18 chars
+2026-11-18 00:28:16.942 Velora[29841:108194506] Velora: clipboard capture — app copied nothing
+2026-11-18 00:28:16.943 Velora[29841:108194506] Velora: clipboard capture — 3 chars
+2026-11-18 00:28:17.071 Velora[29841:108194506] Velora: clipboard capture — 18 chars
+2026-11-18 00:28:17.086 Velora[29841:108194506] Velora: insert method=paste target=unknown trusted=yes changeCount 7→8
+2026-11-18 00:28:17.087 Velora[29841:108194506] Velora: clipboard capture — 18 chars
+2026-11-18 00:28:17.197 Velora[29841:108194506] Velora: action batch rejected locally — step 2 does not cite an exact current UI capability
+2026-11-18 00:28:17.198 Velora[29841:108194506] Velora: action batch rejected locally — step 2 does not cite an exact current UI capability
+2026-11-18 00:28:17.217 Velora[29841:108194506] Velora: action batch rejected locally — unknown step 'unknown_step'
+2026-11-18 00:28:17.219 Velora[29841:108194506] Velora: action batch rejected locally — 'Chrome' doesn't identify anything specific enough to check
+2026-11-18 00:28:17.219 Velora[29841:108194506] Velora: action batch rejected locally — 'Chrome' doesn't identify anything specific enough to check
+2026-11-18 00:28:17.220 Velora[29841:108194506] Velora: action batch rejected locally — 'Chrome' doesn't identify anything specific enough to check
+2026-11-18 00:28:17.220 Velora[29841:108194506] Velora: action batch rejected locally — step 1 would commit typed text, but this is a draft
+2026-11-18 00:28:17.228 Velora[29841:108194506] Velora: action driving Notes in the background
+2026-11-18 00:28:17.341 Velora[29841:108194506] Velora: failed to open agent ledger at /var/folders/r2/hxzthddn0vnd14jsz35qwcc40000gn/T/velora-agent-unavailable-A063E93C-3B8C-484A-9910-F03EA55CDFD4
+2026-11-18 00:28:17.344 Velora[29841:108194506] Velora: action hotkey now ⌥⇧A
+2026-11-18 00:28:17.345 Velora[29841:108194506] Velora: stream hotkey combo matched ⌃⇧S (keyCode=1 flags=0x60000)
+2026-11-18 00:28:17.345 Velora[29841:108194506] Velora: stream hotkey down (source=nsevent)
+2026-11-18 00:28:17.357 Velora[29841:108194506] Velora: stream hotkey up (source=nsevent)
+2026-11-18 00:28:17.421 Velora[29841:108194506] Velora: proofread hotkey combo matched ⌃⇧G (keyCode=5 flags=0x60000)
+2026-11-18 00:28:17.421 Velora[29841:108194506] Velora: proofread hotkey down (source=nsevent)
+2026-11-18 00:28:17.435 Velora[29841:108194506] Velora: proofread hotkey up (source=nsevent)
+2026-11-18 00:28:17.446 Velora[29841:108194506] Velora: action hotkey combo matched ⌥⇧A (keyCode=0 flags=0xa0000)
+2026-11-18 00:28:17.446 Velora[29841:108194506] Velora: action hotkey down (source=nsevent)
+2026-11-18 00:28:17.459 Velora[29841:108194506] Velora: action hotkey up (source=nsevent)
+2026-11-18 00:28:17.471 Velora[29841:108194506] Velora: edit hotkey combo matched ⌥⇧E (keyCode=14 flags=0xa0000)
+2026-11-18 00:28:17.471 Velora[29841:108194506] Velora: edit hotkey down (source=nsevent)
+2026-11-18 00:28:17.485 Velora[29841:108194506] Velora: edit hotkey up (source=nsevent)
+2026-11-18 00:28:17.550 Velora[29841:108194506] Velora: proofread hotkey now off
+2026-11-18 00:28:17.550 Velora[29841:108194506] Velora: stream hotkey now off
+2026-11-18 00:28:17.551 Velora[29841:108194506] Velora: action hotkey now ⌥⇧E
+2026-11-18 00:28:17.551 Velora[29841:108194506] Velora: edit hotkey combo matched ⌥⇧E (keyCode=14 flags=0xa0000)
+2026-11-18 00:28:17.551 Velora[29841:108194506] Velora: edit hotkey down (source=nsevent)
+2026-11-18 00:28:17.605 Velora[29841:108194506] Velora: edit hotkey up (source=nsevent)
+2026-11-18 00:28:17.606 Velora[29841:108194506] Velora: hotkey monitor now listening for ⌥⇧A
+2026-11-18 00:28:17.606 Velora[29841:108194506] Velora: edit hotkey now off
+2026-11-18 00:28:17.606 Velora[29841:108194506] Velora: proofread hotkey now off
+2026-11-18 00:28:17.606 Velora[29841:108194506] Velora: stream hotkey now off
+2026-11-18 00:28:17.606 Velora[29841:108194506] Velora: action hotkey now ⌥⇧A
+2026-11-18 00:28:17.606 Velora[29841:108194506] Velora: hotkey combo matched ⌥⇧A (keyCode=0 flags=0xa0000)
+2026-11-18 00:28:17.606 Velora[29841:108194506] Velora: hotkey down (source=nsevent)
+2026-11-18 00:28:17.667 Velora[29841:108194506] Velora: hotkey up (source=nsevent)
+2026-11-18 00:28:17.667 Velora[29841:108194506] Velora: proofread hotkey now off
+2026-11-18 00:28:17.667 Velora[29841:108194506] Velora: stream hotkey now off
+2026-11-18 00:28:17.667 Velora[29841:108194506] Velora: action hotkey now ⌥⇧A
+2026-11-18 00:28:17.667 Velora[29841:108194506] Velora: edit hotkey combo matched ⌥⇧E (keyCode=14 flags=0xa0000)
+2026-11-18 00:28:17.667 Velora[29841:108194506] Velora: edit hotkey down (source=nsevent)
+2026-11-18 00:28:17.680 Velora[29841:108194506] Velora: action hotkey now F19
+2026-11-18 00:28:17.680 Velora[29841:108194506] Velora: edit hotkey up (source=nsevent)
+2026-11-18 00:28:17.762 Velora[29841:108194506] Velora: started a private cua-driver child for this action
+2026-11-18 00:28:17.763 Velora[29841:108194506] Velora: stopped the private cua-driver child
+2026-11-18 00:28:17.763 Velora[29841:108227863] Velora: started a private cua-driver child for this action
+2026-11-18 00:28:17.816 Velora[29841:108194506] Velora: started a private cua-driver child for this action
+2026-11-18 00:28:17.817 Velora[29841:108194506] Velora: stopped the private cua-driver child
+2026-11-18 00:28:17.817 Velora[29841:108225259] Velora: started a private cua-driver child for this action
+2026-11-18 00:28:17.870 Velora[29841:108227863] Velora: started a private cua-driver child for this action
+2026-11-18 00:28:17.921 Velora[29841:108194506] Velora: started a private cua-driver child for this action
+2026-11-18 00:28:17.975 Velora[29841:108227863] Velora: stopped the private cua-driver child
+2026-11-18 00:28:17.975 Velora[29841:108194506] Velora: started a private cua-driver child for this action
+2026-11-18 00:28:17.976 Velora[29841:108194506] Velora: cua-driver child did not exit; private socket retained
+2026-11-18 00:28:17.976 Velora[29841:108194506] Velora: stopped the private cua-driver child
+2026-11-18 00:28:17.976 Velora[29841:108194506] Velora: started a private cua-driver child for this action
+2026-11-18 00:28:17.997 Velora[29841:108194506] Velora: something other than Cua's driver is answering the driver socket — background actions are disabled
+2026-11-18 00:28:18.006 Velora[29841:108194506] Velora: action driving Notes in the background
+2026-11-18 00:28:18.011 Velora[29841:108194506] Velora: The target app could not launch safely in the background.
+2026-11-18 00:28:18.011 Velora[29841:108194506] Velora: action driving TextEdit in the background
+2026-11-18 00:28:18.012 Velora[29841:108194506] Velora: The target app did not create a background window.
+2026-11-18 00:28:18.012 Velora[29841:108194506] Velora: action driving Music in the background
+2026-11-18 00:28:18.013 Velora[29841:108194506] Velora: action driving Music in the background
+2026-11-18 00:28:18.013 Velora[29841:108194506] Velora: The target changed after the action. The result was not retried.
+2026-11-18 00:28:18.013 Velora[29841:108194506] Velora: action driving Music in the background
+2026-11-18 00:28:18.013 Velora[29841:108194506] Velora: action driving Music in the background
+2026-11-18 00:28:18.014 Velora[29841:108194506] Velora: action driving Music in the background
+2026-11-18 00:28:18.014 Velora[29841:108194506] Velora: action driving Music in the background
+2026-11-18 00:28:18.014 Velora[29841:108194506] Velora: action driving Notes in the background
+2026-11-18 00:28:18.016 Velora[29841:108194506] Velora: action driving Notes in the background
+2026-11-18 00:28:18.016 Velora[29841:108194506] Velora: action driving Notes in the background
+2026-11-18 00:28:18.016 Velora[29841:108194506] Velora: action driving Notes in the background
+2026-11-18 00:28:18.017 Velora[29841:108194506] Velora: The text change could not be verified. It was not retried.
+2026-11-18 00:28:18.017 Velora[29841:108194506] Velora: action driving Notes in the background
+2026-11-18 00:28:18.017 Velora[29841:108194506] Velora: action driving Notes in the background
+2026-11-18 00:28:18.018 Velora[29841:108194506] Velora: The text change could not be verified. It was not retried.
+2026-11-18 00:28:18.018 Velora[29841:108194506] Velora: action driving Notes in the background
+2026-11-18 00:28:18.018 Velora[29841:108194506] Velora: The UI action could not be verified. It was not retried.
+2026-11-18 00:28:18.019 Velora[29841:108194506] Velora: action driving Notes in the background
+2026-11-18 00:28:18.019 Velora[29841:108194506] Velora: The UI action produced no verifiable state change. It was not retried.
+2026-11-18 00:28:18.019 Velora[29841:108194506] Velora: action driving Notes in the background
+2026-11-18 00:28:18.019 Velora[29841:108194506] Velora: action driving Notes in the background
+2026-11-18 00:28:18.020 Velora[29841:108194506] Velora: The target app could not launch safely in the background.
+2026-11-18 00:28:18.036 Velora[29841:108194506] Velora: action driving Notes in the background
+2026-11-18 00:28:18.037 Velora[29841:108194506] Velora: The UI change could not be verified. It was not retried.
+2026-11-18 00:28:19.577 Velora[29841:108194506] Velora: staged final output chars=6 changeCount=2
+2026-11-18 00:28:19.578 Velora[29841:108194506] Velora: insert method=paste target=unknown trusted=yes changeCount 2→3
+2026-11-18 00:28:21.162 Velora[29841:108194506] Velora: staged final output chars=11 changeCount=5
+2026-11-18 00:28:21.164 Velora[29841:108194506] Velora: insert method=paste target=unknown trusted=yes changeCount 6→7
+2026-11-18 00:28:22.065 Velora[29841:108194506] Velora: staged final output chars=4 changeCount=9
+2026-11-18 00:28:22.065 Velora[29841:108194506] Velora: insert method=paste target=unknown trusted=yes changeCount 9→10
+2026-11-18 00:28:22.997 Velora[29841:108194506] Velora: staged final output chars=11 changeCount=12
+2026-11-18 00:28:22.997 Velora[29841:108194506] Velora: paste aborted — target no longer safe
+2026-11-18 00:28:23.611 Velora[29841:108194506] Velora: meeting E659E3B5-3BAC-4713-A120-33C782192C96 processing cancelled
+2026-11-18 00:28:24.620 Velora[29841:108194506] Velora: meeting delete check failed (5): not an error
+2026-11-18 00:28:24.620 Velora[29841:108194506] Velora: meeting delete check failed (5): not an error
+2026-11-18 00:28:24.624 Velora[29841:108194506] Velora: meeting delete left meeting 4BC197AE-9A82-49C6-922B-03AE3E3CD752 in place
+2026-11-18 00:28:24.624 Velora[29841:108194506] Velora: meeting delete left meeting 4BC197AE-9A82-49C6-922B-03AE3E3CD752 in place
+2026-11-18 00:28:24.808 Velora[29841:108194506] selftest isolation probe C680AA84-1B66-4DED-9DD0-ACBFFA86F608
+dictionary benchmark — launch 0.131s, mutation 0.072s (2000 entries)
+download recovery — 190 checks, 0 failures
+  skip: live screen context (activates TextEdit; set VELORA_SELFTEST_LIVE=1 or VELORA_LIVE_CONTEXT_SELFTEST=1)
+HUD perf — mouse move 0.0767s/200k, metrics(listening) 0.0137s/2k, metrics(standby) 0.0167s/200k, waveform 0.0417s/20k
+  skip: live Stream Typing insertion (activates TextEdit; set VELORA_SELFTEST_LIVE=1 or VELORA_STREAM_TYPING_E2E=1)
+selftest OK — 4293 checks
+python3 scripts/test-site.py
+site checks OK — 33 local references, 16 subpages
+python3 scripts/test-sublime-plugin.py
+......................................
+----------------------------------------------------------------------
+Ran 38 tests in 0.544s
+
+OK
+python3 scripts/app-intents-metadata.py
+App Intents metadata OK (4 actions)
+./scripts/test-signing-config.sh
+/var/folders/r2/hxzthddn0vnd14jsz35qwcc40000gn/T//velora-signing-test.EHzQur/runnable: replacing existing signature
+/Applications/Xcode.app/Contents/Developer/Toolchains/XcodeDefault.xctoolchain/usr/bin/strip: warning: changes being made to the file will invalidate the code signature in: /private/var/folders/r2/hxzthddn0vnd14jsz35qwcc40000gn/T/velora-signing-test.EHzQur/runnable
+/var/folders/r2/hxzthddn0vnd14jsz35qwcc40000gn/T//velora-signing-test.EHzQur/runnable: replacing existing signature
+signing config tests OK
+./scripts/test-publish-release.sh
+ok: dry run passes with a complete release round
+ok: dry run names the tag
+ok: dry run computes the DMG sha256
+ok: dry run points at the cask
+ok: dry run states the updater feed
+ok: missing DMG is refused
+ok: notes for the wrong version are refused
+ok: a malformed VERSION is refused
+ok: an uncommitted VERSION is refused
+ok: a missing tap clone is refused
+ok: unknown arguments are refused
+publish-release checks OK
+./scripts/test-engine-bootstrap.sh
+ok: a buildable engine passes
+ok: the chosen Python is reported
+ok: uv runs the engine entrypoint from a copy
+ok: the copy is not the bundle
+ok: the bundle's .venv is not carried into the copy
+ok: PATH is the supervisor's, ahead of launchd's default
+ok: the release wheel cache is used
+ok: managed Pythons start empty, like a new user's
+ok: managed Pythons are not kept in the wheel cache
+ok: the caller's UV_PYTHON does not leak
+ok: the copy is removed after a pass
+ok: the bundle is left untouched
+ok: an uninstallable engine fails the release
+ok: uv's error is shown
+ok: the copy is removed after a failure
+ok: an engine that never printed its usage fails
+ok: verify-dmg.sh runs the bootstrap check
+engine bootstrap checks OK
+python3 scripts/test-update-lifecycle.py
+/var/folders/r2/hxzthddn0vnd14jsz35qwcc40000gn/T/velora-update-test-0nxhw9tn/probe.swift:251:13: warning: initialization of immutable value 'staged' was never used; consider replacing with assignment to '_' or removing it [#NoUsage]
+249 |             return
+250 |         }
+251 |         let staged = Self.stagedURL(for: version)
+    |             `- warning: initialization of immutable value 'staged' was never used; consider replacing with assignment to '_' or removing it [#NoUsage]
+252 |         installingVersion = version
+253 |         state = .installing
+
+/var/folders/r2/hxzthddn0vnd14jsz35qwcc40000gn/T/velora-update-test-0nxhw9tn/probe.swift:255:13: warning: initialization of immutable value 'gen' was never used; consider replacing with assignment to '_' or removing it [#NoUsage]
+253 |         state = .installing
+254 |         generation += 1
+255 |         let gen = generation
+    |             `- warning: initialization of immutable value 'gen' was never used; consider replacing with assignment to '_' or removing it [#NoUsage]
+256 | }
+257 |     func installOnQuitIfReady() {
+
+[#NoUsage]: <https://docs.swift.org/compiler/documentation/diagnostics/no-usage>
+..............
+----------------------------------------------------------------------
+Ran 14 tests in 25.038s
+
+OK
