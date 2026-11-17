@@ -1,0 +1,113 @@
+{
+  "model_id": "mlx-community/Qwen3.5-4B-MLX-8bit",
+  "prompt_style": "production",
+  "model_snapshot": "5319bbbe4f1cbe6c0b3c80f4f7de4f0338c3906d",
+  "command": [
+    "/Users/sushil/Code/Github/velora/engine/.venv/bin/python",
+    "/Users/sushil/Code/Github/velora-model-study-2026-11-18/engine/scripts/benchmark_model_replacement.py",
+    "--model-id",
+    "mlx-community/Qwen3.5-4B-MLX-8bit",
+    "--model-path",
+    "/Users/sushil/.cache/huggingface/hub/.velora-downloads/15402d3d1555d0f44d9d7d265c6d779320e0c307f89dc65cb0cb9d91314c4b6b/snapshots/5319bbbe4f1cbe6c0b3c80f4f7de4f0338c3906d",
+    "--prompt-style",
+    "production",
+    "--output",
+    "docs/research/2026-11-18-model-replacement/raw/controlled-study/baseline-a1"
+  ],
+  "source_sha256": {
+    "benchmark_model_replacement.py": "65db195e2792ecc4afad880345805710dfbde25ac87178b900c10bfaeae3cb7c",
+    "benchmark_cleanup_quality.py": "c8f85d095872b1e841e27a785739965ef07c436390e88a22f2f4ce28f47f58d2",
+    "cleanup.py": "e35d522c34a4cfd29196c9353de8440c481f64045af5914f81706213e16cfe0a",
+    "formatting.py": "abadb2f08ea5720a4052edab5ed323a6b0192e1b82ed3a9bf0133ca6bd0ce8f1",
+    "cleanup_process.py": "a1a62e07a0393912357f6231ed3ca815960881b9c5864aadb667d6cb119a4224",
+    "cleanup_worker.py": "69c2ba54bf9544e4dd2cf32f6ffe5e68b7d503590c629cdaa51b1738d6b3e2da"
+  },
+  "copy_draft_requested": true,
+  "copy_draft_allowlist_override": false,
+  "cache_limit_mb_override": null,
+  "expected_cases": [
+    "declarative",
+    "grammar",
+    "question",
+    "terminal_prose",
+    "terminal_meta_edit_correction",
+    "names_and_numbers",
+    "custom_mode_prompt",
+    "romanize_hindi_custom_mode",
+    "romanize_hindi_note_mode",
+    "long_meaning",
+    "implicit_issue_list",
+    "implicit_feedback_list",
+    "natural_launch_plan",
+    "implicit_counted_todo_list",
+    "mismatched_ordinal_counted_list",
+    "hindi_counted_list",
+    "chinese_counted_list",
+    "three_priorities_counterexample",
+    "explicit_separate_count_lines",
+    "note_ordinal_priorities",
+    "rambling_multi_problem_request",
+    "single_issue_stays_prose",
+    "temporal_narrative_stays_prose",
+    "ordinal_nouns_stay_prose",
+    "counted_narrative_becomes_list",
+    "ordinary_counting_stays_prose",
+    "new_topic_follows_implicit_list"
+  ],
+  "started_ns": 1794943357355469000,
+  "ended_ns": 1794943402342296000,
+  "worker_pids": [
+    46568
+  ],
+  "repeats": 2,
+  "requests": 54,
+  "error": null,
+  "percentiles_wall_ms": {
+    "p50": 629.6481455,
+    "p95": 1081.2840454,
+    "p99": 1128.30377524
+  },
+  "peak_rss_bytes": 4032888832,
+  "summary": {
+    "event": "summary",
+    "model": "mlx-community/Qwen3.5-4B-MLX-8bit",
+    "resolved_revision": "5319bbbe4f1cbe6c0b3c80f4f7de4f0338c3906d",
+    "weight_sha256": {
+      "model.safetensors": "87c362fdb36bdee8e32ff5961bdceca58d26c2d9b00738543cc0e17e985b46ce"
+    },
+    "cases": 27,
+    "failed_cases": [
+      "mismatched_ordinal_counted_list"
+    ],
+    "load_ms": 7360,
+    "p50_wall_ms": 626.0,
+    "p95_wall_ms": 969.6,
+    "p50_ttft_ms": 177.5,
+    "p95_ttft_ms": 508.7,
+    "mlx_after_load": {
+      "active_bytes": 4605320714,
+      "peak_bytes": 5166602284,
+      "cache_bytes": 69569540
+    },
+    "mlx_inference": {
+      "active_bytes": 4744519178,
+      "peak_bytes": 5552326320,
+      "cache_bytes": 537175180
+    },
+    "footprint_after_load": {
+      "current_bytes": 5380461488,
+      "peak_bytes": 5973955504
+    },
+    "footprint_after_inference": {
+      "current_bytes": 6005855152,
+      "peak_bytes": 6631510960
+    }
+  },
+  "contamination": [],
+  "host_monitor_errors": [],
+  "runtime": {
+    "mlx": "0.31.2",
+    "mlx-lm": "0.31.3",
+    "transformers": "5.3.0"
+  }
+}

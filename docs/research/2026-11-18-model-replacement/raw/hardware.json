@@ -1,0 +1,17 @@
+{
+  "machdep.cpu.brand_string": "Apple M4 Max",
+  "hw.memsize": "38654705664",
+  "hw.ncpu": "14",
+  "kern.osproductversion": "27.2",
+  "uname": [
+    "Darwin",
+    "[hostname omitted]",
+    "27.2.0",
+    "Darwin Kernel Version 27.2.0: Wed Oct 14 23:44:56 PDT 2026; root:xnu-13432.41.4~25/RELEASE_ARM64_T6041",
+    "arm64"
+  ],
+  "base": "fb700ce17eb88efa5bf696bebb6bb87457106fb2",
+  "omitted_fields": [
+    "hostname"
+  ]
+}

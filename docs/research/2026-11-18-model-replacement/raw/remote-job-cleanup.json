@@ -1,0 +1,20 @@
+[
+  {
+    "job": "20261117T184429Z-velora-model-study-2026-11-18-c3fcb1c9",
+    "exit_code": 0,
+    "cleanup_exit_code": 0,
+    "cleanup_output": "Deleted completed job 20261117T184429Z-velora-model-study-2026-11-18-c3fcb1c9\n"
+  },
+  {
+    "job": "20261117T184537Z-velora-model-study-2026-11-18-b7b70723",
+    "exit_code": 127,
+    "cleanup_exit_code": 0,
+    "cleanup_output": "Deleted completed job 20261117T184537Z-velora-model-study-2026-11-18-b7b70723\n"
+  },
+  {
+    "job": "20261117T184650Z-velora-model-study-2026-11-18-c8a09753",
+    "exit_code": 1,
+    "cleanup_exit_code": 0,
+    "cleanup_output": "Deleted completed job 20261117T184650Z-velora-model-study-2026-11-18-c8a09753\n"
+  }
+]

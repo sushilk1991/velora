@@ -1,0 +1,9 @@
+{
+  "time_ns": 1794941821471795000,
+  "before_swap": "vm.swapusage: total = 32768.00M  used = 31659.25M  free = 1108.75M  (encrypted)",
+  "after_swap": "vm.swapusage: total = 28672.00M  used = 24478.69M  free = 4193.31M  (encrypted)",
+  "before_process_count": 5,
+  "remaining_process_count": 0,
+  "signal": "SIGTERM",
+  "note": "Full process tree retained locally; unrelated process and command details are excluded from publication."
+}

@@ -1,0 +1,5 @@
+{
+  "url": "https://huggingface.co/Muesli-HQ/qwen35-2b-muesli-cleanup-v12-mlx-8bit/blob/0fbfa48e98f1f8f28a0e3ca692066c823812db4e/README.md",
+  "sha256": "085f1f740b64f2027d698543d5a68d1510f384055c236e44aaf0097925b780f0",
+  "contract": "manual single-user prompt; encode with add_special_tokens=False; do not apply chat template"
+}

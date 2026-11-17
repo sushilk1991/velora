@@ -1,0 +1,2935 @@
+boxrun: withheld 349 credential/auth file(s); provision scoped test secrets separately
+boxrun: build:/data/workspace/velora-model-study-2026-11-18-ebd3420d/
+........................................................................ [  2%]
+........................................................................ [  5%]
+........................................................................ [  8%]
+........................................................................ [ 11%]
+........................................................................ [ 14%]
+........................................................................ [ 17%]
+........................................................................ [ 20%]
+........................................................................ [ 23%]
+...........F...................FFF......F...FFFFFFFFFFFFFFFFFFFFFF.sss.. [ 26%]
+........s............................................................... [ 29%]
+......................................................................F. [ 32%]
+....................F...............................F................... [ 35%]
+..........................................F..............FFFF.FFFFFFFFFF [ 38%]
+.FFFFFFFFFFFF....FFFEEEEEEFE............................................ [ 41%]
+....................................................FFFFFFF............. [ 44%]
+..............FFF.FFFF.................................................. [ 47%]
+........................................................................ [ 50%]
+....................................................F................... [ 53%]
+........................................................................ [ 56%]
+...........................F.......................F.................... [ 59%]
+.............................................................sssss...... [ 62%]
+........................................ss..s..ssss..................... [ 65%]
+s........s.............................................................. [ 68%]
+........................sss......................FF..................... [ 71%]
+........................................................................ [ 74%]
+........................................................................ [ 77%]
+........................................................................ [ 80%]
+........................................................................ [ 83%]
+..............................................................
+==================================== ERRORS ====================================
+_ ERROR at setup of test_load_local_source[mlx-community/Qwen3.5-4B-MLX-8bit] __
+
+monkeypatch = <_pytest.monkeypatch.MonkeyPatch object at 0x7f6595dc5f40>
+
+    @pytest.fixture
+    def offline_loaders(monkeypatch):
+        """Fail on acquisition, including MLX's hidden missing-path fallback."""
+>       import mlx_lm
+E       ModuleNotFoundError: No module named 'mlx_lm'
+
+engine/tests/test_cleanup.py:1297: ModuleNotFoundError
+________ ERROR at setup of test_load_local_source[logical/other-model] _________
+
+monkeypatch = <_pytest.monkeypatch.MonkeyPatch object at 0x7f6595dc6600>
+
+    @pytest.fixture
+    def offline_loaders(monkeypatch):
+        """Fail on acquisition, including MLX's hidden missing-path fallback."""
+>       import mlx_lm
+E       ModuleNotFoundError: No module named 'mlx_lm'
+
+engine/tests/test_cleanup.py:1297: ModuleNotFoundError
+_____________ ERROR at setup of test_local_source_failure[missing] _____________
+
+monkeypatch = <_pytest.monkeypatch.MonkeyPatch object at 0x7f6595df9460>
+
+    @pytest.fixture
+    def offline_loaders(monkeypatch):
+        """Fail on acquisition, including MLX's hidden missing-path fallback."""
+>       import mlx_lm
+E       ModuleNotFoundError: No module named 'mlx_lm'
+
+engine/tests/test_cleanup.py:1297: ModuleNotFoundError
+______________ ERROR at setup of test_local_source_failure[file] _______________
+
+monkeypatch = <_pytest.monkeypatch.MonkeyPatch object at 0x7f6595df9250>
+
+    @pytest.fixture
+    def offline_loaders(monkeypatch):
+        """Fail on acquisition, including MLX's hidden missing-path fallback."""
+>       import mlx_lm
+E       ModuleNotFoundError: No module named 'mlx_lm'
+
+engine/tests/test_cleanup.py:1297: ModuleNotFoundError
+___________ ERROR at setup of test_local_source_failure[incomplete] ____________
+
+monkeypatch = <_pytest.monkeypatch.MonkeyPatch object at 0x7f6595d43cb0>
+
+    @pytest.fixture
+    def offline_loaders(monkeypatch):
+        """Fail on acquisition, including MLX's hidden missing-path fallback."""
+>       import mlx_lm
+E       ModuleNotFoundError: No module named 'mlx_lm'
+
+engine/tests/test_cleanup.py:1297: ModuleNotFoundError
+___________ ERROR at setup of test_local_source_failure[disappeared] ___________
+
+monkeypatch = <_pytest.monkeypatch.MonkeyPatch object at 0x7f6595d42c60>
+
+    @pytest.fixture
+    def offline_loaders(monkeypatch):
+        """Fail on acquisition, including MLX's hidden missing-path fallback."""
+>       import mlx_lm
+E       ModuleNotFoundError: No module named 'mlx_lm'
+
+engine/tests/test_cleanup.py:1297: ModuleNotFoundError
+________________ ERROR at setup of test_local_tokenizer_reload _________________
+
+monkeypatch = <_pytest.monkeypatch.MonkeyPatch object at 0x7f6595de67b0>
+
+    @pytest.fixture
+    def offline_loaders(monkeypatch):
+        """Fail on acquisition, including MLX's hidden missing-path fallback."""
+>       import mlx_lm
+E       ModuleNotFoundError: No module named 'mlx_lm'
+
+engine/tests/test_cleanup.py:1297: ModuleNotFoundError
+=================================== FAILURES ===================================
+_______________ test_interrupt_preserves_spool_and_acknowledges ________________
+
+engine = (<velora_engine.server.Engine object at 0x7f659662f740>, PosixPath('/data/tmp/velora-a-b78_atpp/e.sock'), <velora_engine.config.Config object at 0x7f659660f9b0>)
+
+    async def test_interrupt_preserves_spool_and_acknowledges(engine):
+        eng, sock, config = engine
+        client = await connect(sock)
+        await client.recv_event("ready")
+        await client.send_json({"cmd": "start", "session": "graceful-quit", "context": {}})
+        await client.send_audio(AUDIO)
+    
+        await client.send_json({"cmd": "ack_interrupted", "session": "graceful-quit"})
+        error = await client.recv_event("error")
+        assert error["message"] == "ack_interrupted: session is not recoverable"
+    
+        await client.send_json({"cmd": "interrupt", "session": "graceful-quit"})
+>       interrupted = await client.recv_event("interrupted")
+                      ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+engine/tests/test_audio.py:286: 
+_ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ 
+
+self = <test_server.Client object at 0x7f659662e0c0>, name = 'interrupted'
+timeout = 5.0
+
+    async def recv_event(self, name: str, timeout: float = 5.0) -> dict:
+        """Read events until `name` arrives (skipping partials etc.)."""
+        while True:
+            evt = await self.recv(timeout)
+            if evt.get("event") == name:
+                return evt
+            if evt.get("event") == "error":
+>               raise AssertionError(f"unexpected error event: {evt}")
+E               AssertionError: unexpected error event: {'event': 'error', 'message': 'interrupt: no active session', 'session': 'graceful-quit'}
+
+engine/tests/test_server.py:78: AssertionError
+------------------------------ Captured log call -------------------------------
+WARNING  velora.server:server.py:2056 error event: ack_interrupted: session is not recoverable
+WARNING  velora.server:server.py:2056 error event: interrupt: no active session
+---------------------------- Captured log teardown -----------------------------
+ERROR    asyncio:base_events.py:1821 Unhandled exception in client_connected_cb
+transport: <_SelectorSocketTransport closed fd=16>
+Traceback (most recent call last):
+  File "/data/workspace/velora-model-study-2026-11-18-ebd3420d/engine/src/velora_engine/server.py", line 1944, in _on_client
+    frame_type, payload = await protocol.read_frame(reader)
+                          ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/data/workspace/velora-model-study-2026-11-18-ebd3420d/engine/src/velora_engine/protocol.py", line 48, in read_frame
+    header = await reader.readexactly(4)
+             ^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/usr/lib/python3.12/asyncio/streams.py", line 752, in readexactly
+    await self._wait_for_data('readexactly')
+  File "/usr/lib/python3.12/asyncio/streams.py", line 545, in _wait_for_data
+    await self._waiter
+asyncio.exceptions.CancelledError
+
+During handling of the above exception, another exception occurred:
+
+Traceback (most recent call last):
+  File "/data/workspace/velora-model-study-2026-11-18-ebd3420d/engine/src/velora_engine/server.py", line 1960, in _on_client
+    await self._client_cleanup(writer)
+  File "/data/workspace/velora-model-study-2026-11-18-ebd3420d/engine/src/velora_engine/server.py", line 2028, in _client_cleanup
+    await self._abort_session("client disconnected")
+  File "/data/workspace/velora-model-study-2026-11-18-ebd3420d/engine/src/velora_engine/server.py", line 3017, in _abort_session
+    await self._stt_call(self._finish_session_backend, session, False, True)
+  File "/data/workspace/velora-model-study-2026-11-18-ebd3420d/engine/src/velora_engine/server.py", line 899, in _stt_call
+    future = asyncio.get_running_loop().run_in_executor(self._stt_executor, fn, *args)
+             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/usr/lib/python3.12/asyncio/base_events.py", line 863, in run_in_executor
+    executor.submit(func, *args), loop=self)
+    ^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/usr/lib/python3.12/concurrent/futures/thread.py", line 170, in submit
+    raise RuntimeError('cannot schedule new futures after shutdown')
+RuntimeError: cannot schedule new futures after shutdown
+ERROR    asyncio:base_events.py:1821 unhandled exception during asyncio.run() shutdown
+task: <Task finished name='Task-1748' coro=<Engine._on_client() done, defined at /data/workspace/velora-model-study-2026-11-18-ebd3420d/engine/src/velora_engine/server.py:1910> exception=RuntimeError('cannot schedule new futures after shutdown')>
+Traceback (most recent call last):
+  File "/data/workspace/velora-model-study-2026-11-18-ebd3420d/engine/src/velora_engine/server.py", line 1944, in _on_client
+    frame_type, payload = await protocol.read_frame(reader)
+                          ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/data/workspace/velora-model-study-2026-11-18-ebd3420d/engine/src/velora_engine/protocol.py", line 48, in read_frame
+    header = await reader.readexactly(4)
+             ^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/usr/lib/python3.12/asyncio/streams.py", line 752, in readexactly
+    await self._wait_for_data('readexactly')
+  File "/usr/lib/python3.12/asyncio/streams.py", line 545, in _wait_for_data
+    await self._waiter
+asyncio.exceptions.CancelledError
+
+During handling of the above exception, another exception occurred:
+
+Traceback (most recent call last):
+  File "/data/workspace/velora-model-study-2026-11-18-ebd3420d/engine/src/velora_engine/server.py", line 1960, in _on_client
+    await self._client_cleanup(writer)
+  File "/data/workspace/velora-model-study-2026-11-18-ebd3420d/engine/src/velora_engine/server.py", line 2028, in _client_cleanup
+    await self._abort_session("client disconnected")
+  File "/data/workspace/velora-model-study-2026-11-18-ebd3420d/engine/src/velora_engine/server.py", line 3017, in _abort_session
+    await self._stt_call(self._finish_session_backend, session, False, True)
+  File "/data/workspace/velora-model-study-2026-11-18-ebd3420d/engine/src/velora_engine/server.py", line 899, in _stt_call
+    future = asyncio.get_running_loop().run_in_executor(self._stt_executor, fn, *args)
+             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/usr/lib/python3.12/asyncio/base_events.py", line 863, in run_in_executor
+    executor.submit(func, *args), loop=self)
+    ^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/usr/lib/python3.12/concurrent/futures/thread.py", line 170, in submit
+    raise RuntimeError('cannot schedule new futures after shutdown')
+RuntimeError: cannot schedule new futures after shutdown
+_____ test_a_failed_build_publishes_nothing_and_never_falls_back[failure0] _____
+
+pins = namespace(main=BundledModel(key='fake-bark', repo='Example/fake-bark', revision='900b9558d21e751f18f7612b4ceb32c1f6996...ef203fa25827f93d')), notice='NOTICE', license='CC-BY-4.0', license_url='https://creativecommons.org/licenses/by/4.0/'))
+deps = {'mlx': '1.0', 'parakeet-mlx': '1.0', 'constriction': '0.5.0', 'numpy': '2.0'}
+tmp_path = PosixPath('/data/tmp/pytest-of-sushil/pytest-1/test_a_failed_build_publishes_0')
+monkeypatch = <_pytest.monkeypatch.MonkeyPatch object at 0x7f659667a570>
+failure = RuntimeError('boom')
+
+    @pytest.mark.parametrize("failure", [RuntimeError("boom"), MemoryError(),
+                                         bark.BarkCacheError("validation failed")])
+    def test_a_failed_build_publishes_nothing_and_never_falls_back(pins, deps, tmp_path, monkeypatch, failure):
+        source = _write(tmp_path / "src", MAIN_FILES)
+        root = tmp_path / "cache"
+        loaded = []
+        monkeypatch.setattr(bark, "load_packed", lambda d, bits: loaded.append(bits))
+    
+        def failing(source_dir, dest, bits, cancel):
+            (dest / "model.safetensors").write_bytes(b"partial")
+            raise failure
+    
+        with pytest.raises(bark.BarkCacheError) as info:
+>           bark.load_bark(source, 4, cache_root=root, builder=failing)
+
+engine/tests/test_bark.py:217: 
+_ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ 
+engine/src/velora_engine/bark.py:597: in load_bark
+    _require_apple_silicon()
+_ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ 
+
+    def _require_apple_silicon() -> None:
+        if sys.platform != "darwin" or platform.machine() != "arm64":
+>           raise BarkUnavailable("Bark runs on Apple silicon Macs only")
+E           velora_engine.bark.BarkUnavailable: Bark runs on Apple silicon Macs only
+
+engine/src/velora_engine/bark.py:149: BarkUnavailable
+_____ test_a_failed_build_publishes_nothing_and_never_falls_back[failure1] _____
+
+pins = namespace(main=BundledModel(key='fake-bark', repo='Example/fake-bark', revision='900b9558d21e751f18f7612b4ceb32c1f6996...ef203fa25827f93d')), notice='NOTICE', license='CC-BY-4.0', license_url='https://creativecommons.org/licenses/by/4.0/'))
+deps = {'mlx': '1.0', 'parakeet-mlx': '1.0', 'constriction': '0.5.0', 'numpy': '2.0'}
+tmp_path = PosixPath('/data/tmp/pytest-of-sushil/pytest-1/test_a_failed_build_publishes_1')
+monkeypatch = <_pytest.monkeypatch.MonkeyPatch object at 0x7f659667be30>
+failure = MemoryError()
+
+    @pytest.mark.parametrize("failure", [RuntimeError("boom"), MemoryError(),
+                                         bark.BarkCacheError("validation failed")])
+    def test_a_failed_build_publishes_nothing_and_never_falls_back(pins, deps, tmp_path, monkeypatch, failure):
+        source = _write(tmp_path / "src", MAIN_FILES)
+        root = tmp_path / "cache"
+        loaded = []
+        monkeypatch.setattr(bark, "load_packed", lambda d, bits: loaded.append(bits))
+    
+        def failing(source_dir, dest, bits, cancel):
+            (dest / "model.safetensors").write_bytes(b"partial")
+            raise failure
+    
+        with pytest.raises(bark.BarkCacheError) as info:
+>           bark.load_bark(source, 4, cache_root=root, builder=failing)
+
+engine/tests/test_bark.py:217: 
+_ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ 
+engine/src/velora_engine/bark.py:597: in load_bark
+    _require_apple_silicon()
+_ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ 
+
+    def _require_apple_silicon() -> None:
+        if sys.platform != "darwin" or platform.machine() != "arm64":
+>           raise BarkUnavailable("Bark runs on Apple silicon Macs only")
+E           velora_engine.bark.BarkUnavailable: Bark runs on Apple silicon Macs only
+
+engine/src/velora_engine/bark.py:149: BarkUnavailable
+_____ test_a_failed_build_publishes_nothing_and_never_falls_back[failure2] _____
+
+pins = namespace(main=BundledModel(key='fake-bark', repo='Example/fake-bark', revision='900b9558d21e751f18f7612b4ceb32c1f6996...ef203fa25827f93d')), notice='NOTICE', license='CC-BY-4.0', license_url='https://creativecommons.org/licenses/by/4.0/'))
+deps = {'mlx': '1.0', 'parakeet-mlx': '1.0', 'constriction': '0.5.0', 'numpy': '2.0'}
+tmp_path = PosixPath('/data/tmp/pytest-of-sushil/pytest-1/test_a_failed_build_publishes_2')
+monkeypatch = <_pytest.monkeypatch.MonkeyPatch object at 0x7f659667ab40>
+failure = BarkCacheError('validation failed')
+
+    @pytest.mark.parametrize("failure", [RuntimeError("boom"), MemoryError(),
+                                         bark.BarkCacheError("validation failed")])
+    def test_a_failed_build_publishes_nothing_and_never_falls_back(pins, deps, tmp_path, monkeypatch, failure):
+        source = _write(tmp_path / "src", MAIN_FILES)
+        root = tmp_path / "cache"
+        loaded = []
+        monkeypatch.setattr(bark, "load_packed", lambda d, bits: loaded.append(bits))
+    
+        def failing(source_dir, dest, bits, cancel):
+            (dest / "model.safetensors").write_bytes(b"partial")
+            raise failure
+    
+        with pytest.raises(bark.BarkCacheError) as info:
+>           bark.load_bark(source, 4, cache_root=root, builder=failing)
+
+engine/tests/test_bark.py:217: 
+_ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ 
+engine/src/velora_engine/bark.py:597: in load_bark
+    _require_apple_silicon()
+_ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ 
+
+    def _require_apple_silicon() -> None:
+        if sys.platform != "darwin" or platform.machine() != "arm64":
+>           raise BarkUnavailable("Bark runs on Apple silicon Macs only")
+E           velora_engine.bark.BarkUnavailable: Bark runs on Apple silicon Macs only
+
+engine/src/velora_engine/bark.py:149: BarkUnavailable
+_______ test_check_precision_catches_unquantized_or_wrong_width_weights ________
+
+    def test_check_precision_catches_unquantized_or_wrong_width_weights():
+>       import mlx.core as mx
+E       ModuleNotFoundError: No module named 'mlx'
+
+engine/tests/test_bark.py:313: ModuleNotFoundError
+_______________ test_decode_pads_like_upstream_and_returns_text ________________
+
+pins = namespace(main=BundledModel(key='fake-bark', repo='Example/fake-bark', revision='900b9558d21e751f18f7612b4ceb32c1f6996...ef203fa25827f93d')), notice='NOTICE', license='CC-BY-4.0', license_url='https://creativecommons.org/licenses/by/4.0/'))
+
+    def test_decode_pads_like_upstream_and_returns_text(pins):
+>       main, clean = FakeParakeet(), FakeParakeet()
+                      ^^^^^^^^^^^^^^
+
+engine/tests/test_bark.py:415: 
+_ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ 
+
+self = <test_bark.FakeParakeet object at 0x7f6596679490>, text = 'hello'
+on_generate = None
+
+    def __init__(self, text="hello", on_generate=None):
+>       import librosa
+E       ModuleNotFoundError: No module named 'librosa'
+
+engine/tests/test_bark.py:384: ModuleNotFoundError
+________________ test_decode_validates_input[audio0-ValueError] ________________
+
+pins = namespace(main=BundledModel(key='fake-bark', repo='Example/fake-bark', revision='900b9558d21e751f18f7612b4ceb32c1f6996...ef203fa25827f93d')), notice='NOTICE', license='CC-BY-4.0', license_url='https://creativecommons.org/licenses/by/4.0/'))
+audio = array([[0., 0., 0., ..., 0., 0., 0.],
+       [0., 0., 0., ..., 0., 0., 0.]], shape=(2, 16000), dtype=float32)
+error = <class 'ValueError'>
+
+    @pytest.mark.parametrize("audio, error", [
+        (np.zeros((2, SR), np.float32), ValueError),
+        (np.zeros(SR, np.int16), TypeError),
+        (np.array([0.0, np.nan], np.float32), ValueError),
+    ])
+    def test_decode_validates_input(pins, audio, error):
+        with pytest.raises(error):
+>           _mlx_model(pins).decode(audio)
+            ^^^^^^^^^^^^^^^^
+
+engine/tests/test_bark.py:429: 
+_ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ 
+engine/tests/test_bark.py:410: in _mlx_model
+    return bark.BarkModel(fake or FakeParakeet(), kwargs.pop("variant", pins.main), 4,
+                                  ^^^^^^^^^^^^^^
+_ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ 
+
+self = <test_bark.FakeParakeet object at 0x7f659660ecf0>, text = 'hello'
+on_generate = None
+
+    def __init__(self, text="hello", on_generate=None):
+>       import librosa
+E       ModuleNotFoundError: No module named 'librosa'
+
+engine/tests/test_bark.py:384: ModuleNotFoundError
+________________ test_decode_validates_input[audio1-TypeError] _________________
+
+pins = namespace(main=BundledModel(key='fake-bark', repo='Example/fake-bark', revision='900b9558d21e751f18f7612b4ceb32c1f6996...ef203fa25827f93d')), notice='NOTICE', license='CC-BY-4.0', license_url='https://creativecommons.org/licenses/by/4.0/'))
+audio = array([0, 0, 0, ..., 0, 0, 0], shape=(16000,), dtype=int16)
+error = <class 'TypeError'>
+
+    @pytest.mark.parametrize("audio, error", [
+        (np.zeros((2, SR), np.float32), ValueError),
+        (np.zeros(SR, np.int16), TypeError),
+        (np.array([0.0, np.nan], np.float32), ValueError),
+    ])
+    def test_decode_validates_input(pins, audio, error):
+        with pytest.raises(error):
+>           _mlx_model(pins).decode(audio)
+            ^^^^^^^^^^^^^^^^
+
+engine/tests/test_bark.py:429: 
+_ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ 
+engine/tests/test_bark.py:410: in _mlx_model
+    return bark.BarkModel(fake or FakeParakeet(), kwargs.pop("variant", pins.main), 4,
+                                  ^^^^^^^^^^^^^^
+_ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ 
+
+self = <test_bark.FakeParakeet object at 0x7f659660dbe0>, text = 'hello'
+on_generate = None
+
+    def __init__(self, text="hello", on_generate=None):
+>       import librosa
+E       ModuleNotFoundError: No module named 'librosa'
+
+engine/tests/test_bark.py:384: ModuleNotFoundError
+________________ test_decode_validates_input[audio2-ValueError] ________________
+
+pins = namespace(main=BundledModel(key='fake-bark', repo='Example/fake-bark', revision='900b9558d21e751f18f7612b4ceb32c1f6996...ef203fa25827f93d')), notice='NOTICE', license='CC-BY-4.0', license_url='https://creativecommons.org/licenses/by/4.0/'))
+audio = array([ 0., nan], dtype=float32), error = <class 'ValueError'>
+
+    @pytest.mark.parametrize("audio, error", [
+        (np.zeros((2, SR), np.float32), ValueError),
+        (np.zeros(SR, np.int16), TypeError),
+        (np.array([0.0, np.nan], np.float32), ValueError),
+    ])
+    def test_decode_validates_input(pins, audio, error):
+        with pytest.raises(error):
+>           _mlx_model(pins).decode(audio)
+            ^^^^^^^^^^^^^^^^
+
+engine/tests/test_bark.py:429: 
+_ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ 
+engine/tests/test_bark.py:410: in _mlx_model
+    return bark.BarkModel(fake or FakeParakeet(), kwargs.pop("variant", pins.main), 4,
+                                  ^^^^^^^^^^^^^^
+_ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ 
+
+self = <test_bark.FakeParakeet object at 0x7f659662cc50>, text = 'hello'
+on_generate = None
+
+    def __init__(self, text="hello", on_generate=None):
+>       import librosa
+E       ModuleNotFoundError: No module named 'librosa'
+
+engine/tests/test_bark.py:384: ModuleNotFoundError
+_____________ test_decode_of_nothing_is_empty_without_a_model_call _____________
+
+pins = namespace(main=BundledModel(key='fake-bark', repo='Example/fake-bark', revision='900b9558d21e751f18f7612b4ceb32c1f6996...ef203fa25827f93d')), notice='NOTICE', license='CC-BY-4.0', license_url='https://creativecommons.org/licenses/by/4.0/'))
+
+    def test_decode_of_nothing_is_empty_without_a_model_call(pins):
+>       fake = FakeParakeet()
+               ^^^^^^^^^^^^^^
+
+engine/tests/test_bark.py:433: 
+_ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ 
+
+self = <test_bark.FakeParakeet object at 0x7f659662c800>, text = 'hello'
+on_generate = None
+
+    def __init__(self, text="hello", on_generate=None):
+>       import librosa
+E       ModuleNotFoundError: No module named 'librosa'
+
+engine/tests/test_bark.py:384: ModuleNotFoundError
+__________________ test_long_audio_decodes_in_bounded_pieces ___________________
+
+pins = namespace(main=BundledModel(key='fake-bark', repo='Example/fake-bark', revision='900b9558d21e751f18f7612b4ceb32c1f6996...ef203fa25827f93d')), notice='NOTICE', license='CC-BY-4.0', license_url='https://creativecommons.org/licenses/by/4.0/'))
+
+    def test_long_audio_decodes_in_bounded_pieces(pins):
+>       fake = FakeParakeet()
+               ^^^^^^^^^^^^^^
+
+engine/tests/test_bark.py:439: 
+_ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ 
+
+self = <test_bark.FakeParakeet object at 0x7f65966876b0>, text = 'hello'
+on_generate = None
+
+    def __init__(self, text="hello", on_generate=None):
+>       import librosa
+E       ModuleNotFoundError: No module named 'librosa'
+
+engine/tests/test_bark.py:384: ModuleNotFoundError
+_______________________ test_cancel_stops_between_pieces _______________________
+
+pins = namespace(main=BundledModel(key='fake-bark', repo='Example/fake-bark', revision='900b9558d21e751f18f7612b4ceb32c1f6996...ef203fa25827f93d')), notice='NOTICE', license='CC-BY-4.0', license_url='https://creativecommons.org/licenses/by/4.0/'))
+
+    def test_cancel_stops_between_pieces(pins):
+        cancel = threading.Event()
+>       fake = FakeParakeet(on_generate=cancel.set)
+               ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+engine/tests/test_bark.py:449: 
+_ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ 
+
+self = <test_bark.FakeParakeet object at 0x7f6596686b40>, text = 'hello'
+on_generate = <bound method Event.set of <threading.Event at 0x7f6596686600: unset>>
+
+    def __init__(self, text="hello", on_generate=None):
+>       import librosa
+E       ModuleNotFoundError: No module named 'librosa'
+
+engine/tests/test_bark.py:384: ModuleNotFoundError
+________________ test_a_model_with_another_frontend_is_refused _________________
+
+pins = namespace(main=BundledModel(key='fake-bark', repo='Example/fake-bark', revision='900b9558d21e751f18f7612b4ceb32c1f6996...ef203fa25827f93d')), notice='NOTICE', license='CC-BY-4.0', license_url='https://creativecommons.org/licenses/by/4.0/'))
+
+    def test_a_model_with_another_frontend_is_refused(pins):
+>       fake = FakeParakeet()
+               ^^^^^^^^^^^^^^
+
+engine/tests/test_bark.py:456: 
+_ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ 
+
+self = <test_bark.FakeParakeet object at 0x7f6596687650>, text = 'hello'
+on_generate = None
+
+    def __init__(self, text="hello", on_generate=None):
+>       import librosa
+E       ModuleNotFoundError: No module named 'librosa'
+
+engine/tests/test_bark.py:384: ModuleNotFoundError
+__________ test_load_bark_warms_up_and_keeps_the_requested_precision ___________
+
+pins = namespace(main=BundledModel(key='fake-bark', repo='Example/fake-bark', revision='900b9558d21e751f18f7612b4ceb32c1f6996...ef203fa25827f93d')), notice='NOTICE', license='CC-BY-4.0', license_url='https://creativecommons.org/licenses/by/4.0/'))
+deps = {'mlx': '1.0', 'parakeet-mlx': '1.0', 'constriction': '0.5.0', 'numpy': '2.0'}
+tmp_path = PosixPath('/data/tmp/pytest-of-sushil/pytest-1/test_load_bark_warms_up_and_ke0')
+monkeypatch = <_pytest.monkeypatch.MonkeyPatch object at 0x7f659662e330>
+
+    def test_load_bark_warms_up_and_keeps_the_requested_precision(pins, deps, tmp_path, monkeypatch):
+>       fake = FakeParakeet()
+               ^^^^^^^^^^^^^^
+
+engine/tests/test_bark.py:463: 
+_ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ 
+
+self = <test_bark.FakeParakeet object at 0x7f659662d9d0>, text = 'hello'
+on_generate = None
+
+    def __init__(self, text="hello", on_generate=None):
+>       import librosa
+E       ModuleNotFoundError: No module named 'librosa'
+
+engine/tests/test_bark.py:384: ModuleNotFoundError
+____________ test_a_published_cache_that_fails_to_load_is_an_error _____________
+
+pins = namespace(main=BundledModel(key='fake-bark', repo='Example/fake-bark', revision='900b9558d21e751f18f7612b4ceb32c1f6996...ef203fa25827f93d')), notice='NOTICE', license='CC-BY-4.0', license_url='https://creativecommons.org/licenses/by/4.0/'))
+deps = {'mlx': '1.0', 'parakeet-mlx': '1.0', 'constriction': '0.5.0', 'numpy': '2.0'}
+tmp_path = PosixPath('/data/tmp/pytest-of-sushil/pytest-1/test_a_published_cache_that_fa0')
+monkeypatch = <_pytest.monkeypatch.MonkeyPatch object at 0x7f659660c920>
+
+    def test_a_published_cache_that_fails_to_load_is_an_error(pins, deps, tmp_path, monkeypatch):
+        def broken(directory, bits):
+            raise ValueError("bad safetensors header")
+    
+        monkeypatch.setattr(bark, "load_packed", broken)
+        with pytest.raises(bark.BarkCacheError, match="failed to load"):
+>           bark.load_bark(_write(tmp_path / "src", MAIN_FILES), 4, cache_root=tmp_path / "c",
+                           builder=fake_builder())
+
+engine/tests/test_bark.py:479: 
+_ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ 
+engine/src/velora_engine/bark.py:597: in load_bark
+    _require_apple_silicon()
+_ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ 
+
+    def _require_apple_silicon() -> None:
+        if sys.platform != "darwin" or platform.machine() != "arm64":
+>           raise BarkUnavailable("Bark runs on Apple silicon Macs only")
+E           velora_engine.bark.BarkUnavailable: Bark runs on Apple silicon Macs only
+
+engine/src/velora_engine/bark.py:149: BarkUnavailable
+_____ test_coreml_compiles_once_to_a_stable_path_and_warms_up_before_ready _____
+
+coreml = <test_bark.FakeCoreML object at 0x7f659667a0f0>
+
+    def test_coreml_compiles_once_to_a_stable_path_and_warms_up_before_ready(coreml):
+>       model = bark.load_bark_coreml(coreml.source, coreml.cache)
+                ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+engine/tests/test_bark.py:589: 
+_ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ 
+engine/src/velora_engine/bark.py:811: in load_bark_coreml
+    ct = _require_coremltools()
+         ^^^^^^^^^^^^^^^^^^^^^^
+engine/src/velora_engine/bark.py:615: in _require_coremltools
+    _require_apple_silicon()
+_ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ 
+
+    def _require_apple_silicon() -> None:
+        if sys.platform != "darwin" or platform.machine() != "arm64":
+>           raise BarkUnavailable("Bark runs on Apple silicon Macs only")
+E           velora_engine.bark.BarkUnavailable: Bark runs on Apple silicon Macs only
+
+engine/src/velora_engine/bark.py:149: BarkUnavailable
+__________________ test_coreml_accepts_the_ane_folder_itself ___________________
+
+coreml = <test_bark.FakeCoreML object at 0x7f65966cbe30>
+
+    def test_coreml_accepts_the_ane_folder_itself(coreml):
+>       model = bark.load_bark_coreml(coreml.source / "coreml" / "ane", coreml.cache)
+                ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+engine/tests/test_bark.py:608: 
+_ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ 
+engine/src/velora_engine/bark.py:811: in load_bark_coreml
+    ct = _require_coremltools()
+         ^^^^^^^^^^^^^^^^^^^^^^
+engine/src/velora_engine/bark.py:615: in _require_coremltools
+    _require_apple_silicon()
+_ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ 
+
+    def _require_apple_silicon() -> None:
+        if sys.platform != "darwin" or platform.machine() != "arm64":
+>           raise BarkUnavailable("Bark runs on Apple silicon Macs only")
+E           velora_engine.bark.BarkUnavailable: Bark runs on Apple silicon Macs only
+
+engine/src/velora_engine/bark.py:149: BarkUnavailable
+______________ test_coreml_recompiles_when_the_toolchain_changes _______________
+
+coreml = <test_bark.FakeCoreML object at 0x7f65966ca030>
+monkeypatch = <_pytest.monkeypatch.MonkeyPatch object at 0x7f65966c8e90>
+
+    def test_coreml_recompiles_when_the_toolchain_changes(coreml, monkeypatch):
+>       first = bark.load_bark_coreml(coreml.source, coreml.cache).compiled_path
+                ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+engine/tests/test_bark.py:613: 
+_ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ 
+engine/src/velora_engine/bark.py:811: in load_bark_coreml
+    ct = _require_coremltools()
+         ^^^^^^^^^^^^^^^^^^^^^^
+engine/src/velora_engine/bark.py:615: in _require_coremltools
+    _require_apple_silicon()
+_ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ 
+
+    def _require_apple_silicon() -> None:
+        if sys.platform != "darwin" or platform.machine() != "arm64":
+>           raise BarkUnavailable("Bark runs on Apple silicon Macs only")
+E           velora_engine.bark.BarkUnavailable: Bark runs on Apple silicon Macs only
+
+engine/src/velora_engine/bark.py:149: BarkUnavailable
+_________ test_coreml_compile_failures_publish_nothing[compile-raises] _________
+
+coreml = <test_bark.FakeCoreML object at 0x7f65966ca3c0>
+failure = 'compile-raises'
+
+    @pytest.mark.parametrize("failure", ["compile-raises", "no-bundle"])
+    def test_coreml_compile_failures_publish_nothing(coreml, failure):
+        if failure == "compile-raises":
+            coreml.fail_compile = True
+        else:
+            coreml.compile_writes_bundle = False
+        with pytest.raises(bark.BarkCacheError):
+>           bark.load_bark_coreml(coreml.source, coreml.cache)
+
+engine/tests/test_bark.py:629: 
+_ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ 
+engine/src/velora_engine/bark.py:811: in load_bark_coreml
+    ct = _require_coremltools()
+         ^^^^^^^^^^^^^^^^^^^^^^
+engine/src/velora_engine/bark.py:615: in _require_coremltools
+    _require_apple_silicon()
+_ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ 
+
+    def _require_apple_silicon() -> None:
+        if sys.platform != "darwin" or platform.machine() != "arm64":
+>           raise BarkUnavailable("Bark runs on Apple silicon Macs only")
+E           velora_engine.bark.BarkUnavailable: Bark runs on Apple silicon Macs only
+
+engine/src/velora_engine/bark.py:149: BarkUnavailable
+___________ test_coreml_compile_failures_publish_nothing[no-bundle] ____________
+
+coreml = <test_bark.FakeCoreML object at 0x7f659660fbf0>, failure = 'no-bundle'
+
+    @pytest.mark.parametrize("failure", ["compile-raises", "no-bundle"])
+    def test_coreml_compile_failures_publish_nothing(coreml, failure):
+        if failure == "compile-raises":
+            coreml.fail_compile = True
+        else:
+            coreml.compile_writes_bundle = False
+        with pytest.raises(bark.BarkCacheError):
+>           bark.load_bark_coreml(coreml.source, coreml.cache)
+
+engine/tests/test_bark.py:629: 
+_ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ 
+engine/src/velora_engine/bark.py:811: in load_bark_coreml
+    ct = _require_coremltools()
+         ^^^^^^^^^^^^^^^^^^^^^^
+engine/src/velora_engine/bark.py:615: in _require_coremltools
+    _require_apple_silicon()
+_ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ 
+
+    def _require_apple_silicon() -> None:
+        if sys.platform != "darwin" or platform.machine() != "arm64":
+>           raise BarkUnavailable("Bark runs on Apple silicon Macs only")
+E           velora_engine.bark.BarkUnavailable: Bark runs on Apple silicon Macs only
+
+engine/src/velora_engine/bark.py:149: BarkUnavailable
+__________________ test_coreml_stale_compile_temp_is_removed ___________________
+
+coreml = <test_bark.FakeCoreML object at 0x7f659662d4f0>
+
+    def test_coreml_stale_compile_temp_is_removed(coreml):
+        stale = coreml.cache / ".fake-bark-ane--0123456789abcdef.tmp-dead"
+        stale.mkdir(parents=True)
+>       bark.load_bark_coreml(coreml.source, coreml.cache)
+
+engine/tests/test_bark.py:637: 
+_ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ 
+engine/src/velora_engine/bark.py:811: in load_bark_coreml
+    ct = _require_coremltools()
+         ^^^^^^^^^^^^^^^^^^^^^^
+engine/src/velora_engine/bark.py:615: in _require_coremltools
+    _require_apple_silicon()
+_ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ 
+
+    def _require_apple_silicon() -> None:
+        if sys.platform != "darwin" or platform.machine() != "arm64":
+>           raise BarkUnavailable("Bark runs on Apple silicon Macs only")
+E           velora_engine.bark.BarkUnavailable: Bark runs on Apple silicon Macs only
+
+engine/src/velora_engine/bark.py:149: BarkUnavailable
+__________________ test_coreml_concurrent_loads_compile_once ___________________
+
+coreml = <test_bark.FakeCoreML object at 0x7f65966cb6b0>
+
+    def test_coreml_concurrent_loads_compile_once(coreml):
+        models: list = []
+        threads = [threading.Thread(target=lambda: models.append(
+            bark.load_bark_coreml(coreml.source, coreml.cache))) for _ in range(3)]
+        for t in threads:
+            t.start()
+        for t in threads:
+            t.join()
+>       assert len(models) == 3 and len(coreml.compiles) == 1
+E       assert (0 == 3)
+E        +  where 0 = len([])
+
+engine/tests/test_bark.py:649: AssertionError
+______________ test_coreml_non_finite_warmup_never_reports_ready _______________
+
+coreml = <test_bark.FakeCoreML object at 0x7f6596513a70>
+
+    def test_coreml_non_finite_warmup_never_reports_ready(coreml):
+        coreml.encoded_value = float("nan")
+        with pytest.raises(bark.BarkCacheError, match="warmup"):
+>           bark.load_bark_coreml(coreml.source, coreml.cache)
+
+engine/tests/test_bark.py:655: 
+_ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ 
+engine/src/velora_engine/bark.py:811: in load_bark_coreml
+    ct = _require_coremltools()
+         ^^^^^^^^^^^^^^^^^^^^^^
+engine/src/velora_engine/bark.py:615: in _require_coremltools
+    _require_apple_silicon()
+_ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ 
+
+    def _require_apple_silicon() -> None:
+        if sys.platform != "darwin" or platform.machine() != "arm64":
+>           raise BarkUnavailable("Bark runs on Apple silicon Macs only")
+E           velora_engine.bark.BarkUnavailable: Bark runs on Apple silicon Macs only
+
+engine/src/velora_engine/bark.py:149: BarkUnavailable
+___________ test_coreml_decodes_long_audio_in_windows_of_at_most_15s ___________
+
+coreml = <test_bark.FakeCoreML object at 0x7f6596513380>
+
+    def test_coreml_decodes_long_audio_in_windows_of_at_most_15s(coreml):
+>       model = bark.load_bark_coreml(coreml.source, coreml.cache)
+                ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+engine/tests/test_bark.py:659: 
+_ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ 
+engine/src/velora_engine/bark.py:811: in load_bark_coreml
+    ct = _require_coremltools()
+         ^^^^^^^^^^^^^^^^^^^^^^
+engine/src/velora_engine/bark.py:615: in _require_coremltools
+    _require_apple_silicon()
+_ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ 
+
+    def _require_apple_silicon() -> None:
+        if sys.platform != "darwin" or platform.machine() != "arm64":
+>           raise BarkUnavailable("Bark runs on Apple silicon Macs only")
+E           velora_engine.bark.BarkUnavailable: Bark runs on Apple silicon Macs only
+
+engine/src/velora_engine/bark.py:149: BarkUnavailable
+___________________ test_coreml_decode_cancel_and_bad_output ___________________
+
+coreml = <test_bark.FakeCoreML object at 0x7f6596511730>
+
+    def test_coreml_decode_cancel_and_bad_output(coreml):
+>       model = bark.load_bark_coreml(coreml.source, coreml.cache)
+                ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+engine/tests/test_bark.py:671: 
+_ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ 
+engine/src/velora_engine/bark.py:811: in load_bark_coreml
+    ct = _require_coremltools()
+         ^^^^^^^^^^^^^^^^^^^^^^
+engine/src/velora_engine/bark.py:615: in _require_coremltools
+    _require_apple_silicon()
+_ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ 
+
+    def _require_apple_silicon() -> None:
+        if sys.platform != "darwin" or platform.machine() != "arm64":
+>           raise BarkUnavailable("Bark runs on Apple silicon Macs only")
+E           velora_engine.bark.BarkUnavailable: Bark runs on Apple silicon Macs only
+
+engine/src/velora_engine/bark.py:149: BarkUnavailable
+______________________ test_coreml_cancel_before_compile _______________________
+
+coreml = <test_bark.FakeCoreML object at 0x7f65965129c0>
+
+    def test_coreml_cancel_before_compile(coreml):
+        with pytest.raises(bark.BarkCancelled):
+>           bark.load_bark_coreml(coreml.source, coreml.cache, cancel=lambda: True)
+
+engine/tests/test_bark.py:684: 
+_ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ 
+engine/src/velora_engine/bark.py:811: in load_bark_coreml
+    ct = _require_coremltools()
+         ^^^^^^^^^^^^^^^^^^^^^^
+engine/src/velora_engine/bark.py:615: in _require_coremltools
+    _require_apple_silicon()
+_ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ 
+
+    def _require_apple_silicon() -> None:
+        if sys.platform != "darwin" or platform.machine() != "arm64":
+>           raise BarkUnavailable("Bark runs on Apple silicon Macs only")
+E           velora_engine.bark.BarkUnavailable: Bark runs on Apple silicon Macs only
+
+engine/src/velora_engine/bark.py:149: BarkUnavailable
+_______________________ test_coreml_identity_is_checked ________________________
+
+coreml = <test_bark.FakeCoreML object at 0x7f65966cbe00>
+
+    def test_coreml_identity_is_checked(coreml):
+        (coreml.source / "coreml" / "ane" / "vocab.json").write_bytes(VOCAB.replace(b"hi", b"ho"))
+        with pytest.raises(bark.BarkIdentityError):
+>           bark.load_bark_coreml(coreml.source, coreml.cache)
+
+engine/tests/test_bark.py:691: 
+_ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ 
+engine/src/velora_engine/bark.py:811: in load_bark_coreml
+    ct = _require_coremltools()
+         ^^^^^^^^^^^^^^^^^^^^^^
+engine/src/velora_engine/bark.py:615: in _require_coremltools
+    _require_apple_silicon()
+_ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ 
+
+    def _require_apple_silicon() -> None:
+        if sys.platform != "darwin" or platform.machine() != "arm64":
+>           raise BarkUnavailable("Bark runs on Apple silicon Macs only")
+E           velora_engine.bark.BarkUnavailable: Bark runs on Apple silicon Macs only
+
+engine/src/velora_engine/bark.py:149: BarkUnavailable
+_________________ test_real_meeting_caf_loader_and_planner_cpu _________________
+
+src = PosixPath('/data/tmp/pytest-of-sushil/pytest-1/test_real_meeting_caf_loader_a0/meeting.caf')
+identity = (65040, 135274, 68096, 1794941718505668749), duration_s = 2.0
+failure_path = None, previous = None
+cancel = <function test_real_meeting_caf_loader_and_planner_cpu.<locals>.<lambda> at 0x7f659618b920>
+
+    def _load_converted(
+        src: Path, identity: tuple[int, int, int, int], duration_s: float,
+        failure_path: Path | None, previous: dict | None,
+        *, cancel: Callable[[], bool],
+    ) -> MeetingAudio:
+        """Reserve decoded space and give CAF and M4A the same conversion verdict."""
+        reserved = _required_meeting_bytes(duration_s) + _CONVERT_FREE_SPACE_MARGIN_BYTES
+        _check_meeting_space(reserved)
+        try:
+>           track = _convert_meeting(src, duration_s, cancel=cancel)
+                    ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+engine/src/velora_engine/media.py:582: 
+_ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ 
+engine/src/velora_engine/media.py:558: in _convert_meeting
+    returncode, stdout, stderr = _run_core_audio(
+engine/src/velora_engine/media.py:378: in _run_core_audio
+    process = subprocess.Popen(
+/usr/lib/python3.12/subprocess.py:1026: in __init__
+    self._execute_child(args, executable, preexec_fn, close_fds,
+_ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ 
+
+self = <Popen: returncode: 255 args: ['afconvert', '-f', 'caff', '-d', 'LEI16@16000...>
+args = ['afconvert', '-f', 'caff', '-d', 'LEI16@16000', '-c', ...]
+executable = b'afconvert', preexec_fn = None, close_fds = True, pass_fds = ()
+cwd = None, env = None, startupinfo = None, creationflags = 0, shell = False
+p2cread = -1, p2cwrite = -1, c2pread = 11, c2pwrite = 12, errread = 13
+errwrite = 14, restore_signals = True, gid = None, gids = None, uid = None
+umask = -1, start_new_session = False, process_group = -1
+
+    def _execute_child(self, args, executable, preexec_fn, close_fds,
+                       pass_fds, cwd, env,
+                       startupinfo, creationflags, shell,
+                       p2cread, p2cwrite,
+                       c2pread, c2pwrite,
+                       errread, errwrite,
+                       restore_signals,
+                       gid, gids, uid, umask,
+                       start_new_session, process_group):
+        """Execute program (POSIX version)"""
+    
+        if isinstance(args, (str, bytes)):
+            args = [args]
+        elif isinstance(args, os.PathLike):
+            if shell:
+                raise TypeError('path-like args is not allowed when '
+                                'shell is true')
+            args = [args]
+        else:
+            args = list(args)
+    
+        if shell:
+            # On Android the default shell is at '/system/bin/sh'.
+            unix_shell = ('/system/bin/sh' if
+                      hasattr(sys, 'getandroidapilevel') else '/bin/sh')
+            args = [unix_shell, "-c"] + args
+            if executable:
+                args[0] = executable
+    
+        if executable is None:
+            executable = args[0]
+    
+        sys.audit("subprocess.Popen", executable, args, cwd, env)
+    
+        if (_USE_POSIX_SPAWN
+                and os.path.dirname(executable)
+                and preexec_fn is None
+                and not close_fds
+                and not pass_fds
+                and cwd is None
+                and (p2cread == -1 or p2cread > 2)
+                and (c2pwrite == -1 or c2pwrite > 2)
+                and (errwrite == -1 or errwrite > 2)
+                and not start_new_session
+                and process_group == -1
+                and gid is None
+                and gids is None
+                and uid is None
+                and umask < 0):
+            self._posix_spawn(args, executable, env, restore_signals,
+                              p2cread, p2cwrite,
+                              c2pread, c2pwrite,
+                              errread, errwrite)
+            return
+    
+        orig_executable = executable
+    
+        # For transferring possible exec failure from child to parent.
+        # Data format: "exception name:hex errno:description"
+        # Pickle is not used; it is complex and involves memory allocation.
+        errpipe_read, errpipe_write = os.pipe()
+        # errpipe_write must not be in the standard io 0, 1, or 2 fd range.
+        low_fds_to_close = []
+        while errpipe_write < 3:
+            low_fds_to_close.append(errpipe_write)
+            errpipe_write = os.dup(errpipe_write)
+        for low_fd in low_fds_to_close:
+            os.close(low_fd)
+        try:
+            try:
+                # We must avoid complex work that could involve
+                # malloc or free in the child process to avoid
+                # potential deadlocks, thus we do all this here.
+                # and pass it to fork_exec()
+    
+                if env is not None:
+                    env_list = []
+                    for k, v in env.items():
+                        k = os.fsencode(k)
+                        if b'=' in k:
+                            raise ValueError("illegal environment variable name")
+                        env_list.append(k + b'=' + os.fsencode(v))
+                else:
+                    env_list = None  # Use execv instead of execve.
+                executable = os.fsencode(executable)
+                if os.path.dirname(executable):
+                    executable_list = (executable,)
+                else:
+                    # This matches the behavior of os._execvpe().
+                    executable_list = tuple(
+                        os.path.join(os.fsencode(dir), executable)
+                        for dir in os.get_exec_path(env))
+                fds_to_keep = set(pass_fds)
+                fds_to_keep.add(errpipe_write)
+                self.pid = _fork_exec(
+                        args, executable_list,
+                        close_fds, tuple(sorted(map(int, fds_to_keep))),
+                        cwd, env_list,
+                        p2cread, p2cwrite, c2pread, c2pwrite,
+                        errread, errwrite,
+                        errpipe_read, errpipe_write,
+                        restore_signals, start_new_session,
+                        process_group, gid, gids, uid, umask,
+                        preexec_fn, _USE_VFORK)
+                self._child_created = True
+            finally:
+                # be sure the FD is closed no matter what
+                os.close(errpipe_write)
+    
+            self._close_pipe_fds(p2cread, p2cwrite,
+                                 c2pread, c2pwrite,
+                                 errread, errwrite)
+    
+            # Wait for exec to fail or succeed; possibly raising an
+            # exception (limited in size)
+            errpipe_data = bytearray()
+            while True:
+                part = os.read(errpipe_read, 50000)
+                errpipe_data += part
+                if not part or len(errpipe_data) > 50000:
+                    break
+        finally:
+            # be sure the FD is closed no matter what
+            os.close(errpipe_read)
+    
+        if errpipe_data:
+            try:
+                pid, sts = os.waitpid(self.pid, 0)
+                if pid == self.pid:
+                    self._handle_exitstatus(sts)
+                else:
+                    self.returncode = sys.maxsize
+            except ChildProcessError:
+                pass
+    
+            try:
+                exception_name, hex_errno, err_msg = (
+                        errpipe_data.split(b':', 2))
+                # The encoding here should match the encoding
+                # written in by the subprocess implementations
+                # like _posixsubprocess
+                err_msg = err_msg.decode()
+            except ValueError:
+                exception_name = b'SubprocessError'
+                hex_errno = b'0'
+                err_msg = 'Bad exception data from child: {!r}'.format(
+                              bytes(errpipe_data))
+            child_exception_type = getattr(
+                    builtins, exception_name.decode('ascii'),
+                    SubprocessError)
+            if issubclass(child_exception_type, OSError) and hex_errno:
+                errno_num = int(hex_errno, 16)
+                if err_msg == "noexec:chdir":
+                    err_msg = ""
+                    # The error must be from chdir(cwd).
+                    err_filename = cwd
+                elif err_msg == "noexec":
+                    err_msg = ""
+                    err_filename = None
+                else:
+                    err_filename = orig_executable
+                if errno_num != 0:
+                    err_msg = os.strerror(errno_num)
+                if err_filename is not None:
+>                   raise child_exception_type(errno_num, err_msg, err_filename)
+E                   FileNotFoundError: [Errno 2] No such file or directory: 'afconvert'
+
+/usr/lib/python3.12/subprocess.py:1955: FileNotFoundError
+
+The above exception was the direct cause of the following exception:
+
+tmp_path = PosixPath('/data/tmp/pytest-of-sushil/pytest-1/test_real_meeting_caf_loader_a0')
+
+    def test_real_meeting_caf_loader_and_planner_cpu(tmp_path):
+        sf = pytest.importorskip('soundfile')
+        path = tmp_path / 'meeting.caf'
+        sf.write(str(path), np.zeros(2 * b.SAMPLE_RATE, dtype=np.float32), b.SAMPLE_RATE,
+                 format='CAF', subtype='PCM_16')
+>       track = b.load_meeting_media(str(path), meeting_root=tmp_path, cancel=lambda: False)
+                ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+engine/tests/test_benchmark_long_transcription.py:57: 
+_ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ 
+engine/src/velora_engine/media.py:862: in load_meeting_media
+    return _load_converted(src, initial_identity, duration_s, failure_path,
+_ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ 
+
+src = PosixPath('/data/tmp/pytest-of-sushil/pytest-1/test_real_meeting_caf_loader_a0/meeting.caf')
+identity = (65040, 135274, 68096, 1794941718505668749), duration_s = 2.0
+failure_path = None, previous = None
+cancel = <function test_real_meeting_caf_loader_and_planner_cpu.<locals>.<lambda> at 0x7f659618b920>
+
+    def _load_converted(
+        src: Path, identity: tuple[int, int, int, int], duration_s: float,
+        failure_path: Path | None, previous: dict | None,
+        *, cancel: Callable[[], bool],
+    ) -> MeetingAudio:
+        """Reserve decoded space and give CAF and M4A the same conversion verdict."""
+        reserved = _required_meeting_bytes(duration_s) + _CONVERT_FREE_SPACE_MARGIN_BYTES
+        _check_meeting_space(reserved)
+        try:
+            track = _convert_meeting(src, duration_s, cancel=cancel)
+        except subprocess.TimeoutExpired as exc:
+            raise TransientMediaError("meeting audio conversion timed out") from exc
+        except (OSError, RuntimeError) as exc:
+            # Spawn, output and read-back faults say nothing about source bytes.
+>           raise TransientMediaError(f"meeting audio could not be converted ({exc})") from exc
+E           velora_engine.media.TransientMediaError: meeting audio could not be converted ([Errno 2] No such file or directory: 'afconvert')
+
+engine/src/velora_engine/media.py:587: TransientMediaError
+_ test_isolated_worker_keeps_production_id_and_copy_draft_and_reaps_load_failure _
+
+cls = <class 'importlib.metadata.Distribution'>, name = 'mlx'
+
+    @classmethod
+    def from_name(cls, name: str):
+        """Return the Distribution for the given package name.
+    
+        :param name: The name of the distribution package to search for.
+        :return: The Distribution instance (or subclass thereof) for the named
+            package, if found.
+        :raises PackageNotFoundError: When the named package's distribution
+            metadata cannot be found.
+        :raises ValueError: When an invalid value is supplied for name.
+        """
+        if not name:
+            raise ValueError("A distribution name is required.")
+        try:
+>           return next(cls.discover(name=name))
+                   ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+E           StopIteration
+
+/usr/lib/python3.12/importlib/metadata/__init__.py:397: StopIteration
+
+During handling of the above exception, another exception occurred:
+
+monkeypatch = <_pytest.monkeypatch.MonkeyPatch object at 0x7f65961c1640>
+tmp_path = PosixPath('/data/tmp/pytest-of-sushil/pytest-1/test_isolated_worker_keeps_pro0')
+
+    def test_isolated_worker_keeps_production_id_and_copy_draft_and_reaps_load_failure(
+        monkeypatch, tmp_path,
+    ):
+        engines = []
+    
+        class Process:
+            def __init__(self, identity, **kwargs):
+                self.identity, self.options, self.closed = identity, kwargs, False
+                engines.append(self)
+    
+            async def load_async(self, prompt):
+                raise RuntimeError("controlled load failure")
+    
+            async def aclose(self):
+                self.closed = True
+    
+        async def fail_load(model_id, config, selected, repeats):
+            engine = study.quality.CleanupProcess("/weights")
+            await engine.load_async("production system")
+    
+        monkeypatch.setattr(study, "CleanupProcess", Process)
+        monkeypatch.setattr(study.quality, "_run_model", fail_load)
+        monkeypatch.setattr(study, "host_snapshot", lambda: sample(time_ns=1))
+        monkeypatch.setattr(study, "model_evidence", lambda path: {})
+        monkeypatch.setenv("VELORA_HOME", str(tmp_path / "original-home"))
+        args = SimpleNamespace(output=tmp_path / "run", model_path=tmp_path,
+                               model_id="logical-production-id", prompt_style="production",
+                               repeats=2, cache_limit_mb=None, copy_draft=False)
+>       assert asyncio.run(study.run(args)) == 1
+               ^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+engine/tests/test_benchmark_model_replacement.py:168: 
+_ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ 
+/usr/lib/python3.12/asyncio/runners.py:194: in run
+    return runner.run(main)
+           ^^^^^^^^^^^^^^^^
+/usr/lib/python3.12/asyncio/runners.py:118: in run
+    return self._loop.run_until_complete(task)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+/usr/lib/python3.12/asyncio/base_events.py:687: in run_until_complete
+    return future.result()
+           ^^^^^^^^^^^^^^^
+engine/scripts/benchmark_model_replacement.py:284: in run
+    "runtime": {name: __import__("importlib.metadata", fromlist=["version"]).version(name)
+                      ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+/usr/lib/python3.12/importlib/metadata/__init__.py:889: in version
+    return distribution(distribution_name).version
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+/usr/lib/python3.12/importlib/metadata/__init__.py:862: in distribution
+    return Distribution.from_name(distribution_name)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+_ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ 
+
+cls = <class 'importlib.metadata.Distribution'>, name = 'mlx'
+
+    @classmethod
+    def from_name(cls, name: str):
+        """Return the Distribution for the given package name.
+    
+        :param name: The name of the distribution package to search for.
+        :return: The Distribution instance (or subclass thereof) for the named
+            package, if found.
+        :raises PackageNotFoundError: When the named package's distribution
+            metadata cannot be found.
+        :raises ValueError: When an invalid value is supplied for name.
+        """
+        if not name:
+            raise ValueError("A distribution name is required.")
+        try:
+            return next(cls.discover(name=name))
+        except StopIteration:
+>           raise PackageNotFoundError(name)
+E           importlib.metadata.PackageNotFoundError: No package metadata was found for mlx
+
+/usr/lib/python3.12/importlib/metadata/__init__.py:399: PackageNotFoundError
+_______________ test_full_replay_private_resume_and_long_pieces ________________
+
+cls = <class 'importlib.metadata.Distribution'>, name = 'mlx-lm'
+
+    @classmethod
+    def from_name(cls, name: str):
+        """Return the Distribution for the given package name.
+    
+        :param name: The name of the distribution package to search for.
+        :return: The Distribution instance (or subclass thereof) for the named
+            package, if found.
+        :raises PackageNotFoundError: When the named package's distribution
+            metadata cannot be found.
+        :raises ValueError: When an invalid value is supplied for name.
+        """
+        if not name:
+            raise ValueError("A distribution name is required.")
+        try:
+>           return next(cls.discover(name=name))
+                   ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+E           StopIteration
+
+/usr/lib/python3.12/importlib/metadata/__init__.py:397: StopIteration
+
+During handling of the above exception, another exception occurred:
+
+tmp_path = PosixPath('/data/tmp/pytest-of-sushil/pytest-1/test_full_replay_private_resum0')
+monkeypatch = <_pytest.monkeypatch.MonkeyPatch object at 0x7f6596178980>
+capsys = <_pytest.capture.CaptureFixture object at 0x7f65961fc050>
+
+    def test_full_replay_private_resume_and_long_pieces(tmp_path,monkeypatch,capsys):
+        from types import ModuleType
+        from contextlib import nullcontext
+        cfg_home=tmp_path/'source';cfg_home.mkdir()
+        (cfg_home/'config.json').write_text(json.dumps({'cleanup_enabled':True}))
+        manifest=tmp_path/'manifest.json'
+        cases=[{'id':1,'input_sha256':'a','mode':'Default'},
+               {'id':2,'input_sha256':'b','mode':'Terminal'},
+               {'id':3,'input_sha256':'c','mode':'Default'}]
+        manifest.write_text(json.dumps({'cases':cases}))
+        stt_dir=tmp_path/'stt';stt_dir.mkdir();stt=stt_dir/'stt.jsonl'
+        stt.write_text('\n'.join(json.dumps(x) for x in [
+            {'id':1,'input_sha256':'a','status':'ok','raw':'This sentence contains enough words for the formatting model to run','stt_s':1},
+            {'id':2,'input_sha256':'b','status':'ok','raw':'git status','stt_s':2},
+            {'id':3,'input_sha256':'c','status':'ok','raw':'This is a longer sentence for testing. '*100,'stt_s':3}]))
+        stt_meta=stt_dir/'stt-run.json'
+        stt_meta.write_text(json.dumps({'manifest_sha256':bench.digest(manifest),'model':'mlx-community/whisper-large-v3-turbo',
+            'model_files_sha256':{'weights.npz':'f'*64}, 'glossary':{
+                'mode':'production global glossary; no historical screen entities',
+                'sha256':bench.hashlib.sha256(b'').hexdigest(),
+                'source_sha256':{'config.json':bench.digest(cfg_home/'config.json')}}}))
+        model_dir=tmp_path/'model';model_dir.mkdir(); (model_dir/'weight').write_text('weights')
+        monkeypatch.setattr(bench,'local_snapshot',lambda p,r:(str(model_dir),{'weight':'pinned'}))
+        monkeypatch.setattr(bench,'load_local_snapshot',lambda *a:(None,Tokenizer()))
+        monkeypatch.setattr(bench,'lfm3_architecture',lambda *a:nullcontext())
+        monkeypatch.setattr(bench,'configure_student_allocator',lambda:512*1024*1024)
+        monkeypatch.setattr(bench,'write_end_resources',lambda *a:None)
+        monkeypatch.setattr(bench.importlib.metadata,'version',lambda _: 'test-version')
+        mlx=ModuleType('mlx_lm');samplers=ModuleType('mlx_lm.sample_utils')
+        def generate(model,tok,prompt,max_tokens,sampler):
+            messages=json.loads(prompt);payload=json.loads(messages[1]['content'])
+            yield SimpleNamespace(text=payload['transcript'],finish_reason='stop',generation_tokens=1)
+        mlx.stream_generate=generate;samplers.make_sampler=lambda **kw:None
+        monkeypatch.setitem(sys.modules,'mlx_lm',mlx);monkeypatch.setitem(sys.modules,'mlx_lm.sample_utils',samplers)
+        args=SimpleNamespace(manifest=manifest,stt=stt,stt_meta=stt_meta,output=tmp_path/'out',
+            config_home=cfg_home,base=model_dir,base_revision='a'*40,adapter=None,lfm_port=None,
+            max_output=1024,max_input=10000,limit=None,decoder='stream',copy_draft_tokens=3)
+>       asyncio.run(bench.replay(args))
+
+engine/tests/test_benchmark_personal_student.py:126: 
+_ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ 
+/usr/lib/python3.12/asyncio/runners.py:194: in run
+    return runner.run(main)
+           ^^^^^^^^^^^^^^^^
+/usr/lib/python3.12/asyncio/runners.py:118: in run
+    return self._loop.run_until_complete(task)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+/usr/lib/python3.12/asyncio/base_events.py:687: in run_until_complete
+    return future.result()
+           ^^^^^^^^^^^^^^^
+engine/scripts/benchmark_personal_student.py:252: in replay
+    with lfm3_architecture(args.lfm_port), experimental_cache_api(), experimental_copy_draft_tokens(args.copy_draft_tokens):
+/usr/lib/python3.12/contextlib.py:137: in __enter__
+    return next(self.gen)
+           ^^^^^^^^^^^^^^
+training/cleanup/cleanup/cache_compat.py:38: in experimental_cache_api
+    release = version('mlx-lm')
+              ^^^^^^^^^^^^^^^^^
+/usr/lib/python3.12/importlib/metadata/__init__.py:889: in version
+    return distribution(distribution_name).version
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+/usr/lib/python3.12/importlib/metadata/__init__.py:862: in distribution
+    return Distribution.from_name(distribution_name)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+_ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ 
+
+cls = <class 'importlib.metadata.Distribution'>, name = 'mlx-lm'
+
+    @classmethod
+    def from_name(cls, name: str):
+        """Return the Distribution for the given package name.
+    
+        :param name: The name of the distribution package to search for.
+        :return: The Distribution instance (or subclass thereof) for the named
+            package, if found.
+        :raises PackageNotFoundError: When the named package's distribution
+            metadata cannot be found.
+        :raises ValueError: When an invalid value is supplied for name.
+        """
+        if not name:
+            raise ValueError("A distribution name is required.")
+        try:
+            return next(cls.discover(name=name))
+        except StopIteration:
+>           raise PackageNotFoundError(name)
+E           importlib.metadata.PackageNotFoundError: No package metadata was found for mlx-lm
+
+/usr/lib/python3.12/importlib/metadata/__init__.py:399: PackageNotFoundError
+_________________ test_prepare_refuses_outputs_git_would_track _________________
+
+script = <module 'prepare_bundled_model' from '/data/workspace/velora-model-study-2026-11-18-ebd3420d/scripts/prepare-bundled-model.py'>
+tmp_path = PosixPath('/data/tmp/pytest-of-sushil/pytest-1/test_prepare_refuses_outputs_g0')
+
+    def test_prepare_refuses_outputs_git_would_track(script, tmp_path):
+        assert script._inside_repo_unignored(REPO / "engine" / "src" / "weights")
+>       assert not script._inside_repo_unignored(REPO / "build" / "bundled-models")
+E       AssertionError: assert not True
+E        +  where True = <function _inside_repo_unignored at 0x7f6595d344a0>(((PosixPath('/data/workspace/velora-model-study-2026-11-18-ebd3420d') / 'build') / 'bundled-models'))
+E        +    where <function _inside_repo_unignored at 0x7f6595d344a0> = <module 'prepare_bundled_model' from '/data/workspace/velora-model-study-2026-11-18-ebd3420d/scripts/prepare-bundled-model.py'>._inside_repo_unignored
+
+engine/tests/test_bundled_models.py:404: AssertionError
+__________ test_dictation_cleanup_verifies_transcript_drafts_in_bulk ___________
+
+monkeypatch = <_pytest.monkeypatch.MonkeyPatch object at 0x7f6595d42d20>
+
+    def test_dictation_cleanup_verifies_transcript_drafts_in_bulk(monkeypatch):
+        # "uh" is dropped and "," inserted mid-draft: two rejected drafts.
+        raw = "we should uh ship it today okay"
+        target = "We should ship it today, okay."
+>       engine, oracle = _oracle_cleanup(monkeypatch, target)
+                         ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+engine/tests/test_cleanup.py:429: 
+_ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ 
+
+monkeypatch = <_pytest.monkeypatch.MonkeyPatch object at 0x7f6595d42d20>
+target = 'We should ship it today, okay.'
+
+    def _oracle_cleanup(monkeypatch, target: str):
+        """RecordingCleanup on a GreedyOracle; stock generation steps one token."""
+>       import mlx.core as mx
+E       ModuleNotFoundError: No module named 'mlx'
+
+engine/tests/test_cleanup.py:361: ModuleNotFoundError
+_________________ test_transformations_keep_one_token_decoding _________________
+
+monkeypatch = <_pytest.monkeypatch.MonkeyPatch object at 0x7f65961ff350>
+
+    def test_transformations_keep_one_token_decoding(monkeypatch):
+        # "uh" is dropped and "," inserted mid-draft: two rejected drafts.
+        raw = "we should uh ship it today okay"
+        target = "We should ship it today, okay."
+>       engine, oracle = _oracle_cleanup(monkeypatch, target)
+                         ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+engine/tests/test_cleanup.py:449: 
+_ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ 
+
+monkeypatch = <_pytest.monkeypatch.MonkeyPatch object at 0x7f65961ff350>
+target = 'We should ship it today, okay.'
+
+    def _oracle_cleanup(monkeypatch, target: str):
+        """RecordingCleanup on a GreedyOracle; stock generation steps one token."""
+>       import mlx.core as mx
+E       ModuleNotFoundError: No module named 'mlx'
+
+engine/tests/test_cleanup.py:361: ModuleNotFoundError
+___ test_runtime_prefix_extension_preserves_exact_prompt_and_static_fallback ___
+
+monkeypatch = <_pytest.monkeypatch.MonkeyPatch object at 0x7f6595d416d0>
+
+    def test_runtime_prefix_extension_preserves_exact_prompt_and_static_fallback(
+        monkeypatch,
+    ):
+        engine = RecordingCleanup()
+        engine._warm("stable instructions")
+        static_tokens = list(engine._prepared_tokens)
+        system = "stable instructions\n\nFormatting strength: FULL."
+        raw = "raw transcript"
+        candidates = [
+            (system, "alpha transcript"),
+            (system, "zulu transcript"),
+        ]
+        expected = engine._prompt_tokens(system, raw)
+        observed: list[int] = []
+    
+        def generate(*_args, prompt, prompt_cache, **_kwargs):
+            observed.extend(prompt_cache[0].state[0])
+            observed.extend(prompt)
+            yield SimpleNamespace(text="fixed", token=1, generation_tokens=1)
+    
+>       import mlx_lm
+E       ModuleNotFoundError: No module named 'mlx_lm'
+
+engine/tests/test_cleanup.py:480: ModuleNotFoundError
+_______ test_action_prefix_is_session_scoped_and_cleanup_prefix_survives _______
+
+monkeypatch = <_pytest.monkeypatch.MonkeyPatch object at 0x7f6595d43c80>
+
+    def test_action_prefix_is_session_scoped_and_cleanup_prefix_survives(monkeypatch):
+>       import mlx.core as mx
+E       ModuleNotFoundError: No module named 'mlx'
+
+engine/tests/test_cleanup.py:513: ModuleNotFoundError
+_____ test_failed_runtime_prefix_extension_restores_clean_static_snapshot ______
+
+monkeypatch = <_pytest.monkeypatch.MonkeyPatch object at 0x7f6595de4770>
+
+    def test_failed_runtime_prefix_extension_restores_clean_static_snapshot(
+        monkeypatch,
+    ):
+        engine = RecordingCleanup()
+        engine._warm("stable instructions")
+        static_tokens = list(engine._prepared_tokens)
+        static_snapshot = engine._prepared_cache
+        system = "stable instructions\n\nFormatting strength: FULL."
+        raw = "raw transcript"
+        candidates = [
+            (system, "alpha transcript"),
+            (system, "zulu transcript"),
+        ]
+    
+        def partial_then_fail(cache, tokens, cancel_event=None):
+            cache[0].state[0].extend(tokens[:3])
+            raise RuntimeError("prefill failed")
+    
+        observed: list[int] = []
+    
+        def generate(*_args, prompt, prompt_cache, **_kwargs):
+            observed.extend(prompt_cache[0].state[0])
+            observed.extend(prompt)
+            yield SimpleNamespace(text="fixed", token=1, generation_tokens=1)
+    
+>       import mlx_lm
+E       ModuleNotFoundError: No module named 'mlx_lm'
+
+engine/tests/test_cleanup.py:636: ModuleNotFoundError
+__________ test_runtime_prefix_snapshot_failure_keeps_atomic_old_pair __________
+
+monkeypatch = <_pytest.monkeypatch.MonkeyPatch object at 0x7f6595de43b0>
+
+    def test_runtime_prefix_snapshot_failure_keeps_atomic_old_pair(
+        monkeypatch,
+    ):
+        import velora_engine.cleanup as cleanup_mod
+>       import mlx_lm
+E       ModuleNotFoundError: No module named 'mlx_lm'
+
+engine/tests/test_cleanup.py:665: ModuleNotFoundError
+______________ test_soft_deadline_starts_after_first_output_token ______________
+
+monkeypatch = <_pytest.monkeypatch.MonkeyPatch object at 0x7f6595de5730>
+
+    def test_soft_deadline_starts_after_first_output_token(monkeypatch):
+        engine = RecordingCleanup()
+        engine._cache_for_tokens = (
+            lambda _tokens, cache_scope=None: ([FakeCache()], 7, True)
+        )
+    
+        def slow_prefill_then_fast_output(*_args, **_kwargs):
+            time.sleep(0.03)  # longer than the 10ms output budget
+            yield SimpleNamespace(text="fixed", token=1, generation_tokens=1)
+    
+>       import mlx_lm
+E       ModuleNotFoundError: No module named 'mlx_lm'
+
+engine/tests/test_cleanup.py:717: ModuleNotFoundError
+_________________ test_soft_deadline_still_bounds_slow_output __________________
+
+monkeypatch = <_pytest.monkeypatch.MonkeyPatch object at 0x7f65961feed0>
+
+    def test_soft_deadline_still_bounds_slow_output(monkeypatch):
+        engine = RecordingCleanup()
+        engine._cache_for_tokens = (
+            lambda _tokens, cache_scope=None: ([FakeCache()], 0, False)
+        )
+    
+        def slow_output(*_args, **_kwargs):
+            yield SimpleNamespace(text="fixed", token=1, generation_tokens=1)
+            time.sleep(0.03)
+            yield SimpleNamespace(text=" too late", token=2, generation_tokens=2)
+    
+>       import mlx_lm
+E       ModuleNotFoundError: No module named 'mlx_lm'
+
+engine/tests/test_cleanup.py:742: ModuleNotFoundError
+__________ test_cooperative_cancel_is_not_reported_as_quality_timeout __________
+
+monkeypatch = <_pytest.monkeypatch.MonkeyPatch object at 0x7f6595d43ec0>
+
+    def test_cooperative_cancel_is_not_reported_as_quality_timeout(monkeypatch):
+        engine = RecordingCleanup()
+        event = threading.Event()
+        event.set()
+    
+        def should_not_generate(*_args, **_kwargs):
+            raise AssertionError("cancelled cleanup should not enter generation")
+            yield
+    
+>       import mlx_lm
+E       ModuleNotFoundError: No module named 'mlx_lm'
+
+engine/tests/test_cleanup.py:763: ModuleNotFoundError
+________________________ test_prefill_cancel_is_safe[0] ________________________
+
+monkeypatch = <_pytest.monkeypatch.MonkeyPatch object at 0x7f6595d43e90>
+cancel_at = 0
+
+    @pytest.mark.parametrize("cancel_at", [0, 256, 1024])
+    def test_prefill_cancel_is_safe(monkeypatch, cancel_at):
+        engine = RecordingCleanup()
+        cancel = threading.Event()
+        completed = []
+        caches = []
+        released = []
+    
+        def prefill(*_args, **kwargs):
+            caches.append(kwargs["prompt_cache"])
+            progress = kwargs.get("prompt_progress_callback", lambda *_: None)
+            for processed in [0, 256, 1024]:
+                if processed == cancel_at:
+                    cancel.set()
+                progress(processed, 1024)
+                completed.append(processed)
+            yield SimpleNamespace(text="raw", token=1, generation_tokens=1)
+    
+>       import mlx.core as mx
+E       ModuleNotFoundError: No module named 'mlx'
+
+engine/tests/test_cleanup.py:794: ModuleNotFoundError
+_______________________ test_prefill_cancel_is_safe[256] _______________________
+
+monkeypatch = <_pytest.monkeypatch.MonkeyPatch object at 0x7f6595d426c0>
+cancel_at = 256
+
+    @pytest.mark.parametrize("cancel_at", [0, 256, 1024])
+    def test_prefill_cancel_is_safe(monkeypatch, cancel_at):
+        engine = RecordingCleanup()
+        cancel = threading.Event()
+        completed = []
+        caches = []
+        released = []
+    
+        def prefill(*_args, **kwargs):
+            caches.append(kwargs["prompt_cache"])
+            progress = kwargs.get("prompt_progress_callback", lambda *_: None)
+            for processed in [0, 256, 1024]:
+                if processed == cancel_at:
+                    cancel.set()
+                progress(processed, 1024)
+                completed.append(processed)
+            yield SimpleNamespace(text="raw", token=1, generation_tokens=1)
+    
+>       import mlx.core as mx
+E       ModuleNotFoundError: No module named 'mlx'
+
+engine/tests/test_cleanup.py:794: ModuleNotFoundError
+______________________ test_prefill_cancel_is_safe[1024] _______________________
+
+monkeypatch = <_pytest.monkeypatch.MonkeyPatch object at 0x7f6595de63f0>
+cancel_at = 1024
+
+    @pytest.mark.parametrize("cancel_at", [0, 256, 1024])
+    def test_prefill_cancel_is_safe(monkeypatch, cancel_at):
+        engine = RecordingCleanup()
+        cancel = threading.Event()
+        completed = []
+        caches = []
+        released = []
+    
+        def prefill(*_args, **kwargs):
+            caches.append(kwargs["prompt_cache"])
+            progress = kwargs.get("prompt_progress_callback", lambda *_: None)
+            for processed in [0, 256, 1024]:
+                if processed == cancel_at:
+                    cancel.set()
+                progress(processed, 1024)
+                completed.append(processed)
+            yield SimpleNamespace(text="raw", token=1, generation_tokens=1)
+    
+>       import mlx.core as mx
+E       ModuleNotFoundError: No module named 'mlx'
+
+engine/tests/test_cleanup.py:794: ModuleNotFoundError
+______ test_copy_draft_is_requested_explicitly_not_implied_by_check_ratio ______
+
+monkeypatch = <_pytest.monkeypatch.MonkeyPatch object at 0x7f6595de4920>
+
+    def test_copy_draft_is_requested_explicitly_not_implied_by_check_ratio(monkeypatch):
+        raw = "we should uh ship it today okay"
+        target = "We should ship it today, okay."
+>       engine, oracle = _oracle_cleanup(monkeypatch, target)
+                         ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+engine/tests/test_cleanup.py:828: 
+_ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ 
+
+monkeypatch = <_pytest.monkeypatch.MonkeyPatch object at 0x7f6595de4920>
+target = 'We should ship it today, okay.'
+
+    def _oracle_cleanup(monkeypatch, target: str):
+        """RecordingCleanup on a GreedyOracle; stock generation steps one token."""
+>       import mlx.core as mx
+E       ModuleNotFoundError: No module named 'mlx'
+
+engine/tests/test_cleanup.py:361: ModuleNotFoundError
+_________________ test_copy_draft_runs_only_on_benched_models __________________
+
+monkeypatch = <_pytest.monkeypatch.MonkeyPatch object at 0x7f6595de6de0>
+
+    def test_copy_draft_runs_only_on_benched_models(monkeypatch):
+        raw = "we should uh ship it today okay"
+        target = "We should ship it today, okay."
+>       engine, oracle = _oracle_cleanup(monkeypatch, target)
+                         ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+engine/tests/test_cleanup.py:842: 
+_ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ 
+
+monkeypatch = <_pytest.monkeypatch.MonkeyPatch object at 0x7f6595de6de0>
+target = 'We should ship it today, okay.'
+
+    def _oracle_cleanup(monkeypatch, target: str):
+        """RecordingCleanup on a GreedyOracle; stock generation steps one token."""
+>       import mlx.core as mx
+E       ModuleNotFoundError: No module named 'mlx'
+
+engine/tests/test_cleanup.py:361: ModuleNotFoundError
+_______ test_copy_draft_runs_inside_wired_limit_on_the_generation_stream _______
+
+monkeypatch = <_pytest.monkeypatch.MonkeyPatch object at 0x7f6595de7c50>
+
+    def test_copy_draft_runs_inside_wired_limit_on_the_generation_stream(monkeypatch):
+        """Copy-draft sets up the GPU the way stream_generate does."""
+>       import mlx.core as mx
+E       ModuleNotFoundError: No module named 'mlx'
+
+engine/tests/test_cleanup.py:865: ModuleNotFoundError
+____ test_cancelled_stock_generation_is_closed_before_its_cache_is_cleared _____
+
+monkeypatch = <_pytest.monkeypatch.MonkeyPatch object at 0x7f6595df87a0>
+
+    def test_cancelled_stock_generation_is_closed_before_its_cache_is_cleared(monkeypatch):
+>       import mlx_lm
+E       ModuleNotFoundError: No module named 'mlx_lm'
+
+engine/tests/test_cleanup.py:888: ModuleNotFoundError
+__________ test_copy_draft_cancelled_between_passes_stops_and_closes ___________
+
+monkeypatch = <_pytest.monkeypatch.MonkeyPatch object at 0x7f6595df8470>
+
+    def test_copy_draft_cancelled_between_passes_stops_and_closes(monkeypatch):
+        raw = "we should uh ship it today okay"
+>       engine, oracle = _oracle_cleanup(monkeypatch, "We should ship it today, okay.")
+                         ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+engine/tests/test_cleanup.py:926: 
+_ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ 
+
+monkeypatch = <_pytest.monkeypatch.MonkeyPatch object at 0x7f6595df8470>
+target = 'We should ship it today, okay.'
+
+    def _oracle_cleanup(monkeypatch, target: str):
+        """RecordingCleanup on a GreedyOracle; stock generation steps one token."""
+>       import mlx.core as mx
+E       ModuleNotFoundError: No module named 'mlx'
+
+engine/tests/test_cleanup.py:361: ModuleNotFoundError
+___________ test_copy_draft_timeout_mid_pass_returns_raw_and_closes ____________
+
+monkeypatch = <_pytest.monkeypatch.MonkeyPatch object at 0x7f6595df9cd0>
+
+    def test_copy_draft_timeout_mid_pass_returns_raw_and_closes(monkeypatch):
+        raw = "we should uh ship it today okay"
+        target = "We should ship it today, okay."
+>       engine, oracle = _oracle_cleanup(monkeypatch, target)
+                         ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+engine/tests/test_cleanup.py:961: 
+_ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ 
+
+monkeypatch = <_pytest.monkeypatch.MonkeyPatch object at 0x7f6595df9cd0>
+target = 'We should ship it today, okay.'
+
+    def _oracle_cleanup(monkeypatch, target: str):
+        """RecordingCleanup on a GreedyOracle; stock generation steps one token."""
+>       import mlx.core as mx
+E       ModuleNotFoundError: No module named 'mlx'
+
+engine/tests/test_cleanup.py:361: ModuleNotFoundError
+___________ test_copy_draft_stops_at_an_eos_drafted_from_the_prompt ____________
+
+monkeypatch = <_pytest.monkeypatch.MonkeyPatch object at 0x7f6595dfa8a0>
+
+    def test_copy_draft_stops_at_an_eos_drafted_from_the_prompt(monkeypatch):
+        raw = "we should ship it today"
+>       engine, oracle = _oracle_cleanup(monkeypatch, raw)
+                         ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+engine/tests/test_cleanup.py:997: 
+_ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ 
+
+monkeypatch = <_pytest.monkeypatch.MonkeyPatch object at 0x7f6595dfa8a0>
+target = 'we should ship it today'
+
+    def _oracle_cleanup(monkeypatch, target: str):
+        """RecordingCleanup on a GreedyOracle; stock generation steps one token."""
+>       import mlx.core as mx
+E       ModuleNotFoundError: No module named 'mlx'
+
+engine/tests/test_cleanup.py:361: ModuleNotFoundError
+_ test_eos_at_the_token_ceiling_counts_the_same_in_both_decoders[eos_is_the_last_allowed_token-stock] _
+
+monkeypatch = <_pytest.monkeypatch.MonkeyPatch object at 0x7f6595de6f30>
+copy_draft = False, max_tokens = 25, reason = None
+
+    @pytest.mark.parametrize("copy_draft", [False, True], ids=["stock", "copy_draft"])
+    @pytest.mark.parametrize(
+        ("max_tokens", "reason"),
+        [(len(CEILING_TARGET) + 1, None), (len(CEILING_TARGET), "length")],
+        ids=["eos_is_the_last_allowed_token", "ceiling_before_eos"],
+    )
+    def test_eos_at_the_token_ceiling_counts_the_same_in_both_decoders(
+        monkeypatch, copy_draft, max_tokens, reason
+    ):
+        """Real mlx_lm stream_generate: its closing step carries the EOS token.
+    
+        EOS is never output, so an answer whose EOS is the last allowed token is
+        complete, and one cut off at the ceiling is "length", in either decoder.
+        """
+>       from mlx_lm.tokenizer_utils import TokenizerWrapper
+E       ModuleNotFoundError: No module named 'mlx_lm'
+
+engine/tests/test_cleanup.py:1051: ModuleNotFoundError
+_ test_eos_at_the_token_ceiling_counts_the_same_in_both_decoders[eos_is_the_last_allowed_token-copy_draft] _
+
+monkeypatch = <_pytest.monkeypatch.MonkeyPatch object at 0x7f6595de6bd0>
+copy_draft = True, max_tokens = 25, reason = None
+
+    @pytest.mark.parametrize("copy_draft", [False, True], ids=["stock", "copy_draft"])
+    @pytest.mark.parametrize(
+        ("max_tokens", "reason"),
+        [(len(CEILING_TARGET) + 1, None), (len(CEILING_TARGET), "length")],
+        ids=["eos_is_the_last_allowed_token", "ceiling_before_eos"],
+    )
+    def test_eos_at_the_token_ceiling_counts_the_same_in_both_decoders(
+        monkeypatch, copy_draft, max_tokens, reason
+    ):
+        """Real mlx_lm stream_generate: its closing step carries the EOS token.
+    
+        EOS is never output, so an answer whose EOS is the last allowed token is
+        complete, and one cut off at the ceiling is "length", in either decoder.
+        """
+>       from mlx_lm.tokenizer_utils import TokenizerWrapper
+E       ModuleNotFoundError: No module named 'mlx_lm'
+
+engine/tests/test_cleanup.py:1051: ModuleNotFoundError
+_ test_eos_at_the_token_ceiling_counts_the_same_in_both_decoders[ceiling_before_eos-stock] _
+
+monkeypatch = <_pytest.monkeypatch.MonkeyPatch object at 0x7f6595de4fb0>
+copy_draft = False, max_tokens = 24, reason = 'length'
+
+    @pytest.mark.parametrize("copy_draft", [False, True], ids=["stock", "copy_draft"])
+    @pytest.mark.parametrize(
+        ("max_tokens", "reason"),
+        [(len(CEILING_TARGET) + 1, None), (len(CEILING_TARGET), "length")],
+        ids=["eos_is_the_last_allowed_token", "ceiling_before_eos"],
+    )
+    def test_eos_at_the_token_ceiling_counts_the_same_in_both_decoders(
+        monkeypatch, copy_draft, max_tokens, reason
+    ):
+        """Real mlx_lm stream_generate: its closing step carries the EOS token.
+    
+        EOS is never output, so an answer whose EOS is the last allowed token is
+        complete, and one cut off at the ceiling is "length", in either decoder.
+        """
+>       from mlx_lm.tokenizer_utils import TokenizerWrapper
+E       ModuleNotFoundError: No module named 'mlx_lm'
+
+engine/tests/test_cleanup.py:1051: ModuleNotFoundError
+_ test_eos_at_the_token_ceiling_counts_the_same_in_both_decoders[ceiling_before_eos-copy_draft] _
+
+monkeypatch = <_pytest.monkeypatch.MonkeyPatch object at 0x7f6595d40080>
+copy_draft = True, max_tokens = 24, reason = 'length'
+
+    @pytest.mark.parametrize("copy_draft", [False, True], ids=["stock", "copy_draft"])
+    @pytest.mark.parametrize(
+        ("max_tokens", "reason"),
+        [(len(CEILING_TARGET) + 1, None), (len(CEILING_TARGET), "length")],
+        ids=["eos_is_the_last_allowed_token", "ceiling_before_eos"],
+    )
+    def test_eos_at_the_token_ceiling_counts_the_same_in_both_decoders(
+        monkeypatch, copy_draft, max_tokens, reason
+    ):
+        """Real mlx_lm stream_generate: its closing step carries the EOS token.
+    
+        EOS is never output, so an answer whose EOS is the last allowed token is
+        complete, and one cut off at the ceiling is "length", in either decoder.
+        """
+>       from mlx_lm.tokenizer_utils import TokenizerWrapper
+E       ModuleNotFoundError: No module named 'mlx_lm'
+
+engine/tests/test_cleanup.py:1051: ModuleNotFoundError
+____________ test_copy_draft_prefill_cancel_keeps_the_warm_snapshot ____________
+
+monkeypatch = <_pytest.monkeypatch.MonkeyPatch object at 0x7f6595d43cb0>
+
+    def test_copy_draft_prefill_cancel_keeps_the_warm_snapshot(monkeypatch):
+        raw = "we should uh ship it today okay"
+>       engine, oracle = _oracle_cleanup(monkeypatch, "We should ship it today, okay.")
+                         ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+engine/tests/test_cleanup.py:1075: 
+_ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ 
+
+monkeypatch = <_pytest.monkeypatch.MonkeyPatch object at 0x7f6595d43cb0>
+target = 'We should ship it today, okay.'
+
+    def _oracle_cleanup(monkeypatch, target: str):
+        """RecordingCleanup on a GreedyOracle; stock generation steps one token."""
+>       import mlx.core as mx
+E       ModuleNotFoundError: No module named 'mlx'
+
+engine/tests/test_cleanup.py:361: ModuleNotFoundError
+_____________ test_input_token_ceiling_refuses_before_mlx_prefill ______________
+
+monkeypatch = <_pytest.monkeypatch.MonkeyPatch object at 0x7f65961ff8f0>
+
+    def test_input_token_ceiling_refuses_before_mlx_prefill(monkeypatch):
+        engine = RecordingCleanup()
+    
+        def should_not_generate(*_args, **_kwargs):
+            raise AssertionError("oversize prompt must be rejected before MLX generation")
+            yield
+    
+>       import mlx_lm
+E       ModuleNotFoundError: No module named 'mlx_lm'
+
+engine/tests/test_cleanup.py:1106: ModuleNotFoundError
+_______ test_cancelled_worker_releases_single_executor_for_final_cleanup _______
+
+monkeypatch = <_pytest.monkeypatch.MonkeyPatch object at 0x7f6595df9940>
+
+    @pytest.mark.asyncio
+    async def test_cancelled_worker_releases_single_executor_for_final_cleanup(monkeypatch):
+        engine = RecordingCleanup()
+        started = threading.Event()
+        cancel = threading.Event()
+        call_lock = threading.Lock()
+        call_count = 0
+    
+        def streaming(*_args, **_kwargs):
+            nonlocal call_count
+            with call_lock:
+                index = call_count
+                call_count += 1
+            if index == 0:
+                started.set()
+                while True:
+                    time.sleep(0.01)
+                    yield SimpleNamespace(text="", token=1, generation_tokens=1)
+            else:
+                yield SimpleNamespace(text="fixed", token=2, generation_tokens=1)
+    
+>       import mlx_lm
+E       ModuleNotFoundError: No module named 'mlx_lm'
+
+engine/tests/test_cleanup.py:1144: ModuleNotFoundError
+_ test_allocator_budget_precedes_loading[mlx-community/Qwen3.5-4B-MLX-8bit-536870912] _
+
+monkeypatch = <_pytest.monkeypatch.MonkeyPatch object at 0x7f6595dfb590>
+tmp_path = PosixPath('/data/tmp/pytest-of-sushil/pytest-1/test_allocator_budget_precedes0')
+model_id = 'mlx-community/Qwen3.5-4B-MLX-8bit', expected_limit = 536870912
+
+    @pytest.mark.parametrize("model_id, expected_limit", [
+        ("mlx-community/Qwen3.5-4B-MLX-8bit", 512 * 1024 * 1024),
+        ("mlx-community/Qwen3.5-4B-MLX-4bit", None),
+        ("logical/other-model", None),
+    ])
+    def test_allocator_budget_precedes_loading(monkeypatch, tmp_path, model_id, expected_limit):
+        """Cap tested worker allocations before weights or warm-up can allocate."""
+>       import mlx.core as mx
+E       ModuleNotFoundError: No module named 'mlx'
+
+engine/tests/test_cleanup.py:1325: ModuleNotFoundError
+_ test_allocator_budget_precedes_loading[mlx-community/Qwen3.5-4B-MLX-4bit-None] _
+
+monkeypatch = <_pytest.monkeypatch.MonkeyPatch object at 0x7f6595df88f0>
+tmp_path = PosixPath('/data/tmp/pytest-of-sushil/pytest-1/test_allocator_budget_precedes1')
+model_id = 'mlx-community/Qwen3.5-4B-MLX-4bit', expected_limit = None
+
+    @pytest.mark.parametrize("model_id, expected_limit", [
+        ("mlx-community/Qwen3.5-4B-MLX-8bit", 512 * 1024 * 1024),
+        ("mlx-community/Qwen3.5-4B-MLX-4bit", None),
+        ("logical/other-model", None),
+    ])
+    def test_allocator_budget_precedes_loading(monkeypatch, tmp_path, model_id, expected_limit):
+        """Cap tested worker allocations before weights or warm-up can allocate."""
+>       import mlx.core as mx
+E       ModuleNotFoundError: No module named 'mlx'
+
+engine/tests/test_cleanup.py:1325: ModuleNotFoundError
+_______ test_allocator_budget_precedes_loading[logical/other-model-None] _______
+
+monkeypatch = <_pytest.monkeypatch.MonkeyPatch object at 0x7f6595dc5400>
+tmp_path = PosixPath('/data/tmp/pytest-of-sushil/pytest-1/test_allocator_budget_precedes2')
+model_id = 'logical/other-model', expected_limit = None
+
+    @pytest.mark.parametrize("model_id, expected_limit", [
+        ("mlx-community/Qwen3.5-4B-MLX-8bit", 512 * 1024 * 1024),
+        ("mlx-community/Qwen3.5-4B-MLX-4bit", None),
+        ("logical/other-model", None),
+    ])
+    def test_allocator_budget_precedes_loading(monkeypatch, tmp_path, model_id, expected_limit):
+        """Cap tested worker allocations before weights or warm-up can allocate."""
+>       import mlx.core as mx
+E       ModuleNotFoundError: No module named 'mlx'
+
+engine/tests/test_cleanup.py:1325: ModuleNotFoundError
+__________________________ test_legacy_load_acquires ___________________________
+
+monkeypatch = <_pytest.monkeypatch.MonkeyPatch object at 0x7f6595dfbda0>
+tmp_path = PosixPath('/data/tmp/pytest-of-sushil/pytest-1/test_legacy_load_acquires0')
+
+    def test_legacy_load_acquires(monkeypatch, tmp_path):
+        """Callers without an explicit source retain the existing acquisition API."""
+>       import mlx_lm
+E       ModuleNotFoundError: No module named 'mlx_lm'
+
+engine/tests/test_cleanup.py:1412: ModuleNotFoundError
+____________ test_session_cleanup_kills_only_leaked_fixture_workers ____________
+
+tmp_path = PosixPath('/data/tmp/pytest-of-sushil/pytest-1/test_session_cleanup_kills_onl0')
+monkeypatch = <_pytest.monkeypatch.MonkeyPatch object at 0x7f6595c8d6a0>
+
+    async def test_session_cleanup_kills_only_leaked_fixture_workers(
+        tmp_path, monkeypatch,
+    ) -> None:
+        """The session cleanup SIGKILLs a worker a test leaked, and spares a
+        process that has since taken a registered pid."""
+        pid_dir = tmp_path / "pids"
+        pid_dir.mkdir()
+        loads = tmp_path / "loads"
+        monkeypatch.setenv(PID_DIR_ENV, str(pid_dir))
+        worker, ours = spawn_fixture_worker("--wedge-second-load", str(loads))
+        bystander = subprocess.Popen(["sleep", "30"])
+        (pid_dir / str(bystander.pid)).touch()
+        try:
+            ours.sendall(TWO_LOADS)
+            await wait_until_wedged(loads)
+            assert (pid_dir / str(worker.pid)).exists()
+    
+>           assert kill_leaked(pid_dir) == [worker.pid]
+E           assert [] == [207208]
+E             
+E             Right contains one more item: 207208
+E             Use -v to get more diff
+
+engine/tests/test_cleanup_process.py:2719: AssertionError
+___________________ test_process_local_source[False-startup] ___________________
+
+monkeypatch = <_pytest.monkeypatch.MonkeyPatch object at 0x7f6595c8da90>
+tmp_path = PosixPath('/data/tmp/pytest-of-sushil/pytest-1/test_process_local_source_Fals0')
+entrypoint = 'startup', missing = False
+
+    @pytest.mark.parametrize("entrypoint", ["startup", "recovery", "hibernate"])
+    @pytest.mark.parametrize("missing", [False, True])
+    async def test_process_local_source(monkeypatch, tmp_path: Path, entrypoint, missing):
+        """Every load uses one source; missing sources fail and leave no live child."""
+        import json
+    
+        spawned, alive_at_spawn = record_spawns(monkeypatch)
+        monkeypatch.setattr(cleanup_process_mod, "RECOVERY_BACKOFF_S", 0.01)
+        source = tmp_path / "verified-model"
+        source.mkdir()
+        (source / "config.json").write_text('{"eos_token_id": 7}')
+        record = tmp_path / "loads.jsonl"
+        model_id = "mlx-community/Qwen3.5-4B-MLX-8bit"
+        # A cwd change after construction must not redirect any child load.
+        monkeypatch.chdir(tmp_path)
+        cleanup = CleanupProcess(model_id, local_model_path=Path(source.name),
+                                 worker_command=local_worker_command(record))
+        monkeypatch.chdir(tmp_path.parent)
+        try:
+            if entrypoint != "startup":
+                await cleanup.load_async("warm prompt")
+            if entrypoint == "hibernate":
+                assert await cleanup.hibernate()
+            if missing:
+                (source / "config.json").unlink()
+                source.rmdir()
+            if entrypoint == "startup":
+                if missing:
+                    with pytest.raises(RuntimeError) as error:
+                        await cleanup.load_async("warm prompt")
+                    assert str(source) in str(error.value)
+                    assert model_id in str(error.value)
+                    assert "offline" in str(error.value).lower()
+                else:
+>                   await cleanup.load_async("warm prompt")
+
+/data/workspace/velora-model-study-2026-11-18-ebd3420d/engine/tests/test_cleanup_process.py:2769: 
+_ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ 
+/data/workspace/velora-model-study-2026-11-18-ebd3420d/engine/src/velora_engine/cleanup_process.py:248: in load_async
+    await self._start_and_load()
+/data/workspace/velora-model-study-2026-11-18-ebd3420d/engine/src/velora_engine/cleanup_process.py:309: in _start_and_load
+    response = await asyncio.wait_for(
+/usr/lib/python3.12/asyncio/tasks.py:520: in wait_for
+    return await fut
+           ^^^^^^^^^
+/data/workspace/velora-model-study-2026-11-18-ebd3420d/engine/src/velora_engine/cleanup_process.py:475: in _request
+    return await future
+           ^^^^^^^^^^^^
+/data/workspace/velora-model-study-2026-11-18-ebd3420d/engine/src/velora_engine/cleanup_process.py:414: in _read_responses
+    line = await reader.readline()
+           ^^^^^^^^^^^^^^^^^^^^^^^
+/usr/lib/python3.12/asyncio/streams.py:568: in readline
+    line = await self.readuntil(sep)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^
+/usr/lib/python3.12/asyncio/streams.py:660: in readuntil
+    await self._wait_for_data('readuntil')
+/usr/lib/python3.12/asyncio/streams.py:545: in _wait_for_data
+    await self._waiter
+_ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ 
+
+self = <_SelectorSocketTransport closed fd=14>
+
+    def _read_ready__data_received(self):
+        if self._conn_lost:
+            return
+        try:
+>           data = self._sock.recv(self.max_size)
+                   ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+E           ConnectionResetError: [Errno 104] Connection reset by peer
+
+/usr/lib/python3.12/asyncio/selector_events.py:1013: ConnectionResetError
+----------------------------- Captured stderr call -----------------------------
+Traceback (most recent call last):
+  File "/data/workspace/velora-model-study-2026-11-18-ebd3420d/engine/tests/fixtures/offline_cleanup_worker.py", line 10, in <module>
+    import mlx_lm
+ModuleNotFoundError: No module named 'mlx_lm'
+__________________ test_process_local_source[False-recovery] ___________________
+
+monkeypatch = <_pytest.monkeypatch.MonkeyPatch object at 0x7f65961fdc40>
+tmp_path = PosixPath('/data/tmp/pytest-of-sushil/pytest-1/test_process_local_source_Fals1')
+entrypoint = 'recovery', missing = False
+
+    @pytest.mark.parametrize("entrypoint", ["startup", "recovery", "hibernate"])
+    @pytest.mark.parametrize("missing", [False, True])
+    async def test_process_local_source(monkeypatch, tmp_path: Path, entrypoint, missing):
+        """Every load uses one source; missing sources fail and leave no live child."""
+        import json
+    
+        spawned, alive_at_spawn = record_spawns(monkeypatch)
+        monkeypatch.setattr(cleanup_process_mod, "RECOVERY_BACKOFF_S", 0.01)
+        source = tmp_path / "verified-model"
+        source.mkdir()
+        (source / "config.json").write_text('{"eos_token_id": 7}')
+        record = tmp_path / "loads.jsonl"
+        model_id = "mlx-community/Qwen3.5-4B-MLX-8bit"
+        # A cwd change after construction must not redirect any child load.
+        monkeypatch.chdir(tmp_path)
+        cleanup = CleanupProcess(model_id, local_model_path=Path(source.name),
+                                 worker_command=local_worker_command(record))
+        monkeypatch.chdir(tmp_path.parent)
+        try:
+            if entrypoint != "startup":
+>               await cleanup.load_async("warm prompt")
+
+/data/workspace/velora-model-study-2026-11-18-ebd3420d/engine/tests/test_cleanup_process.py:2755: 
+_ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ 
+/data/workspace/velora-model-study-2026-11-18-ebd3420d/engine/src/velora_engine/cleanup_process.py:248: in load_async
+    await self._start_and_load()
+/data/workspace/velora-model-study-2026-11-18-ebd3420d/engine/src/velora_engine/cleanup_process.py:309: in _start_and_load
+    response = await asyncio.wait_for(
+/usr/lib/python3.12/asyncio/tasks.py:520: in wait_for
+    return await fut
+           ^^^^^^^^^
+/data/workspace/velora-model-study-2026-11-18-ebd3420d/engine/src/velora_engine/cleanup_process.py:475: in _request
+    return await future
+           ^^^^^^^^^^^^
+/data/workspace/velora-model-study-2026-11-18-ebd3420d/engine/src/velora_engine/cleanup_process.py:414: in _read_responses
+    line = await reader.readline()
+           ^^^^^^^^^^^^^^^^^^^^^^^
+/usr/lib/python3.12/asyncio/streams.py:568: in readline
+    line = await self.readuntil(sep)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^
+/usr/lib/python3.12/asyncio/streams.py:660: in readuntil
+    await self._wait_for_data('readuntil')
+/usr/lib/python3.12/asyncio/streams.py:545: in _wait_for_data
+    await self._waiter
+_ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ 
+
+self = <_SelectorSocketTransport closed fd=14>
+
+    def _read_ready__data_received(self):
+        if self._conn_lost:
+            return
+        try:
+>           data = self._sock.recv(self.max_size)
+                   ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+E           ConnectionResetError: [Errno 104] Connection reset by peer
+
+/usr/lib/python3.12/asyncio/selector_events.py:1013: ConnectionResetError
+----------------------------- Captured stderr call -----------------------------
+Traceback (most recent call last):
+  File "/data/workspace/velora-model-study-2026-11-18-ebd3420d/engine/tests/fixtures/offline_cleanup_worker.py", line 10, in <module>
+    import mlx_lm
+ModuleNotFoundError: No module named 'mlx_lm'
+__________________ test_process_local_source[False-hibernate] __________________
+
+monkeypatch = <_pytest.monkeypatch.MonkeyPatch object at 0x7f6595c8c1d0>
+tmp_path = PosixPath('/data/tmp/pytest-of-sushil/pytest-1/test_process_local_source_Fals2')
+entrypoint = 'hibernate', missing = False
+
+    @pytest.mark.parametrize("entrypoint", ["startup", "recovery", "hibernate"])
+    @pytest.mark.parametrize("missing", [False, True])
+    async def test_process_local_source(monkeypatch, tmp_path: Path, entrypoint, missing):
+        """Every load uses one source; missing sources fail and leave no live child."""
+        import json
+    
+        spawned, alive_at_spawn = record_spawns(monkeypatch)
+        monkeypatch.setattr(cleanup_process_mod, "RECOVERY_BACKOFF_S", 0.01)
+        source = tmp_path / "verified-model"
+        source.mkdir()
+        (source / "config.json").write_text('{"eos_token_id": 7}')
+        record = tmp_path / "loads.jsonl"
+        model_id = "mlx-community/Qwen3.5-4B-MLX-8bit"
+        # A cwd change after construction must not redirect any child load.
+        monkeypatch.chdir(tmp_path)
+        cleanup = CleanupProcess(model_id, local_model_path=Path(source.name),
+                                 worker_command=local_worker_command(record))
+        monkeypatch.chdir(tmp_path.parent)
+        try:
+            if entrypoint != "startup":
+>               await cleanup.load_async("warm prompt")
+
+/data/workspace/velora-model-study-2026-11-18-ebd3420d/engine/tests/test_cleanup_process.py:2755: 
+_ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ 
+/data/workspace/velora-model-study-2026-11-18-ebd3420d/engine/src/velora_engine/cleanup_process.py:248: in load_async
+    await self._start_and_load()
+/data/workspace/velora-model-study-2026-11-18-ebd3420d/engine/src/velora_engine/cleanup_process.py:309: in _start_and_load
+    response = await asyncio.wait_for(
+/usr/lib/python3.12/asyncio/tasks.py:520: in wait_for
+    return await fut
+           ^^^^^^^^^
+/data/workspace/velora-model-study-2026-11-18-ebd3420d/engine/src/velora_engine/cleanup_process.py:475: in _request
+    return await future
+           ^^^^^^^^^^^^
+/data/workspace/velora-model-study-2026-11-18-ebd3420d/engine/src/velora_engine/cleanup_process.py:414: in _read_responses
+    line = await reader.readline()
+           ^^^^^^^^^^^^^^^^^^^^^^^
+/usr/lib/python3.12/asyncio/streams.py:568: in readline
+    line = await self.readuntil(sep)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^
+/usr/lib/python3.12/asyncio/streams.py:660: in readuntil
+    await self._wait_for_data('readuntil')
+/usr/lib/python3.12/asyncio/streams.py:545: in _wait_for_data
+    await self._waiter
+_ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ 
+
+self = <_SelectorSocketTransport closed fd=14>
+
+    def _read_ready__data_received(self):
+        if self._conn_lost:
+            return
+        try:
+>           data = self._sock.recv(self.max_size)
+                   ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+E           ConnectionResetError: [Errno 104] Connection reset by peer
+
+/usr/lib/python3.12/asyncio/selector_events.py:1013: ConnectionResetError
+----------------------------- Captured stderr call -----------------------------
+Traceback (most recent call last):
+  File "/data/workspace/velora-model-study-2026-11-18-ebd3420d/engine/tests/fixtures/offline_cleanup_worker.py", line 10, in <module>
+    import mlx_lm
+ModuleNotFoundError: No module named 'mlx_lm'
+___________________ test_process_local_source[True-startup] ____________________
+
+monkeypatch = <_pytest.monkeypatch.MonkeyPatch object at 0x7f6595c8eb10>
+tmp_path = PosixPath('/data/tmp/pytest-of-sushil/pytest-1/test_process_local_source_True0')
+entrypoint = 'startup', missing = True
+
+    @pytest.mark.parametrize("entrypoint", ["startup", "recovery", "hibernate"])
+    @pytest.mark.parametrize("missing", [False, True])
+    async def test_process_local_source(monkeypatch, tmp_path: Path, entrypoint, missing):
+        """Every load uses one source; missing sources fail and leave no live child."""
+        import json
+    
+        spawned, alive_at_spawn = record_spawns(monkeypatch)
+        monkeypatch.setattr(cleanup_process_mod, "RECOVERY_BACKOFF_S", 0.01)
+        source = tmp_path / "verified-model"
+        source.mkdir()
+        (source / "config.json").write_text('{"eos_token_id": 7}')
+        record = tmp_path / "loads.jsonl"
+        model_id = "mlx-community/Qwen3.5-4B-MLX-8bit"
+        # A cwd change after construction must not redirect any child load.
+        monkeypatch.chdir(tmp_path)
+        cleanup = CleanupProcess(model_id, local_model_path=Path(source.name),
+                                 worker_command=local_worker_command(record))
+        monkeypatch.chdir(tmp_path.parent)
+        try:
+            if entrypoint != "startup":
+                await cleanup.load_async("warm prompt")
+            if entrypoint == "hibernate":
+                assert await cleanup.hibernate()
+            if missing:
+                (source / "config.json").unlink()
+                source.rmdir()
+            if entrypoint == "startup":
+                if missing:
+                    with pytest.raises(RuntimeError) as error:
+>                       await cleanup.load_async("warm prompt")
+
+/data/workspace/velora-model-study-2026-11-18-ebd3420d/engine/tests/test_cleanup_process.py:2764: 
+_ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ 
+/data/workspace/velora-model-study-2026-11-18-ebd3420d/engine/src/velora_engine/cleanup_process.py:248: in load_async
+    await self._start_and_load()
+/data/workspace/velora-model-study-2026-11-18-ebd3420d/engine/src/velora_engine/cleanup_process.py:309: in _start_and_load
+    response = await asyncio.wait_for(
+/usr/lib/python3.12/asyncio/tasks.py:520: in wait_for
+    return await fut
+           ^^^^^^^^^
+/data/workspace/velora-model-study-2026-11-18-ebd3420d/engine/src/velora_engine/cleanup_process.py:475: in _request
+    return await future
+           ^^^^^^^^^^^^
+/data/workspace/velora-model-study-2026-11-18-ebd3420d/engine/src/velora_engine/cleanup_process.py:414: in _read_responses
+    line = await reader.readline()
+           ^^^^^^^^^^^^^^^^^^^^^^^
+/usr/lib/python3.12/asyncio/streams.py:568: in readline
+    line = await self.readuntil(sep)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^
+/usr/lib/python3.12/asyncio/streams.py:660: in readuntil
+    await self._wait_for_data('readuntil')
+/usr/lib/python3.12/asyncio/streams.py:545: in _wait_for_data
+    await self._waiter
+_ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ 
+
+self = <_SelectorSocketTransport closed fd=14>
+
+    def _read_ready__data_received(self):
+        if self._conn_lost:
+            return
+        try:
+>           data = self._sock.recv(self.max_size)
+                   ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+E           ConnectionResetError: [Errno 104] Connection reset by peer
+
+/usr/lib/python3.12/asyncio/selector_events.py:1013: ConnectionResetError
+----------------------------- Captured stderr call -----------------------------
+Traceback (most recent call last):
+  File "/data/workspace/velora-model-study-2026-11-18-ebd3420d/engine/tests/fixtures/offline_cleanup_worker.py", line 10, in <module>
+    import mlx_lm
+ModuleNotFoundError: No module named 'mlx_lm'
+___________________ test_process_local_source[True-recovery] ___________________
+
+monkeypatch = <_pytest.monkeypatch.MonkeyPatch object at 0x7f6595c8eb70>
+tmp_path = PosixPath('/data/tmp/pytest-of-sushil/pytest-1/test_process_local_source_True1')
+entrypoint = 'recovery', missing = True
+
+    @pytest.mark.parametrize("entrypoint", ["startup", "recovery", "hibernate"])
+    @pytest.mark.parametrize("missing", [False, True])
+    async def test_process_local_source(monkeypatch, tmp_path: Path, entrypoint, missing):
+        """Every load uses one source; missing sources fail and leave no live child."""
+        import json
+    
+        spawned, alive_at_spawn = record_spawns(monkeypatch)
+        monkeypatch.setattr(cleanup_process_mod, "RECOVERY_BACKOFF_S", 0.01)
+        source = tmp_path / "verified-model"
+        source.mkdir()
+        (source / "config.json").write_text('{"eos_token_id": 7}')
+        record = tmp_path / "loads.jsonl"
+        model_id = "mlx-community/Qwen3.5-4B-MLX-8bit"
+        # A cwd change after construction must not redirect any child load.
+        monkeypatch.chdir(tmp_path)
+        cleanup = CleanupProcess(model_id, local_model_path=Path(source.name),
+                                 worker_command=local_worker_command(record))
+        monkeypatch.chdir(tmp_path.parent)
+        try:
+            if entrypoint != "startup":
+>               await cleanup.load_async("warm prompt")
+
+/data/workspace/velora-model-study-2026-11-18-ebd3420d/engine/tests/test_cleanup_process.py:2755: 
+_ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ 
+/data/workspace/velora-model-study-2026-11-18-ebd3420d/engine/src/velora_engine/cleanup_process.py:248: in load_async
+    await self._start_and_load()
+/data/workspace/velora-model-study-2026-11-18-ebd3420d/engine/src/velora_engine/cleanup_process.py:309: in _start_and_load
+    response = await asyncio.wait_for(
+/usr/lib/python3.12/asyncio/tasks.py:520: in wait_for
+    return await fut
+           ^^^^^^^^^
+/data/workspace/velora-model-study-2026-11-18-ebd3420d/engine/src/velora_engine/cleanup_process.py:475: in _request
+    return await future
+           ^^^^^^^^^^^^
+/data/workspace/velora-model-study-2026-11-18-ebd3420d/engine/src/velora_engine/cleanup_process.py:414: in _read_responses
+    line = await reader.readline()
+           ^^^^^^^^^^^^^^^^^^^^^^^
+/usr/lib/python3.12/asyncio/streams.py:568: in readline
+    line = await self.readuntil(sep)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^
+/usr/lib/python3.12/asyncio/streams.py:660: in readuntil
+    await self._wait_for_data('readuntil')
+/usr/lib/python3.12/asyncio/streams.py:545: in _wait_for_data
+    await self._waiter
+_ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ 
+
+self = <_SelectorSocketTransport closed fd=14>
+
+    def _read_ready__data_received(self):
+        if self._conn_lost:
+            return
+        try:
+>           data = self._sock.recv(self.max_size)
+                   ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+E           ConnectionResetError: [Errno 104] Connection reset by peer
+
+/usr/lib/python3.12/asyncio/selector_events.py:1013: ConnectionResetError
+----------------------------- Captured stderr call -----------------------------
+Traceback (most recent call last):
+  File "/data/workspace/velora-model-study-2026-11-18-ebd3420d/engine/tests/fixtures/offline_cleanup_worker.py", line 10, in <module>
+    import mlx_lm
+ModuleNotFoundError: No module named 'mlx_lm'
+__________________ test_process_local_source[True-hibernate] ___________________
+
+monkeypatch = <_pytest.monkeypatch.MonkeyPatch object at 0x7f6595c697f0>
+tmp_path = PosixPath('/data/tmp/pytest-of-sushil/pytest-1/test_process_local_source_True2')
+entrypoint = 'hibernate', missing = True
+
+    @pytest.mark.parametrize("entrypoint", ["startup", "recovery", "hibernate"])
+    @pytest.mark.parametrize("missing", [False, True])
+    async def test_process_local_source(monkeypatch, tmp_path: Path, entrypoint, missing):
+        """Every load uses one source; missing sources fail and leave no live child."""
+        import json
+    
+        spawned, alive_at_spawn = record_spawns(monkeypatch)
+        monkeypatch.setattr(cleanup_process_mod, "RECOVERY_BACKOFF_S", 0.01)
+        source = tmp_path / "verified-model"
+        source.mkdir()
+        (source / "config.json").write_text('{"eos_token_id": 7}')
+        record = tmp_path / "loads.jsonl"
+        model_id = "mlx-community/Qwen3.5-4B-MLX-8bit"
+        # A cwd change after construction must not redirect any child load.
+        monkeypatch.chdir(tmp_path)
+        cleanup = CleanupProcess(model_id, local_model_path=Path(source.name),
+                                 worker_command=local_worker_command(record))
+        monkeypatch.chdir(tmp_path.parent)
+        try:
+            if entrypoint != "startup":
+>               await cleanup.load_async("warm prompt")
+
+/data/workspace/velora-model-study-2026-11-18-ebd3420d/engine/tests/test_cleanup_process.py:2755: 
+_ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ 
+/data/workspace/velora-model-study-2026-11-18-ebd3420d/engine/src/velora_engine/cleanup_process.py:248: in load_async
+    await self._start_and_load()
+/data/workspace/velora-model-study-2026-11-18-ebd3420d/engine/src/velora_engine/cleanup_process.py:309: in _start_and_load
+    response = await asyncio.wait_for(
+/usr/lib/python3.12/asyncio/tasks.py:520: in wait_for
+    return await fut
+           ^^^^^^^^^
+/data/workspace/velora-model-study-2026-11-18-ebd3420d/engine/src/velora_engine/cleanup_process.py:475: in _request
+    return await future
+           ^^^^^^^^^^^^
+/data/workspace/velora-model-study-2026-11-18-ebd3420d/engine/src/velora_engine/cleanup_process.py:414: in _read_responses
+    line = await reader.readline()
+           ^^^^^^^^^^^^^^^^^^^^^^^
+/usr/lib/python3.12/asyncio/streams.py:568: in readline
+    line = await self.readuntil(sep)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^
+/usr/lib/python3.12/asyncio/streams.py:660: in readuntil
+    await self._wait_for_data('readuntil')
+/usr/lib/python3.12/asyncio/streams.py:545: in _wait_for_data
+    await self._waiter
+_ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ 
+
+self = <_SelectorSocketTransport closed fd=14>
+
+    def _read_ready__data_received(self):
+        if self._conn_lost:
+            return
+        try:
+>           data = self._sock.recv(self.max_size)
+                   ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+E           ConnectionResetError: [Errno 104] Connection reset by peer
+
+/usr/lib/python3.12/asyncio/selector_events.py:1013: ConnectionResetError
+----------------------------- Captured stderr call -----------------------------
+Traceback (most recent call last):
+  File "/data/workspace/velora-model-study-2026-11-18-ebd3420d/engine/tests/fixtures/offline_cleanup_worker.py", line 10, in <module>
+    import mlx_lm
+ModuleNotFoundError: No module named 'mlx_lm'
+________ test_engine_prefills_the_state_once_and_forks_it_per_question _________
+
+    @pytest.mark.asyncio
+    async def test_engine_prefills_the_state_once_and_forks_it_per_question():
+        engine = DecidingCleanup(
+            [math.log(0.9), math.log(0.05), math.log(0.05)],
+            [math.log(0.02), math.log(0.98)],
+        )
+        try:
+            state = "command: open slack"
+            result = await engine.decide(state, [KIND, DELIVERS], system_prompt="sys")
+    
+>           assert result.status == STATUS_OK
+E           AssertionError: assert 'error' == 'ok'
+E             
+E             - ok
+E             + error
+
+engine/tests/test_decisions.py:165: AssertionError
+------------------------------ Captured log call -------------------------------
+ERROR    velora.cleanup:cleanup.py:1825 decision failed
+Traceback (most recent call last):
+  File "/data/workspace/velora-model-study-2026-11-18-ebd3420d/engine/src/velora_engine/cleanup.py", line 1814, in decide
+    return await asyncio.wait_for(
+           ^^^^^^^^^^^^^^^^^^^^^^^
+  File "/usr/lib/python3.12/asyncio/tasks.py", line 520, in wait_for
+    return await fut
+           ^^^^^^^^^
+  File "/usr/lib/python3.12/concurrent/futures/thread.py", line 58, in run
+    result = self.fn(*self.args, **self.kwargs)
+             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/data/workspace/velora-model-study-2026-11-18-ebd3420d/engine/src/velora_engine/cleanup.py", line 1759, in _run_decide
+    import mlx.core as mx
+ModuleNotFoundError: No module named 'mlx'
+____________ test_engine_reuses_the_warm_preamble_across_decisions _____________
+
+    @pytest.mark.asyncio
+    async def test_engine_reuses_the_warm_preamble_across_decisions():
+        engine = DecidingCleanup([0.0, -5.0], [0.0, -5.0])
+        try:
+            first = await engine.decide("command: open slack", [DELIVERS], system_prompt="sys")
+            second = await engine.decide("command: open notes", [DELIVERS], system_prompt="sys")
+    
+>           assert first.ok and second.ok
+E           assert (False)
+E            +  where False = DecisionResult(status='error', answers={}, ms=0, prefix_tokens=0, state_tokens=0, reason="No module named 'mlx'").ok
+
+engine/tests/test_decisions.py:198: AssertionError
+------------------------------ Captured log call -------------------------------
+ERROR    velora.cleanup:cleanup.py:1825 decision failed
+Traceback (most recent call last):
+  File "/data/workspace/velora-model-study-2026-11-18-ebd3420d/engine/src/velora_engine/cleanup.py", line 1814, in decide
+    return await asyncio.wait_for(
+           ^^^^^^^^^^^^^^^^^^^^^^^
+  File "/usr/lib/python3.12/asyncio/tasks.py", line 520, in wait_for
+    return await fut
+           ^^^^^^^^^
+  File "/usr/lib/python3.12/concurrent/futures/thread.py", line 58, in run
+    result = self.fn(*self.args, **self.kwargs)
+             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/data/workspace/velora-model-study-2026-11-18-ebd3420d/engine/src/velora_engine/cleanup.py", line 1759, in _run_decide
+    import mlx.core as mx
+ModuleNotFoundError: No module named 'mlx'
+ERROR    velora.cleanup:cleanup.py:1825 decision failed
+Traceback (most recent call last):
+  File "/data/workspace/velora-model-study-2026-11-18-ebd3420d/engine/src/velora_engine/cleanup.py", line 1814, in decide
+    return await asyncio.wait_for(
+           ^^^^^^^^^^^^^^^^^^^^^^^
+  File "/usr/lib/python3.12/asyncio/tasks.py", line 520, in wait_for
+    return await fut
+           ^^^^^^^^^
+  File "/usr/lib/python3.12/concurrent/futures/thread.py", line 58, in run
+    result = self.fn(*self.args, **self.kwargs)
+             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/data/workspace/velora-model-study-2026-11-18-ebd3420d/engine/src/velora_engine/cleanup.py", line 1759, in _run_decide
+    import mlx.core as mx
+ModuleNotFoundError: No module named 'mlx'
+_______ test_engine_refuses_an_oversized_prompt_before_any_forward_pass ________
+
+    @pytest.mark.asyncio
+    async def test_engine_refuses_an_oversized_prompt_before_any_forward_pass():
+        engine = DecidingCleanup()
+        try:
+            result = await engine.decide("command: open slack", [KIND],
+                                         system_prompt="sys", max_input_tokens=10)
+    
+>           assert result.status == STATUS_CONTEXT_LIMIT
+E           AssertionError: assert 'error' == 'context_limit'
+E             
+E             - context_limit
+E             + error
+
+engine/tests/test_decisions.py:212: AssertionError
+------------------------------ Captured log call -------------------------------
+ERROR    velora.cleanup:cleanup.py:1825 decision failed
+Traceback (most recent call last):
+  File "/data/workspace/velora-model-study-2026-11-18-ebd3420d/engine/src/velora_engine/cleanup.py", line 1814, in decide
+    return await asyncio.wait_for(
+           ^^^^^^^^^^^^^^^^^^^^^^^
+  File "/usr/lib/python3.12/asyncio/tasks.py", line 520, in wait_for
+    return await fut
+           ^^^^^^^^^
+  File "/usr/lib/python3.12/concurrent/futures/thread.py", line 58, in run
+    result = self.fn(*self.args, **self.kwargs)
+             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/data/workspace/velora-model-study-2026-11-18-ebd3420d/engine/src/velora_engine/cleanup.py", line 1759, in _run_decide
+    import mlx.core as mx
+ModuleNotFoundError: No module named 'mlx'
+________________ test_an_answer_read_after_a_cancel_is_not_used ________________
+
+    @pytest.mark.asyncio
+    async def test_an_answer_read_after_a_cancel_is_not_used():
+        engine = DecidingCleanup([0.0, -5.0])
+        cancel = threading.Event()
+        engine.during_readout = cancel.set
+        try:
+            result = await engine.decide("state", [DELIVERS], cancel_event=cancel)
+    
+>           assert result.status == STATUS_CANCELLED
+E           AssertionError: assert 'error' == 'cancelled'
+E             
+E             - cancelled
+E             + error
+
+engine/tests/test_decisions.py:247: AssertionError
+------------------------------ Captured log call -------------------------------
+ERROR    velora.cleanup:cleanup.py:1825 decision failed
+Traceback (most recent call last):
+  File "/data/workspace/velora-model-study-2026-11-18-ebd3420d/engine/src/velora_engine/cleanup.py", line 1814, in decide
+    return await asyncio.wait_for(
+           ^^^^^^^^^^^^^^^^^^^^^^^
+  File "/usr/lib/python3.12/asyncio/tasks.py", line 520, in wait_for
+    return await fut
+           ^^^^^^^^^
+  File "/usr/lib/python3.12/concurrent/futures/thread.py", line 58, in run
+    result = self.fn(*self.args, **self.kwargs)
+             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/data/workspace/velora-model-study-2026-11-18-ebd3420d/engine/src/velora_engine/cleanup.py", line 1759, in _run_decide
+    import mlx.core as mx
+ModuleNotFoundError: No module named 'mlx'
+______________ test_an_answer_read_past_the_deadline_is_not_used _______________
+
+    @pytest.mark.asyncio
+    async def test_an_answer_read_past_the_deadline_is_not_used():
+        engine = DecidingCleanup([0.0, -5.0])
+        engine.during_readout = lambda: time.sleep(0.08)
+        try:
+            result = await engine.decide("state", [DELIVERS], timeout_ms=40)
+    
+>           assert result.status == STATUS_TIMEOUT
+E           AssertionError: assert 'error' == 'timeout'
+E             
+E             - timeout
+E             + error
+
+engine/tests/test_decisions.py:260: AssertionError
+------------------------------ Captured log call -------------------------------
+ERROR    velora.cleanup:cleanup.py:1825 decision failed
+Traceback (most recent call last):
+  File "/data/workspace/velora-model-study-2026-11-18-ebd3420d/engine/src/velora_engine/cleanup.py", line 1814, in decide
+    return await asyncio.wait_for(
+           ^^^^^^^^^^^^^^^^^^^^^^^
+  File "/usr/lib/python3.12/asyncio/tasks.py", line 520, in wait_for
+    return await fut
+           ^^^^^^^^^
+  File "/usr/lib/python3.12/concurrent/futures/thread.py", line 58, in run
+    result = self.fn(*self.args, **self.kwargs)
+             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/data/workspace/velora-model-study-2026-11-18-ebd3420d/engine/src/velora_engine/cleanup.py", line 1759, in _run_decide
+    import mlx.core as mx
+ModuleNotFoundError: No module named 'mlx'
+____________ test_action_memory_release_drops_the_decision_preamble ____________
+
+monkeypatch = <_pytest.monkeypatch.MonkeyPatch object at 0x7f65961c1730>
+
+    @pytest.mark.asyncio
+    async def test_action_memory_release_drops_the_decision_preamble(monkeypatch):
+        """The preamble snapshot carries the hybrid model's fixed-size recurrent
+        state; it goes with the rest of an action's memory."""
+>       import mlx.core as mx
+E       ModuleNotFoundError: No module named 'mlx'
+
+engine/tests/test_decisions.py:270: ModuleNotFoundError
+______ test_identical_questions_under_different_keys_still_get_a_readout _______
+
+    @pytest.mark.asyncio
+    async def test_identical_questions_under_different_keys_still_get_a_readout():
+        """Two keys may ask the same visible question. Their prompts then share
+        every token, and the readout still needs one live input position."""
+        twin = Question("delivers_again", DELIVERS.instructions, DELIVERS.options)
+        engine = DecidingCleanup([0.0, -5.0], [0.0, -5.0])
+        try:
+            result = await engine.decide("state", [DELIVERS, twin], system_prompt="sys")
+    
+>           assert result.status == STATUS_OK
+E           AssertionError: assert 'error' == 'ok'
+E             
+E             - ok
+E             + error
+
+engine/tests/test_decisions.py:295: AssertionError
+------------------------------ Captured log call -------------------------------
+ERROR    velora.cleanup:cleanup.py:1825 decision failed
+Traceback (most recent call last):
+  File "/data/workspace/velora-model-study-2026-11-18-ebd3420d/engine/src/velora_engine/cleanup.py", line 1814, in decide
+    return await asyncio.wait_for(
+           ^^^^^^^^^^^^^^^^^^^^^^^
+  File "/usr/lib/python3.12/asyncio/tasks.py", line 520, in wait_for
+    return await fut
+           ^^^^^^^^^
+  File "/usr/lib/python3.12/concurrent/futures/thread.py", line 58, in run
+    result = self.fn(*self.args, **self.kwargs)
+             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/data/workspace/velora-model-study-2026-11-18-ebd3420d/engine/src/velora_engine/cleanup.py", line 1759, in _run_decide
+    import mlx.core as mx
+ModuleNotFoundError: No module named 'mlx'
+_________ test_header_reader_and_inspection_require_pinned_paired_lora _________
+
+tmp_path = PosixPath('/data/tmp/pytest-of-sushil/pytest-1/test_header_reader_and_inspect0')
+
+    def test_header_reader_and_inspection_require_pinned_paired_lora(tmp_path):
+        base=tmp_path/'snapshots'/export.BASE_REVISION;base.mkdir(parents=True)
+        (base/'config.json').write_text(json.dumps(config()))
+        (base/'tokenizer.json').write_text('{}')
+        (base/'tokenizer_config.json').write_text('{}')
+        (base/'chat_template.jinja').write_text('{{ messages }}')
+        safetensor_header(base/'model.safetensors',{})
+        adapter=tmp_path/'adapter';adapter.mkdir()
+        (adapter/'adapter_config.json').write_text(json.dumps({'fine_tune_type':'lora','num_layers':2}))
+        path=adapter/'adapters.safetensors'
+        keys={'model.layers.0.conv.in_proj.lora_a':{'shape':[2,1]},'model.layers.0.conv.in_proj.lora_b':{'shape':[1,6]}}
+        safetensor_header(path,keys)
+        args=SimpleNamespace(base=base,base_revision=export.BASE_REVISION,adapter=adapter,adapter_sha256=export.digest(path))
+>       _,_,_,identity=export.inspect(args)
+                       ^^^^^^^^^^^^^^^^^^^^
+
+engine/tests/test_export_lfm3_native.py:68: 
+_ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ 
+training/cleanup/scripts/export_lfm3_native.py:104: in inspect
+    if digest(PORT)!=SOURCE_SHA256:raise ValueError('architecture port source changed')
+       ^^^^^^^^^^^^
+training/cleanup/scripts/export_lfm3_native.py:25: in digest
+    with Path(path).open('rb') as handle:return hashlib.file_digest(handle,'sha256').hexdigest()
+         ^^^^^^^^^^^^^^^^^^^^^
+_ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ 
+
+self = PosixPath('/data/workspace/velora-model-study-2026-11-18-ebd3420d/docs/research/2026-10-27-lfm3-bakeoff/lfm3.py')
+mode = 'rb', buffering = -1, encoding = None, errors = None, newline = None
+
+    def open(self, mode='r', buffering=-1, encoding=None,
+             errors=None, newline=None):
+        """
+        Open the file pointed by this path and return a file object, as
+        the built-in open() function does.
+        """
+        if "b" not in mode:
+            encoding = io.text_encoding(encoding)
+>       return io.open(self, mode, buffering, encoding, errors, newline)
+               ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+E       FileNotFoundError: [Errno 2] No such file or directory: '/data/workspace/velora-model-study-2026-11-18-ebd3420d/docs/research/2026-10-27-lfm3-bakeoff/lfm3.py'
+
+/usr/lib/python3.12/pathlib.py:1015: FileNotFoundError
+________________ test_legacy_realword_hard_replacement_demoted _________________
+
+config = <velora_engine.config.Config object at 0x7f6595c56a80>
+home = PosixPath('/data/tmp/pytest-of-sushil/pytest-1/test_legacy_realword_hard_repl0/velora-home')
+
+    def test_legacy_realword_hard_replacement_demoted(config, home):
+        # Review finding: a pre-0.3.4 learned.json (or one restored from backup)
+        # can carry a real-word HARD replacement; the engine must demote it to a
+        # context-gated soft correction on load, never apply it deterministically.
+        import json as _json
+    
+        (home / "learned.json").write_text(_json.dumps({
+            "replacements": {"lung": "Airlearn", "wrold": "world"},
+            "vocabulary": ["Airlearn"],
+        }))
+        config.reload()
+>       assert "lung" not in config.global_replacements  # demoted
+        ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+E       AssertionError: assert 'lung' not in {'lung': 'Airlearn', 'wrold': 'world'}
+E        +  where {'lung': 'Airlearn', 'wrold': 'world'} = <velora_engine.config.Config object at 0x7f6595c56a80>.global_replacements
+
+engine/tests/test_formatting.py:1284: AssertionError
+__________________________ test_cancel_wedge_deletes ___________________________
+
+engine = (<velora_engine.server.Engine object at 0x7f6595b12fc0>, PosixPath('/data/tmp/velora-t-gvl4ycr6/e.sock'))
+monkeypatch = <_pytest.monkeypatch.MonkeyPatch object at 0x7f6595c47b90>
+
+    async def test_cancel_wedge_deletes(engine, monkeypatch):
+        eng, sock = engine
+        eng.config.data["save_audio"] = True
+        entered = threading.Event()
+        release = threading.Event()
+        finalize = eng.stt.finalize
+    
+        def held_final():
+            entered.set()
+            release.wait()
+            return finalize()
+    
+        monkeypatch.setattr(eng.stt, "finalize", held_final)
+        deleted = asyncio.Event()
+        discard = eng.audio.discard_active
+    
+        def discard_and_signal(spool):
+            discard(spool)
+            deleted.set()
+    
+        monkeypatch.setattr(eng.audio, "discard_active", discard_and_signal)
+        client = await connect(sock)
+        await client.recv_event("ready")
+        try:
+            await client.send_json({"cmd": "start", "session": "esc-wedge", "context": {}})
+            await client.send_audio(AUDIO)
+            await client.send_json({"cmd": "stop", "session": "esc-wedge"})
+            await asyncio.wait_for(asyncio.to_thread(entered.wait), 2)
+            spool = eng.audio.active_dir / "esc-wedge.pcm16.part"
+            assert spool.exists()
+            await client.send_json({"cmd": "cancel", "session": "esc-wedge"})
+            await asyncio.wait_for(deleted.wait(), 2)
+            assert not spool.exists()
+            assert eng._finalizing
+            await client.send_json({"cmd": "start", "session": "after-esc", "context": {}})
+            await client.send_json({"cmd": "ping"})
+            assert (await client.recv_event("pong"))["event"] == "pong"
+            assert eng._start_session_id == "after-esc"
+            release.set()
+            assert (await client.recv_event("cancelled"))["session"] == "esc-wedge"
+            client.close()
+            await client.writer.wait_closed()
+            next_client = await connect(sock)
+            await next_client.recv_event("ready")
+            await next_client.send_json({"cmd": "ping"})
+            assert (await next_client.recv_event("pong"))["event"] == "pong"
+>           assert not eng.audio.pending_interrupted()
+E           AssertionError: assert not ('after-esc',)
+E            +  where ('after-esc',) = pending_interrupted()
+E            +    where pending_interrupted = <velora_engine.audio_store.AudioStore object at 0x7f6595b4c3b0>.pending_interrupted
+E            +      where <velora_engine.audio_store.AudioStore object at 0x7f6595b4c3b0> = <velora_engine.server.Engine object at 0x7f6595b12fc0>.audio
+
+engine/tests/test_long_dictation.py:130: AssertionError
+______ test_legacy_whisper_offline[mlx-community/whisper-large-v3-turbo] _______
+
+tmp_path = PosixPath('/data/tmp/pytest-of-sushil/pytest-1/test_legacy_whisper_offline_ml0')
+monkeypatch = <_pytest.monkeypatch.MonkeyPatch object at 0x7f65973ee930>
+model_id = 'mlx-community/whisper-large-v3-turbo'
+
+    @pytest.mark.parametrize("model_id", ["mlx-community/whisper-large-v3-turbo", "custom/whisper-tiny"])
+    def test_legacy_whisper_offline(tmp_path, monkeypatch, model_id):
+>       import mlx.core as mx
+E       ModuleNotFoundError: No module named 'mlx'
+
+engine/tests/test_models.py:299: ModuleNotFoundError
+_______________ test_legacy_whisper_offline[custom/whisper-tiny] _______________
+
+tmp_path = PosixPath('/data/tmp/pytest-of-sushil/pytest-1/test_legacy_whisper_offline_cu0')
+monkeypatch = <_pytest.monkeypatch.MonkeyPatch object at 0x7f65973edf40>
+model_id = 'custom/whisper-tiny'
+
+    @pytest.mark.parametrize("model_id", ["mlx-community/whisper-large-v3-turbo", "custom/whisper-tiny"])
+    def test_legacy_whisper_offline(tmp_path, monkeypatch, model_id):
+>       import mlx.core as mx
+E       ModuleNotFoundError: No module named 'mlx'
+
+engine/tests/test_models.py:299: ModuleNotFoundError
+=============================== warnings summary ===============================
+tests/test_bark.py::test_coreml_concurrent_loads_compile_once
+  /data/workspace/velora-model-study-2026-11-18-ebd3420d/.venv-cpu/lib/python3.12/site-packages/_pytest/threadexception.py:58: PytestUnhandledThreadExceptionWarning: Exception in thread Thread-109 (<lambda>)
+  
+  Traceback (most recent call last):
+    File "/usr/lib/python3.12/threading.py", line 1073, in _bootstrap_inner
+      self.run()
+    File "/usr/lib/python3.12/threading.py", line 1010, in run
+      self._target(*self._args, **self._kwargs)
+    File "/data/workspace/velora-model-study-2026-11-18-ebd3420d/engine/tests/test_bark.py", line 644, in <lambda>
+      bark.load_bark_coreml(coreml.source, coreml.cache))) for _ in range(3)]
+      ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+    File "/data/workspace/velora-model-study-2026-11-18-ebd3420d/engine/src/velora_engine/bark.py", line 811, in load_bark_coreml
+      ct = _require_coremltools()
+           ^^^^^^^^^^^^^^^^^^^^^^
+    File "/data/workspace/velora-model-study-2026-11-18-ebd3420d/engine/src/velora_engine/bark.py", line 615, in _require_coremltools
+      _require_apple_silicon()
+    File "/data/workspace/velora-model-study-2026-11-18-ebd3420d/engine/src/velora_engine/bark.py", line 149, in _require_apple_silicon
+      raise BarkUnavailable("Bark runs on Apple silicon Macs only")
+  velora_engine.bark.BarkUnavailable: Bark runs on Apple silicon Macs only
+  
+  Enable tracemalloc to get traceback where the object was allocated.
+  See https://docs.pytest.org/en/stable/how-to/capture-warnings.html#resource-warnings for more info.
+    warnings.warn(pytest.PytestUnhandledThreadExceptionWarning(msg))
+
+tests/test_bark.py::test_coreml_concurrent_loads_compile_once
+  /data/workspace/velora-model-study-2026-11-18-ebd3420d/.venv-cpu/lib/python3.12/site-packages/_pytest/threadexception.py:58: PytestUnhandledThreadExceptionWarning: Exception in thread Thread-108 (<lambda>)
+  
+  Traceback (most recent call last):
+    File "/usr/lib/python3.12/threading.py", line 1073, in _bootstrap_inner
+      self.run()
+    File "/usr/lib/python3.12/threading.py", line 1010, in run
+      self._target(*self._args, **self._kwargs)
+    File "/data/workspace/velora-model-study-2026-11-18-ebd3420d/engine/tests/test_bark.py", line 644, in <lambda>
+      bark.load_bark_coreml(coreml.source, coreml.cache))) for _ in range(3)]
+      ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+    File "/data/workspace/velora-model-study-2026-11-18-ebd3420d/engine/src/velora_engine/bark.py", line 811, in load_bark_coreml
+      ct = _require_coremltools()
+           ^^^^^^^^^^^^^^^^^^^^^^
+    File "/data/workspace/velora-model-study-2026-11-18-ebd3420d/engine/src/velora_engine/bark.py", line 615, in _require_coremltools
+      _require_apple_silicon()
+    File "/data/workspace/velora-model-study-2026-11-18-ebd3420d/engine/src/velora_engine/bark.py", line 149, in _require_apple_silicon
+      raise BarkUnavailable("Bark runs on Apple silicon Macs only")
+  velora_engine.bark.BarkUnavailable: Bark runs on Apple silicon Macs only
+  
+  Enable tracemalloc to get traceback where the object was allocated.
+  See https://docs.pytest.org/en/stable/how-to/capture-warnings.html#resource-warnings for more info.
+    warnings.warn(pytest.PytestUnhandledThreadExceptionWarning(msg))
+
+tests/test_bark.py::test_coreml_concurrent_loads_compile_once
+  /data/workspace/velora-model-study-2026-11-18-ebd3420d/.venv-cpu/lib/python3.12/site-packages/_pytest/threadexception.py:58: PytestUnhandledThreadExceptionWarning: Exception in thread Thread-110 (<lambda>)
+  
+  Traceback (most recent call last):
+    File "/usr/lib/python3.12/threading.py", line 1073, in _bootstrap_inner
+      self.run()
+    File "/usr/lib/python3.12/threading.py", line 1010, in run
+      self._target(*self._args, **self._kwargs)
+    File "/data/workspace/velora-model-study-2026-11-18-ebd3420d/engine/tests/test_bark.py", line 644, in <lambda>
+      bark.load_bark_coreml(coreml.source, coreml.cache))) for _ in range(3)]
+      ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+    File "/data/workspace/velora-model-study-2026-11-18-ebd3420d/engine/src/velora_engine/bark.py", line 811, in load_bark_coreml
+      ct = _require_coremltools()
+           ^^^^^^^^^^^^^^^^^^^^^^
+    File "/data/workspace/velora-model-study-2026-11-18-ebd3420d/engine/src/velora_engine/bark.py", line 615, in _require_coremltools
+      _require_apple_silicon()
+    File "/data/workspace/velora-model-study-2026-11-18-ebd3420d/engine/src/velora_engine/bark.py", line 149, in _require_apple_silicon
+      raise BarkUnavailable("Bark runs on Apple silicon Macs only")
+  velora_engine.bark.BarkUnavailable: Bark runs on Apple silicon Macs only
+  
+  Enable tracemalloc to get traceback where the object was allocated.
+  See https://docs.pytest.org/en/stable/how-to/capture-warnings.html#resource-warnings for more info.
+    warnings.warn(pytest.PytestUnhandledThreadExceptionWarning(msg))
+
+-- Docs: https://docs.pytest.org/en/stable/how-to/capture-warnings.html
+=========================== short test summary info ============================
+FAILED engine/tests/test_audio.py::test_interrupt_preserves_spool_and_acknowledges
+FAILED engine/tests/test_bark.py::test_a_failed_build_publishes_nothing_and_never_falls_back[failure0]
+FAILED engine/tests/test_bark.py::test_a_failed_build_publishes_nothing_and_never_falls_back[failure1]
+FAILED engine/tests/test_bark.py::test_a_failed_build_publishes_nothing_and_never_falls_back[failure2]
+FAILED engine/tests/test_bark.py::test_check_precision_catches_unquantized_or_wrong_width_weights
+FAILED engine/tests/test_bark.py::test_decode_pads_like_upstream_and_returns_text
+FAILED engine/tests/test_bark.py::test_decode_validates_input[audio0-ValueError]
+FAILED engine/tests/test_bark.py::test_decode_validates_input[audio1-TypeError]
+FAILED engine/tests/test_bark.py::test_decode_validates_input[audio2-ValueError]
+FAILED engine/tests/test_bark.py::test_decode_of_nothing_is_empty_without_a_model_call
+FAILED engine/tests/test_bark.py::test_long_audio_decodes_in_bounded_pieces
+FAILED engine/tests/test_bark.py::test_cancel_stops_between_pieces - ModuleNo...
+FAILED engine/tests/test_bark.py::test_a_model_with_another_frontend_is_refused
+FAILED engine/tests/test_bark.py::test_load_bark_warms_up_and_keeps_the_requested_precision
+FAILED engine/tests/test_bark.py::test_a_published_cache_that_fails_to_load_is_an_error
+FAILED engine/tests/test_bark.py::test_coreml_compiles_once_to_a_stable_path_and_warms_up_before_ready
+FAILED engine/tests/test_bark.py::test_coreml_accepts_the_ane_folder_itself
+FAILED engine/tests/test_bark.py::test_coreml_recompiles_when_the_toolchain_changes
+FAILED engine/tests/test_bark.py::test_coreml_compile_failures_publish_nothing[compile-raises]
+FAILED engine/tests/test_bark.py::test_coreml_compile_failures_publish_nothing[no-bundle]
+FAILED engine/tests/test_bark.py::test_coreml_stale_compile_temp_is_removed
+FAILED engine/tests/test_bark.py::test_coreml_concurrent_loads_compile_once
+FAILED engine/tests/test_bark.py::test_coreml_non_finite_warmup_never_reports_ready
+FAILED engine/tests/test_bark.py::test_coreml_decodes_long_audio_in_windows_of_at_most_15s
+FAILED engine/tests/test_bark.py::test_coreml_decode_cancel_and_bad_output - ...
+FAILED engine/tests/test_bark.py::test_coreml_cancel_before_compile - velora_...
+FAILED engine/tests/test_bark.py::test_coreml_identity_is_checked - velora_en...
+FAILED engine/tests/test_benchmark_long_transcription.py::test_real_meeting_caf_loader_and_planner_cpu
+FAILED engine/tests/test_benchmark_model_replacement.py::test_isolated_worker_keeps_production_id_and_copy_draft_and_reaps_load_failure
+FAILED engine/tests/test_benchmark_personal_student.py::test_full_replay_private_resume_and_long_pieces
+FAILED engine/tests/test_bundled_models.py::test_prepare_refuses_outputs_git_would_track
+FAILED engine/tests/test_cleanup.py::test_dictation_cleanup_verifies_transcript_drafts_in_bulk
+FAILED engine/tests/test_cleanup.py::test_transformations_keep_one_token_decoding
+FAILED engine/tests/test_cleanup.py::test_runtime_prefix_extension_preserves_exact_prompt_and_static_fallback
+FAILED engine/tests/test_cleanup.py::test_action_prefix_is_session_scoped_and_cleanup_prefix_survives
+FAILED engine/tests/test_cleanup.py::test_failed_runtime_prefix_extension_restores_clean_static_snapshot
+FAILED engine/tests/test_cleanup.py::test_runtime_prefix_snapshot_failure_keeps_atomic_old_pair
+FAILED engine/tests/test_cleanup.py::test_soft_deadline_starts_after_first_output_token
+FAILED engine/tests/test_cleanup.py::test_soft_deadline_still_bounds_slow_output
+FAILED engine/tests/test_cleanup.py::test_cooperative_cancel_is_not_reported_as_quality_timeout
+FAILED engine/tests/test_cleanup.py::test_prefill_cancel_is_safe[0] - ModuleN...
+FAILED engine/tests/test_cleanup.py::test_prefill_cancel_is_safe[256] - Modul...
+FAILED engine/tests/test_cleanup.py::test_prefill_cancel_is_safe[1024] - Modu...
+FAILED engine/tests/test_cleanup.py::test_copy_draft_is_requested_explicitly_not_implied_by_check_ratio
+FAILED engine/tests/test_cleanup.py::test_copy_draft_runs_only_on_benched_models
+FAILED engine/tests/test_cleanup.py::test_copy_draft_runs_inside_wired_limit_on_the_generation_stream
+FAILED engine/tests/test_cleanup.py::test_cancelled_stock_generation_is_closed_before_its_cache_is_cleared
+FAILED engine/tests/test_cleanup.py::test_copy_draft_cancelled_between_passes_stops_and_closes
+FAILED engine/tests/test_cleanup.py::test_copy_draft_timeout_mid_pass_returns_raw_and_closes
+FAILED engine/tests/test_cleanup.py::test_copy_draft_stops_at_an_eos_drafted_from_the_prompt
+FAILED engine/tests/test_cleanup.py::test_eos_at_the_token_ceiling_counts_the_same_in_both_decoders[eos_is_the_last_allowed_token-stock]
+FAILED engine/tests/test_cleanup.py::test_eos_at_the_token_ceiling_counts_the_same_in_both_decoders[eos_is_the_last_allowed_token-copy_draft]
+FAILED engine/tests/test_cleanup.py::test_eos_at_the_token_ceiling_counts_the_same_in_both_decoders[ceiling_before_eos-stock]
+FAILED engine/tests/test_cleanup.py::test_eos_at_the_token_ceiling_counts_the_same_in_both_decoders[ceiling_before_eos-copy_draft]
+FAILED engine/tests/test_cleanup.py::test_copy_draft_prefill_cancel_keeps_the_warm_snapshot
+FAILED engine/tests/test_cleanup.py::test_input_token_ceiling_refuses_before_mlx_prefill
+FAILED engine/tests/test_cleanup.py::test_cancelled_worker_releases_single_executor_for_final_cleanup
+FAILED engine/tests/test_cleanup.py::test_allocator_budget_precedes_loading[mlx-community/Qwen3.5-4B-MLX-8bit-536870912]
+FAILED engine/tests/test_cleanup.py::test_allocator_budget_precedes_loading[mlx-community/Qwen3.5-4B-MLX-4bit-None]
+FAILED engine/tests/test_cleanup.py::test_allocator_budget_precedes_loading[logical/other-model-None]
+FAILED engine/tests/test_cleanup.py::test_legacy_load_acquires - ModuleNotFou...
+FAILED engine/tests/test_cleanup_process.py::test_session_cleanup_kills_only_leaked_fixture_workers
+FAILED engine/tests/test_cleanup_process.py::test_process_local_source[False-startup]
+FAILED engine/tests/test_cleanup_process.py::test_process_local_source[False-recovery]
+FAILED engine/tests/test_cleanup_process.py::test_process_local_source[False-hibernate]
+FAILED engine/tests/test_cleanup_process.py::test_process_local_source[True-startup]
+FAILED engine/tests/test_cleanup_process.py::test_process_local_source[True-recovery]
+FAILED engine/tests/test_cleanup_process.py::test_process_local_source[True-hibernate]
+FAILED engine/tests/test_decisions.py::test_engine_prefills_the_state_once_and_forks_it_per_question
+FAILED engine/tests/test_decisions.py::test_engine_reuses_the_warm_preamble_across_decisions
+FAILED engine/tests/test_decisions.py::test_engine_refuses_an_oversized_prompt_before_any_forward_pass
+FAILED engine/tests/test_decisions.py::test_an_answer_read_after_a_cancel_is_not_used
+FAILED engine/tests/test_decisions.py::test_an_answer_read_past_the_deadline_is_not_used
+FAILED engine/tests/test_decisions.py::test_action_memory_release_drops_the_decision_preamble
+FAILED engine/tests/test_decisions.py::test_identical_questions_under_different_keys_still_get_a_readout
+FAILED engine/tests/test_export_lfm3_native.py::test_header_reader_and_inspection_require_pinned_paired_lora
+FAILED engine/tests/test_formatting.py::test_legacy_realword_hard_replacement_demoted
+FAILED engine/tests/test_long_dictation.py::test_cancel_wedge_deletes - Asser...
+FAILED engine/tests/test_models.py::test_legacy_whisper_offline[mlx-community/whisper-large-v3-turbo]
+FAILED engine/tests/test_models.py::test_legacy_whisper_offline[custom/whisper-tiny]
+ERROR engine/tests/test_cleanup.py::test_load_local_source[mlx-community/Qwen3.5-4B-MLX-8bit]
+ERROR engine/tests/test_cleanup.py::test_load_local_source[logical/other-model]
+ERROR engine/tests/test_cleanup.py::test_local_source_failure[missing] - Modu...
+ERROR engine/tests/test_cleanup.py::test_local_source_failure[file] - ModuleN...
+ERROR engine/tests/test_cleanup.py::test_local_source_failure[incomplete] - M...
+ERROR engine/tests/test_cleanup.py::test_local_source_failure[disappeared] - ...
+ERROR engine/tests/test_cleanup.py::test_local_tokenizer_reload - ModuleNotFo...
+!!!!!!!!!!!!!!!!!!!!!!!!!!!!!! KeyboardInterrupt !!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!
+/usr/lib/python3.12/asyncio/runners.py:123: KeyboardInterrupt
+(to show a full traceback on KeyboardInterrupt use --full-trace)
+80 failed, 1970 passed, 21 skipped, 3 warnings, 7 errors in 391.51s (0:06:31)

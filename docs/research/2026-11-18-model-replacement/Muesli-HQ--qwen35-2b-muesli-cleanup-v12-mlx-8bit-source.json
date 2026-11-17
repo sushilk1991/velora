@@ -1,0 +1,27 @@
+{
+  "id": "Muesli-HQ/qwen35-2b-muesli-cleanup-v12-mlx-8bit",
+  "sha": "0fbfa48e98f1f8f28a0e3ca692066c823812db4e",
+  "lastModified": "2026-10-26T10:57:10.000Z",
+  "cardData": {
+    "license": "apache-2.0",
+    "base_model": "Qwen/Qwen3.5-2B",
+    "library_name": "mlx",
+    "pipeline_tag": "text-generation",
+    "tags": [
+      "speech-to-text",
+      "transcript-cleanup",
+      "dictation",
+      "muesli"
+    ],
+    "language": [
+      "en"
+    ]
+  },
+  "safetensors": {
+    "parameters": {
+      "U32": 1881276416,
+      "BF16": 548672
+    },
+    "total": 1881825088
+  }
+}

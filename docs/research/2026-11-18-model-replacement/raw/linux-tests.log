@@ -1,0 +1,218 @@
+boxrun: withheld 395 credential/auth file(s); provision scoped test secrets separately
+boxrun: build:/data/workspace/velora-model-study-2026-11-18-ebd3420d/
+baton: waiting for a free build slot
+baton: waiting for a free build slot
+baton: waiting for a free build slot
+baton: waiting for a free build slot
+baton: waiting for a free build slot
+baton: waiting for a free build slot
+baton: waiting for a free build slot
+baton: waiting for a free build slot
+baton: waiting for a free build slot
+baton: waiting for a free build slot
+baton: waiting for a free build slot
+baton: waiting for a free build slot
+baton: waiting for a free build slot
+baton: waiting for a free build slot
+baton: waiting for a free build slot
+baton: waiting for a free build slot
+baton: waiting for a free build slot
+baton: waiting for a free build slot
+baton: waiting for a free build slot
+baton: waiting for a free build slot
+baton: waiting for a free build slot
+baton: waiting for a free build slot
+baton: waiting for a free build slot
+baton: waiting for a free build slot
+baton: waiting for a free build slot
+baton: waiting for a free build slot
+baton: waiting for a free build slot
+baton: waiting for a free build slot
+baton: waiting for a free build slot
+baton: waiting for a free build slot
+baton: waiting for a free build slot
+baton: waiting for a free build slot
+baton: waiting for a free build slot
+baton: waiting for a free build slot
+baton: waiting for a free build slot
+baton: waiting for a free build slot
+baton: waiting for a free build slot
+baton: waiting for a free build slot
+baton: waiting for a free build slot
+baton: waiting for a free build slot
+baton: waiting for a free build slot
+baton: waiting for a free build slot
+baton: waiting for a free build slot
+baton: waiting for a free build slot
+baton: waiting for a free build slot
+baton: waiting for a free build slot
+baton: waiting for a free build slot
+baton: waiting for a free build slot
+baton: waiting for a free build slot
+baton: waiting for a free build slot
+baton: waiting for a free build slot
+baton: waiting for a free build slot
+baton: waiting for a free build slot
+baton: waiting for a free build slot
+baton: waiting for a free build slot
+baton: waiting for a free build slot
+baton: waiting for a free build slot
+baton: waiting for a free build slot
+baton: waiting for a free build slot
+baton: waiting for a free build slot
+baton: waiting for a free build slot
+baton: waiting for a free build slot
+baton: waiting for a free build slot
+baton: waiting for a free build slot
+baton: waiting for a free build slot
+baton: waiting for a free build slot
+baton: waiting for a free build slot
+baton: waiting for a free build slot
+baton: waiting for a free build slot
+baton: waiting for a free build slot
+baton: waiting for a free build slot
+baton: waiting for a free build slot
+baton: waiting for a free build slot
+baton: waiting for a free build slot
+baton: waiting for a free build slot
+baton: waiting for a free build slot
+baton: waiting for a free build slot
+baton: waiting for a free build slot
+baton: waiting for a free build slot
+baton: waiting for a free build slot
+baton: waiting for a free build slot
+baton: waiting for a free build slot
+baton: waiting for a free build slot
+baton: waiting for a free build slot
+baton: waiting for a free build slot
+baton: waiting for a free build slot
+baton: waiting for a free build slot
+baton: waiting for a free build slot
+baton: waiting for a free build slot
+baton: waiting for a free build slot
+baton: waiting for a free build slot
+baton: waiting for a free build slot
+baton: waiting for a free build slot
+baton: waiting for a free build slot
+baton: waiting for a free build slot
+baton: waiting for a free build slot
+baton: waiting for a free build slot
+baton: waiting for a free build slot
+baton: waiting for a free build slot
+baton: waiting for a free build slot
+baton: waiting for a free build slot
+baton: waiting for a free build slot
+baton: waiting for a free build slot
+baton: waiting for a free build slot
+baton: waiting for a free build slot
+baton: waiting for a free build slot
+baton: waiting for a free build slot
+baton: waiting for a free build slot
+baton: waiting for a free build slot
+baton: waiting for a free build slot
+baton: waiting for a free build slot
+baton: waiting for a free build slot
+baton: waiting for a free build slot
+baton: waiting for a free build slot
+baton: waiting for a free build slot
+baton: waiting for a free build slot
+baton: waiting for a free build slot
+baton: waiting for a free build slot
+baton: waiting for a free build slot
+baton: waiting for a free build slot
+baton: waiting for a free build slot
+baton: waiting for a free build slot
+baton: waiting for a free build slot
+baton: waiting for a free build slot
+baton: waiting for a free build slot
+
+==================================== ERRORS ====================================
+___________ ERROR collecting tests/test_benchmark_personal_native.py ___________
+ImportError while importing test module '/data/workspace/velora-model-study-2026-11-18-ebd3420d/engine/tests/test_benchmark_personal_native.py'.
+Hint: make sure your test modules/packages have valid Python names.
+Traceback:
+/usr/lib/python3.12/importlib/__init__.py:90: in import_module
+    return _bootstrap._gcd_import(name[level:], package, level)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+engine/tests/test_benchmark_personal_native.py:13: in <module>
+    import benchmark_personal_native as bench
+engine/scripts/benchmark_personal_native.py:30: in <module>
+    from benchmark_personal_student import controls, cleanup_status, source_hash
+engine/scripts/benchmark_personal_student.py:23: in <module>
+    from cleanup import SYSTEM_PROMPT
+E   ModuleNotFoundError: No module named 'cleanup'
+__________ ERROR collecting tests/test_benchmark_personal_student.py ___________
+ImportError while importing test module '/data/workspace/velora-model-study-2026-11-18-ebd3420d/engine/tests/test_benchmark_personal_student.py'.
+Hint: make sure your test modules/packages have valid Python names.
+Traceback:
+/usr/lib/python3.12/importlib/__init__.py:90: in import_module
+    return _bootstrap._gcd_import(name[level:], package, level)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+engine/tests/test_benchmark_personal_student.py:13: in <module>
+    bench=importlib.util.module_from_spec(spec);spec.loader.exec_module(bench)
+                                                ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+engine/scripts/benchmark_personal_student.py:23: in <module>
+    from cleanup import SYSTEM_PROMPT
+E   ModuleNotFoundError: No module named 'cleanup'
+______________ ERROR collecting tests/test_export_lfm3_native.py _______________
+engine/tests/test_export_lfm3_native.py:13: in <module>
+    export=importlib.util.module_from_spec(spec);spec.loader.exec_module(export)
+                                                 ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+<frozen importlib._bootstrap_external>:991: in exec_module
+    ???
+<frozen importlib._bootstrap_external>:1128: in get_code
+    ???
+<frozen importlib._bootstrap_external>:1186: in get_data
+    ???
+E   FileNotFoundError: [Errno 2] No such file or directory: '/data/workspace/velora-model-study-2026-11-18-ebd3420d/training/cleanup/scripts/export_lfm3_native.py'
+_______________ ERROR collecting tests/test_probe_greedy_ties.py _______________
+engine/tests/test_probe_greedy_ties.py:10: in <module>
+    probe=importlib.util.module_from_spec(spec);spec.loader.exec_module(probe)
+                                                ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+<frozen importlib._bootstrap_external>:991: in exec_module
+    ???
+<frozen importlib._bootstrap_external>:1128: in get_code
+    ???
+<frozen importlib._bootstrap_external>:1186: in get_data
+    ???
+E   FileNotFoundError: [Errno 2] No such file or directory: '/data/workspace/velora-model-study-2026-11-18-ebd3420d/training/cleanup/scripts/probe_greedy_ties.py'
+_____________ ERROR collecting tests/test_student_cache_compat.py ______________
+ImportError while importing test module '/data/workspace/velora-model-study-2026-11-18-ebd3420d/engine/tests/test_student_cache_compat.py'.
+Hint: make sure your test modules/packages have valid Python names.
+Traceback:
+/usr/lib/python3.12/importlib/__init__.py:90: in import_module
+    return _bootstrap._gcd_import(name[level:], package, level)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+engine/tests/test_student_cache_compat.py:6: in <module>
+    from cleanup import cache_compat as c
+E   ModuleNotFoundError: No module named 'cleanup'
+____________ ERROR collecting tests/test_student_engine_decoder.py _____________
+ImportError while importing test module '/data/workspace/velora-model-study-2026-11-18-ebd3420d/engine/tests/test_student_engine_decoder.py'.
+Hint: make sure your test modules/packages have valid Python names.
+Traceback:
+/usr/lib/python3.12/importlib/__init__.py:90: in import_module
+    return _bootstrap._gcd_import(name[level:], package, level)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+engine/tests/test_student_engine_decoder.py:10: in <module>
+    from cleanup.engine_decoder import StudentEngine, student_messages, student_prompt_tokens, experimental_copy_draft_tokens
+E   ModuleNotFoundError: No module named 'cleanup'
+_____________ ERROR collecting tests/test_whisper_encoder_reuse.py _____________
+ImportError while importing test module '/data/workspace/velora-model-study-2026-11-18-ebd3420d/engine/tests/test_whisper_encoder_reuse.py'.
+Hint: make sure your test modules/packages have valid Python names.
+Traceback:
+/usr/lib/python3.12/importlib/__init__.py:90: in import_module
+    return _bootstrap._gcd_import(name[level:], package, level)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+engine/tests/test_whisper_encoder_reuse.py:18: in <module>
+    import mlx.core as mx
+E   ModuleNotFoundError: No module named 'mlx'
+=========================== short test summary info ============================
+ERROR engine/tests/test_benchmark_personal_native.py
+ERROR engine/tests/test_benchmark_personal_student.py
+ERROR engine/tests/test_export_lfm3_native.py - FileNotFoundError: [Errno 2] ...
+ERROR engine/tests/test_probe_greedy_ties.py - FileNotFoundError: [Errno 2] N...
+ERROR engine/tests/test_student_cache_compat.py
+ERROR engine/tests/test_student_engine_decoder.py
+ERROR engine/tests/test_whisper_encoder_reuse.py
+!!!!!!!!!!!!!!!!!!! Interrupted: 7 errors during collection !!!!!!!!!!!!!!!!!!!!
+7 errors in 3.65s

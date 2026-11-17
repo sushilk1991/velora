@@ -1,0 +1,2 @@
+{"event": "worker_memory", "pid": 61526, "peak_rss_bytes": 1551646720, "mlx": {"active_bytes": 563529930, "peak_bytes": 592459588, "cache_bytes": 15647024}}
+{"event": "worker_memory", "pid": 61526, "peak_rss_bytes": 1551646720, "mlx": {"active_bytes": 586434762, "peak_bytes": 783712402, "cache_bytes": 45435242}}

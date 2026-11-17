@@ -1,0 +1,1418 @@
+[
+  {
+    "case": "declarative",
+    "input": "we should ship this performance fix today because the current app feels too slow",
+    "models": [
+      {
+        "model": "Baseline Qwen 4B8",
+        "output": "We should ship this performance fix today because the current app feels too slow.",
+        "failures": [],
+        "changed_from_baseline": false
+      },
+      {
+        "model": "Qwen 2B4",
+        "output": "1. We should ship this performance fix today because the current app feels too slow.",
+        "failures": [],
+        "changed_from_baseline": true
+      },
+      {
+        "model": "Muesli 2B8",
+        "output": "We should ship this performance fix today because the current app feels too slow.",
+        "failures": [],
+        "changed_from_baseline": false
+      },
+      {
+        "model": "Vedu 0.8B",
+        "output": "We should ship this performance fix today because the current app feels too slow.",
+        "failures": [],
+        "changed_from_baseline": false
+      },
+      {
+        "model": "Muesli 0.8B8",
+        "output": "We should ship this performance fix today because the current app feels too slow.",
+        "failures": [],
+        "changed_from_baseline": false
+      },
+      {
+        "model": "Qwen 2B8",
+        "output": "1. We should ship this performance fix today because the current app feels too slow.",
+        "failures": [],
+        "changed_from_baseline": true
+      }
+    ]
+  },
+  {
+    "case": "grammar",
+    "input": "the performance issues was much worse yesterday and the background animations keeps running when the window is hidden",
+    "models": [
+      {
+        "model": "Baseline Qwen 4B8",
+        "output": "The performance issues were much worse yesterday, and the background animations keep running when the window is hidden.",
+        "failures": [],
+        "changed_from_baseline": false
+      },
+      {
+        "model": "Qwen 2B4",
+        "output": "1. The performance issues were much worse yesterday.\n2. The background animations keep running when the window is hidden.",
+        "failures": [],
+        "changed_from_baseline": true
+      },
+      {
+        "model": "Muesli 2B8",
+        "output": "the performance issues was much worse yesterday and the background animations keeps running when the window is hidden.",
+        "failures": [
+          "missing:issues were"
+        ],
+        "changed_from_baseline": true
+      },
+      {
+        "model": "Vedu 0.8B",
+        "output": "The performance issues were much worse yesterday, and the background animations keep running when the window is hidden.",
+        "failures": [],
+        "changed_from_baseline": false
+      },
+      {
+        "model": "Muesli 0.8B8",
+        "output": "the performance issues was much worse yesterday and the background animations keeps running when the window is hidden.",
+        "failures": [
+          "missing:issues were"
+        ],
+        "changed_from_baseline": true
+      },
+      {
+        "model": "Qwen 2B8",
+        "output": "1. The performance issues were much worse yesterday.\n2. Background animations keep running when the window is hidden.",
+        "failures": [],
+        "changed_from_baseline": true
+      }
+    ]
+  },
+  {
+    "case": "question",
+    "input": "why does the speech engine take longer on this mac when both models are already loaded",
+    "models": [
+      {
+        "model": "Baseline Qwen 4B8",
+        "output": "Why does the speech engine take longer on this Mac when both models are already loaded?",
+        "failures": [],
+        "changed_from_baseline": false
+      },
+      {
+        "model": "Qwen 2B4",
+        "output": "why does the speech engine take longer on this mac when both models are already loaded",
+        "failures": [
+          "cleanup_not_applied",
+          "missing_ending:?"
+        ],
+        "changed_from_baseline": true
+      },
+      {
+        "model": "Muesli 2B8",
+        "output": "Why does the speech engine take longer on this Mac when both models are already loaded?",
+        "failures": [],
+        "changed_from_baseline": false
+      },
+      {
+        "model": "Vedu 0.8B",
+        "output": "Why does the speech engine take longer on this Mac when both models are already loaded?",
+        "failures": [],
+        "changed_from_baseline": false
+      },
+      {
+        "model": "Muesli 0.8B8",
+        "output": "Why does the speech engine take longer on this Mac when both models are already loaded?",
+        "failures": [],
+        "changed_from_baseline": false
+      },
+      {
+        "model": "Qwen 2B8",
+        "output": "Why does the speech engine take longer on this Mac when both models are already loaded?",
+        "failures": [],
+        "changed_from_baseline": false
+      }
+    ]
+  },
+  {
+    "case": "terminal_prose",
+    "input": "please inspect every performance bottleneck in this branch and preserve the exact models while fixing punctuation grammar and the live transcript display",
+    "models": [
+      {
+        "model": "Baseline Qwen 4B8",
+        "output": "Please inspect every performance bottleneck in this branch and preserve the exact models while fixing punctuation, grammar, and the live transcript display.",
+        "failures": [],
+        "changed_from_baseline": false
+      },
+      {
+        "model": "Qwen 2B4",
+        "output": "Please inspect every performance bottleneck in this branch and preserve the exact models while fixing punctuation grammar and the live transcript display.",
+        "failures": [],
+        "changed_from_baseline": true
+      },
+      {
+        "model": "Muesli 2B8",
+        "output": "please inspect every performance bottleneck in this branch and preserve the exact models while fixing punctuation grammar and the live transcript display.",
+        "failures": [],
+        "changed_from_baseline": true
+      },
+      {
+        "model": "Vedu 0.8B",
+        "output": "Please inspect every performance bottleneck in this branch and preserve the exact models while fixing punctuation, grammar, and the live transcript display.",
+        "failures": [],
+        "changed_from_baseline": false
+      },
+      {
+        "model": "Muesli 0.8B8",
+        "output": "please inspect every performance bottleneck in this branch and preserve the exact models while fixing punctuation grammar and the live transcript display.",
+        "failures": [],
+        "changed_from_baseline": true
+      },
+      {
+        "model": "Qwen 2B8",
+        "output": "Please inspect every performance bottleneck in this branch and preserve the exact models while fixing punctuation, grammar, and the live transcript display.",
+        "failures": [],
+        "changed_from_baseline": false
+      }
+    ]
+  },
+  {
+    "case": "terminal_meta_edit_correction",
+    "input": "I am just checking whether streaming content works or not. Yeah, it is working. No, no, it is not working. But again, it feels like typing. So it's good. I am confused that why this didn't work. in case of terminal. Also, let's meet at 3pm. No, no, no, 6pm. 6pm not 3pm. Can you change the previous line and make it 6pm?",
+    "models": [
+      {
+        "model": "Baseline Qwen 4B8",
+        "output": "I am just checking whether streaming content works or not. Yeah, it is working. No, it is not working. But again, it feels like typing. So it's good. I am confused that why this didn't work in case of terminal. Also, let's meet at 6 p.m.",
+        "failures": [],
+        "changed_from_baseline": false
+      },
+      {
+        "model": "Qwen 2B4",
+        "output": "I am just checking whether streaming content works or not. Yeah, it is working. No, no, it is not working. But again, it feels like typing. So it's good. I am confused that why this didn't work. in case of terminal. Also, let's meet at 3pm. No, no, no, 6pm. 6pm not 3pm. Can you change the previous line and make it 6pm?",
+        "failures": [
+          "cleanup_not_applied",
+          "forbidden:3pm",
+          "forbidden:6pm not 3pm",
+          "forbidden:change the previous line",
+          "missing:let's meet at 6",
+          "missing_ending:."
+        ],
+        "changed_from_baseline": true
+      },
+      {
+        "model": "Muesli 2B8",
+        "output": "I am confused that why this didn't work in case of terminal. Also, let's meet at 6pm. Can you change the previous line and make it 6pm?",
+        "failures": [
+          "forbidden:change the previous line",
+          "missing:streaming content",
+          "missing_ending:."
+        ],
+        "changed_from_baseline": true
+      },
+      {
+        "model": "Vedu 0.8B",
+        "output": "I am just checking whether streaming content works or not. Yeah, it is working. No, no, it is not working. But again, it feels like typing. So it's good. I am confused that why this didn't work. In case of terminal. Also, let's meet at 6 PM. Can you change the previous line and make it 6 PM?",
+        "failures": [
+          "forbidden:change the previous line",
+          "missing_ending:."
+        ],
+        "changed_from_baseline": true
+      },
+      {
+        "model": "Muesli 0.8B8",
+        "output": "I am just checking whether streaming content works or not. It is not working. But again, it feels like typing. So it's good. I am confused that why this didn't work. In case of terminal. Also, let's meet at 6pm. Can you change the previous line and make it 6pm?",
+        "failures": [
+          "forbidden:change the previous line",
+          "missing_ending:."
+        ],
+        "changed_from_baseline": true
+      },
+      {
+        "model": "Qwen 2B8",
+        "output": "I am just checking whether streaming content works or not. Yeah, it is working. No, no, it is not working. But again, it feels like typing. So it's good. I am confused that why this didn't work. In case of terminal. Also, let's meet at 6 p.m. Can you change the previous line and make it 6 p.m.?",
+        "failures": [
+          "forbidden:change the previous line",
+          "missing_ending:."
+        ],
+        "changed_from_baseline": true
+      }
+    ]
+  },
+  {
+    "case": "names_and_numbers",
+    "input": "please schedule Priya Sharma for the Q3 review at three thirty and set the budget to forty two thousand dollars",
+    "models": [
+      {
+        "model": "Baseline Qwen 4B8",
+        "output": "Please schedule Priya Sharma for the Q3 review at 3:30 and set the budget to $42,000.",
+        "failures": [],
+        "changed_from_baseline": false
+      },
+      {
+        "model": "Qwen 2B4",
+        "output": "Please schedule Priya Sharma for the Q3 review at three thirty and set the budget to forty two thousand dollars.",
+        "failures": [
+          "missing:3:30",
+          "missing:42,000"
+        ],
+        "changed_from_baseline": true
+      },
+      {
+        "model": "Muesli 2B8",
+        "output": "Please schedule Priya Sharma for the Q3 review at 3:30 and set the budget to $42,000.",
+        "failures": [],
+        "changed_from_baseline": false
+      },
+      {
+        "model": "Vedu 0.8B",
+        "output": "Please schedule Priya Sharma for the Q3 review at 3:30 and set the budget to $42,000.",
+        "failures": [],
+        "changed_from_baseline": false
+      },
+      {
+        "model": "Muesli 0.8B8",
+        "output": "Please schedule Priya Sharma for the Q3 review at 3:30 and set the budget to $42,000.",
+        "failures": [],
+        "changed_from_baseline": false
+      },
+      {
+        "model": "Qwen 2B8",
+        "output": "Please schedule Priya Sharma for the Q3 review at three thirty and set the budget to forty two thousand dollars.",
+        "failures": [
+          "missing:3:30",
+          "missing:42,000"
+        ],
+        "changed_from_baseline": true
+      }
+    ]
+  },
+  {
+    "case": "custom_mode_prompt",
+    "input": "please keep this Velora update concise while preserving the package name and every technical detail that I dictated here",
+    "models": [
+      {
+        "model": "Baseline Qwen 4B8",
+        "output": "Please keep this Velora update concise while preserving the package name and every technical detail that I dictated here.",
+        "failures": [],
+        "changed_from_baseline": false
+      },
+      {
+        "model": "Qwen 2B4",
+        "output": "Please keep this Velora update concise while preserving the package name and every technical detail that I dictated here.",
+        "failures": [],
+        "changed_from_baseline": false
+      },
+      {
+        "model": "Muesli 2B8",
+        "output": "please keep this Velora update concise while preserving the package name and every technical detail that I dictated here.",
+        "failures": [],
+        "changed_from_baseline": true
+      },
+      {
+        "model": "Vedu 0.8B",
+        "output": "Please keep this Velora update concise while preserving the package name and every technical detail that I dictated here.",
+        "failures": [],
+        "changed_from_baseline": false
+      },
+      {
+        "model": "Muesli 0.8B8",
+        "output": "please keep this Velora update concise while preserving the package name and every technical detail that I dictated here.",
+        "failures": [],
+        "changed_from_baseline": true
+      },
+      {
+        "model": "Qwen 2B8",
+        "output": "Please keep this Velora update concise while preserving the package name and every technical detail that I dictated here.",
+        "failures": [],
+        "changed_from_baseline": false
+      }
+    ]
+  },
+  {
+    "case": "romanize_hindi_custom_mode",
+    "input": "नमस्ते Velora आज मौसम अच्छा है और मैं काम कर रहा हूँ",
+    "models": [
+      {
+        "model": "Baseline Qwen 4B8",
+        "output": "Namaste Velora aaj mausam achha hai aur main kaam kar raha hoon",
+        "failures": [],
+        "changed_from_baseline": false
+      },
+      {
+        "model": "Qwen 2B4",
+        "output": "Namaste Velora aaj mousam achha hai aur main kaam kar raha hoon",
+        "failures": [],
+        "changed_from_baseline": true
+      },
+      {
+        "model": "Muesli 2B8",
+        "output": "नमस्ते Velora आज मौसम अच्छा है और मैं काम कर रहा हूँ",
+        "failures": [
+          "missing:Namaste",
+          "missing:aaj",
+          "romanization_kept_native_script"
+        ],
+        "changed_from_baseline": true
+      },
+      {
+        "model": "Vedu 0.8B",
+        "output": "Hello Velora, today the weather is good and I'm working on something.",
+        "failures": [
+          "missing:Namaste",
+          "missing:aaj"
+        ],
+        "changed_from_baseline": true
+      },
+      {
+        "model": "Muesli 0.8B8",
+        "output": "नमस्ते Velora आज मौसम अच्छा है और मैं काम कर रहा हूँ",
+        "failures": [
+          "missing:Namaste",
+          "missing:aaj",
+          "romanization_kept_native_script"
+        ],
+        "changed_from_baseline": true
+      },
+      {
+        "model": "Qwen 2B8",
+        "output": "Namaste Velora aaj mausam acha hai aur main kaam kar raha hoon",
+        "failures": [],
+        "changed_from_baseline": true
+      }
+    ]
+  },
+  {
+    "case": "romanize_hindi_note_mode",
+    "input": "मुझे आज तीन काम करने हैं पहला रिपोर्ट भेजना दूसरा मीटिंग तय करना तीसरा कोड जांचना",
+    "models": [
+      {
+        "model": "Baseline Qwen 4B8",
+        "output": "Mujhe aaj teen kaam karne hain pehla report bhejna doosra meeting tay karna teesra code jaanchna",
+        "failures": [],
+        "changed_from_baseline": false
+      },
+      {
+        "model": "Qwen 2B4",
+        "output": "Mujhe aaj teen kaam karna hai. Pehla report bhejna. Doora meeting tay karna. Teesra code jaanchna.",
+        "failures": [],
+        "changed_from_baseline": true
+      },
+      {
+        "model": "Muesli 2B8",
+        "output": "मुझे आज तीन काम करने हैं:\n1. रिपोर्ट भेजना\n2. मीटिंग तय करना\n3. कोड जांचना",
+        "failures": [
+          "missing:Mujhe",
+          "missing:aaj",
+          "missing:bhejna",
+          "missing:code",
+          "missing:tay karna",
+          "missing:teen kaam",
+          "romanization_kept_native_script"
+        ],
+        "changed_from_baseline": true
+      },
+      {
+        "model": "Vedu 0.8B",
+        "output": "I need to do three things today:\n1. Report\n2. Meeting\n3. Code review",
+        "failures": [
+          "missing:Mujhe",
+          "missing:aaj",
+          "missing:bhejna",
+          "missing:tay karna",
+          "missing:teen kaam"
+        ],
+        "changed_from_baseline": true
+      },
+      {
+        "model": "Muesli 0.8B8",
+        "output": "1. Report\n2. Meeting\n3. Code check",
+        "failures": [
+          "missing:Mujhe",
+          "missing:aaj",
+          "missing:bhejna",
+          "missing:tay karna",
+          "missing:teen kaam"
+        ],
+        "changed_from_baseline": true
+      },
+      {
+        "model": "Qwen 2B8",
+        "output": "Mujhe aaj teen kaam karna hai. Pehla report bhejna. Doosra meeting tay karna. Teesra code jaanchana.",
+        "failures": [],
+        "changed_from_baseline": true
+      }
+    ]
+  },
+  {
+    "case": "long_meaning",
+    "input": "on this M4 Max keep Whisper and Qwen exactly as configured then remove repeated prompt prefill cancel stale background work stop hidden animations preserve every dictated detail and make the final result grammatical and fully punctuated without sending audio or text away from the device",
+    "models": [
+      {
+        "model": "Baseline Qwen 4B8",
+        "output": "On this M4 Max, keep Whisper and Qwen exactly as configured, then remove repeated prompt prefill, cancel stale background work, stop hidden animations, preserve every dictated detail, and make the final result grammatical and fully punctuated without sending audio or text away from the device.",
+        "failures": [],
+        "changed_from_baseline": false
+      },
+      {
+        "model": "Qwen 2B4",
+        "output": "1. On this M4 Max, keep Whisper and Qwen exactly as configured.\n2. Remove repeated prompts.\n3. Prefill.\n4. Cancel.\n5. Stale background work.\n6. Stop.\n7. Hidden animations.\n8. Preserve every dictated detail.\n9. Make the final result grammatical.\n10. Fully punctuated.\n11. Without sending audio or text away from the device.",
+        "failures": [],
+        "changed_from_baseline": true
+      },
+      {
+        "model": "Muesli 2B8",
+        "output": "- keep Whisper and Qwen exactly as configured\n- remove repeated prompt prefill\n- cancel stale background work\n- stop hidden animations\n- preserve every dictated detail\n- make the final result grammatical and fully punctuated\n- without sending audio or text away from the device.",
+        "failures": [
+          "missing:M4 Max"
+        ],
+        "changed_from_baseline": true
+      },
+      {
+        "model": "Vedu 0.8B",
+        "output": "On this M4 Max, keep Whisper and Qwen exactly as configured, then remove repeated prompt prefill, cancel stale background work, stop hidden animations, preserve every dictated detail, and make the final result grammatical and fully punctuated without sending audio or text away from the device.",
+        "failures": [],
+        "changed_from_baseline": false
+      },
+      {
+        "model": "Muesli 0.8B8",
+        "output": "on this M4 Max keep Whisper and Qwen exactly as configured then remove repeated prompt prefill cancel stale background work stop hidden animations preserve every dictated detail and make the final result grammatical and fully punctuated without sending audio or text away from the device.",
+        "failures": [],
+        "changed_from_baseline": true
+      },
+      {
+        "model": "Qwen 2B8",
+        "output": "On this M4 Max, keep Whisper and Qwen exactly as configured. Then remove repeated prompt, prefill, cancel, stale, background work, stop, and hidden animations. Preserve every dictated detail and make the final result grammatical and fully punctuated without sending audio or text away from the device.",
+        "failures": [],
+        "changed_from_baseline": true
+      }
+    ]
+  },
+  {
+    "case": "implicit_issue_list",
+    "input": "there are three issues with Velora the first issue is long dictations take too long after I release the hotkey the second issue is rambling feedback stays as one paragraph and the third issue is that correction messages are not structured clearly",
+    "models": [
+      {
+        "model": "Baseline Qwen 4B8",
+        "output": "There are three issues with Velora:\n1. Long dictations take too long after I release the hotkey.\n2. Rambling feedback stays as one paragraph.\n3. Correction messages are not structured clearly.",
+        "failures": [],
+        "changed_from_baseline": false
+      },
+      {
+        "model": "Qwen 2B4",
+        "output": "1. Long dictations take too long.\n2. Rambling feedback stays as one paragraph.\n3. Correction messages are not structured clearly.",
+        "failures": [],
+        "changed_from_baseline": true
+      },
+      {
+        "model": "Muesli 2B8",
+        "output": "There are three issues with Velora:\n1. Long dictations take too long after I release the hotkey\n2. Rambling feedback stays as one paragraph\n3. Correction messages are not structured clearly.",
+        "failures": [],
+        "changed_from_baseline": true
+      },
+      {
+        "model": "Vedu 0.8B",
+        "output": "There are three issues with Velora:\n1. Long dictations take too long after I release the hotkey\n2. Rambling feedback stays as one paragraph\n3. Correction messages are not structured clearly.",
+        "failures": [],
+        "changed_from_baseline": true
+      },
+      {
+        "model": "Muesli 0.8B8",
+        "output": "There are three issues with Velora:\n1. Long dictations take too long after I release the hotkey\n2. Rambling feedback stays as one paragraph\n3. Correction messages are not structured clearly.",
+        "failures": [],
+        "changed_from_baseline": true
+      },
+      {
+        "model": "Qwen 2B8",
+        "output": "1. Long dictations take too long after I release the hotkey.\n2. Rambling feedback stays as one paragraph.\n3. Correction messages are not structured clearly.",
+        "failures": [],
+        "changed_from_baseline": true
+      }
+    ]
+  },
+  {
+    "case": "implicit_feedback_list",
+    "input": "I have a few pieces of feedback about the settings screen the microphone picker is hard to scan also the save action gives no confirmation and the error message does not explain how to recover",
+    "models": [
+      {
+        "model": "Baseline Qwen 4B8",
+        "output": "I have a few pieces of feedback about the settings screen:\n1. The microphone picker is hard to scan.\n2. The save action gives no confirmation.\n3. The error message does not explain how to recover.",
+        "failures": [],
+        "changed_from_baseline": false
+      },
+      {
+        "model": "Qwen 2B4",
+        "output": "I have a few feedback points:\n1. The microphone picker is hard to scan.\n2. The save action gives no confirmation.\n3. The error message does not explain how to recover.",
+        "failures": [],
+        "changed_from_baseline": true
+      },
+      {
+        "model": "Muesli 2B8",
+        "output": "I have a few pieces of feedback about the settings screen the microphone picker is hard to scan also the save action gives no confirmation and the error message does not explain how to recover.",
+        "failures": [
+          "missing:error message",
+          "missing:microphone picker",
+          "missing:save action",
+          "numbered_items:0!=expected:3"
+        ],
+        "changed_from_baseline": true
+      },
+      {
+        "model": "Vedu 0.8B",
+        "output": "I have a few pieces of feedback about the settings screen:\n- The microphone picker is hard to scan\n- Also, the save action gives no confirmation\n- The error message does not explain how to recover.",
+        "failures": [
+          "missing:error message",
+          "missing:microphone picker",
+          "missing:save action",
+          "numbered_items:0!=expected:3",
+          "unexpected_non_numbered_list_items"
+        ],
+        "changed_from_baseline": true
+      },
+      {
+        "model": "Muesli 0.8B8",
+        "output": "I have a few pieces of feedback about the settings screen: the microphone picker is hard to scan, the save action gives no confirmation, and the error message does not explain how to recover.",
+        "failures": [
+          "missing:error message",
+          "missing:microphone picker",
+          "missing:save action",
+          "numbered_items:0!=expected:3"
+        ],
+        "changed_from_baseline": true
+      },
+      {
+        "model": "Qwen 2B8",
+        "output": "1. The microphone picker is hard to scan.\n2. The save action gives no confirmation.\n3. The error message does not explain how to recover.",
+        "failures": [],
+        "changed_from_baseline": true
+      }
+    ]
+  },
+  {
+    "case": "natural_launch_plan",
+    "input": "for friday's launch sam owns the release maya will send the notes before lunch and i will check metrics after we ship",
+    "models": [
+      {
+        "model": "Baseline Qwen 4B8",
+        "output": "For Friday's launch:\n1. Sam owns the release.\n2. Maya will send the notes before lunch.\n3. I will check metrics after we ship.",
+        "failures": [],
+        "changed_from_baseline": false
+      },
+      {
+        "model": "Qwen 2B4",
+        "output": "For Friday's launch:\n1. Sam owns the release.\n2. Maya will send the notes before lunch.\n3. I will check metrics after we ship.",
+        "failures": [],
+        "changed_from_baseline": false
+      },
+      {
+        "model": "Muesli 2B8",
+        "output": "For Friday's launch: Sam owns the release, Maya will send the notes before lunch, and I will check metrics after we ship.",
+        "failures": [
+          "missing:Maya",
+          "missing:Sam",
+          "missing:before lunch",
+          "missing:metrics",
+          "numbered_items:0!=expected:3"
+        ],
+        "changed_from_baseline": true
+      },
+      {
+        "model": "Vedu 0.8B",
+        "output": "For Friday's launch, Sam owns the release. Maya will send the notes before lunch and I will check metrics after we ship.",
+        "failures": [
+          "missing:Maya",
+          "missing:Sam",
+          "missing:before lunch",
+          "missing:metrics",
+          "numbered_items:0!=expected:3"
+        ],
+        "changed_from_baseline": true
+      },
+      {
+        "model": "Muesli 0.8B8",
+        "output": "For Friday's launch:\n- Sam owns the release\n- Maya will send the notes before lunch\n- I will check metrics after we ship.",
+        "failures": [
+          "missing:Maya",
+          "missing:Sam",
+          "missing:before lunch",
+          "missing:metrics",
+          "numbered_items:0!=expected:3",
+          "unexpected_non_numbered_list_items"
+        ],
+        "changed_from_baseline": true
+      },
+      {
+        "model": "Qwen 2B8",
+        "output": "For Friday's launch:\n1. Sam owns the release.\n2. Maya sends the notes before lunch.\n3. I will check metrics after we ship.",
+        "failures": [],
+        "changed_from_baseline": true
+      }
+    ]
+  },
+  {
+    "case": "implicit_counted_todo_list",
+    "input": "So today the priority is three items. First is I need to buy books. Second is I need to buy apples. Third is I need to buy eggs. Basically a dozen of eggs.",
+    "models": [
+      {
+        "model": "Baseline Qwen 4B8",
+        "output": "So today the priority is three items:\n1. I need to buy books.\n2. I need to buy apples.\n3. I need to buy eggs. Basically, a dozen of eggs",
+        "failures": [],
+        "changed_from_baseline": false
+      },
+      {
+        "model": "Qwen 2B4",
+        "output": "Today the priority is three items:\n1. I need to buy books.\n2. I need to buy apples.\n3. I need to buy eggs.\nBasically, a dozen of eggs",
+        "failures": [
+          "missing:dozen of eggs"
+        ],
+        "changed_from_baseline": true
+      },
+      {
+        "model": "Muesli 2B8",
+        "output": "Today the priority is three items. First is I need to buy books. Second is I need to buy apples. Third is I need to buy eggs. A dozen of eggs",
+        "failures": [
+          "missing:buy apples",
+          "missing:buy books",
+          "missing:buy eggs",
+          "missing:dozen of eggs",
+          "numbered_items:0!=expected:3"
+        ],
+        "changed_from_baseline": true
+      },
+      {
+        "model": "Vedu 0.8B",
+        "output": "So today the priority is three items:\n1. I need to buy books\n2. I need to buy apples\n3. I need to buy eggs. Basically a dozen of eggs",
+        "failures": [],
+        "changed_from_baseline": true
+      },
+      {
+        "model": "Muesli 0.8B8",
+        "output": "Today the priority is three items. First is I need to buy books. Second is I need to buy apples. Third is I need to buy eggs. A dozen of eggs",
+        "failures": [
+          "missing:buy apples",
+          "missing:buy books",
+          "missing:buy eggs",
+          "missing:dozen of eggs",
+          "numbered_items:0!=expected:3"
+        ],
+        "changed_from_baseline": true
+      },
+      {
+        "model": "Qwen 2B8",
+        "output": "Three items today:\n1. Buy books.\n2. Buy apples.\n3. Buy eggs. Basically, a dozen of eggs",
+        "failures": [],
+        "changed_from_baseline": true
+      }
+    ]
+  },
+  {
+    "case": "mismatched_ordinal_counted_list",
+    "input": "Okay, so I need to buy three items today. First is the books, second is three apples, and fourth is one dozen of eggs.",
+    "models": [
+      {
+        "model": "Baseline Qwen 4B8",
+        "output": "Okay, so I need to buy three items today. First is the books, second is three apples, and fourth is one dozen of eggs",
+        "failures": [
+          "missing:books",
+          "missing:one dozen of eggs",
+          "missing:three apples",
+          "numbered_items:0!=expected:3"
+        ],
+        "changed_from_baseline": false
+      },
+      {
+        "model": "Qwen 2B4",
+        "output": "Okay, so I need to buy three items today:\n1. The books.\n2. Three apples.\n3. One dozen of eggs",
+        "failures": [],
+        "changed_from_baseline": true
+      },
+      {
+        "model": "Muesli 2B8",
+        "output": "I need to buy three items today. First is the books, second is three apples, and fourth is one dozen of eggs",
+        "failures": [
+          "missing:books",
+          "missing:one dozen of eggs",
+          "missing:three apples",
+          "numbered_items:0!=expected:3"
+        ],
+        "changed_from_baseline": true
+      },
+      {
+        "model": "Vedu 0.8B",
+        "output": "I need to buy three items today:\n1. The books\n2. Three apples\n3. One dozen of eggs",
+        "failures": [],
+        "changed_from_baseline": true
+      },
+      {
+        "model": "Muesli 0.8B8",
+        "output": "I need to buy three items today. First is the books, second is three apples, and fourth is one dozen of eggs",
+        "failures": [
+          "missing:books",
+          "missing:one dozen of eggs",
+          "missing:three apples",
+          "numbered_items:0!=expected:3"
+        ],
+        "changed_from_baseline": true
+      },
+      {
+        "model": "Qwen 2B8",
+        "output": "Okay, so I need to buy three items today:\n1. Books\n2. Three apples\n3. One dozen of eggs",
+        "failures": [],
+        "changed_from_baseline": true
+      }
+    ]
+  },
+  {
+    "case": "hindi_counted_list",
+    "input": "मुझे आज तीन चीज़ें खरीदनी हैं। पहली किताबें, दूसरी तीन सेब, और चौथी एक दर्जन अंडे।",
+    "models": [
+      {
+        "model": "Baseline Qwen 4B8",
+        "output": "मुझे आज तीन चीज़ें खरीदनी हैं:\n1. किताबें\n2. तीन सेब\n3. एक दर्जन अंडे",
+        "failures": [],
+        "changed_from_baseline": false
+      },
+      {
+        "model": "Qwen 2B4",
+        "output": "मुझे आज तीन चीज़ें खरीदनी हैं। पहली किताबें, दूसरी तीन सेब, और चौथी एक दर्जन अंडे।",
+        "failures": [
+          "cleanup_not_applied",
+          "missing:एक दर्जन अंडे",
+          "missing:किताबें",
+          "missing:तीन सेब",
+          "numbered_items:0!=expected:3"
+        ],
+        "changed_from_baseline": true
+      },
+      {
+        "model": "Muesli 2B8",
+        "output": "मुझे आज तीन चीज़ें खरीदनी हैं। पहली किताबें, दूसरी तीन सेब, और चौथी एक दर्जन अंडे।",
+        "failures": [
+          "missing:एक दर्जन अंडे",
+          "missing:किताबें",
+          "missing:तीन सेब",
+          "numbered_items:0!=expected:3"
+        ],
+        "changed_from_baseline": true
+      },
+      {
+        "model": "Vedu 0.8B",
+        "output": "[format: notes] [tone: formal]\nमुझे आज तीन चीज़ें खरीदनी हैं। पहली किताबें, दूसरी तीन सेब, और चौथी एक दर्जन अंडे।",
+        "failures": [
+          "cleanup_not_applied",
+          "missing:एक दर्जन अंडे",
+          "missing:किताबें",
+          "missing:तीन सेब",
+          "missing_intro:तीन चीज़ें",
+          "numbered_items:0!=expected:3"
+        ],
+        "changed_from_baseline": true
+      },
+      {
+        "model": "Muesli 0.8B8",
+        "output": "मुझे आज तीन चीज़ें खरीदनी हैं। पहली किताबें, दूसरी तीन सेब, और चौथी एक दर्जन अंडे।",
+        "failures": [
+          "cleanup_not_applied",
+          "missing:एक दर्जन अंडे",
+          "missing:किताबें",
+          "missing:तीन सेब",
+          "numbered_items:0!=expected:3"
+        ],
+        "changed_from_baseline": true
+      },
+      {
+        "model": "Qwen 2B8",
+        "output": "मुझे आज तीन चीज़ें खरीदनी हैं। पहली किताबें, दूसरी तीन सेब, और चौथी एक दर्जन अंडे।",
+        "failures": [
+          "cleanup_not_applied",
+          "missing:एक दर्जन अंडे",
+          "missing:किताबें",
+          "missing:तीन सेब",
+          "numbered_items:0!=expected:3"
+        ],
+        "changed_from_baseline": true
+      }
+    ]
+  },
+  {
+    "case": "chinese_counted_list",
+    "input": "我今天需要买三样东西。第一是书，第二是三个苹果，第四是一打鸡蛋。",
+    "models": [
+      {
+        "model": "Baseline Qwen 4B8",
+        "output": "我今天需要买三样东西：\n1. 书。\n2. 三个苹果。\n3. 一打鸡蛋。",
+        "failures": [],
+        "changed_from_baseline": false
+      },
+      {
+        "model": "Qwen 2B4",
+        "output": "我今天需要买三样东西：\n1. 书\n2. 三个苹果\n3. 一打鸡蛋",
+        "failures": [
+          "missing_ending:。"
+        ],
+        "changed_from_baseline": true
+      },
+      {
+        "model": "Muesli 2B8",
+        "output": "我今天需要买三样东西。第一是书，第二是三个苹果，第四是一打鸡蛋。",
+        "failures": [
+          "missing:一打鸡蛋",
+          "missing:三个苹果",
+          "missing:书",
+          "numbered_items:0!=expected:3"
+        ],
+        "changed_from_baseline": true
+      },
+      {
+        "model": "Vedu 0.8B",
+        "output": "我今天需要买三样东西：\n1. 书\n2. 三个苹果\n3. 一打鸡蛋",
+        "failures": [
+          "missing_ending:。"
+        ],
+        "changed_from_baseline": true
+      },
+      {
+        "model": "Muesli 0.8B8",
+        "output": "我今天需要买三样东西。第一是书，第二是三个苹果，第四是一打鸡蛋。",
+        "failures": [
+          "cleanup_not_applied",
+          "missing:一打鸡蛋",
+          "missing:三个苹果",
+          "missing:书",
+          "numbered_items:0!=expected:3"
+        ],
+        "changed_from_baseline": true
+      },
+      {
+        "model": "Qwen 2B8",
+        "output": "我今天需要买三样东西。第一是书，第二是三个苹果，第四是一打鸡蛋。",
+        "failures": [
+          "cleanup_not_applied",
+          "missing:一打鸡蛋",
+          "missing:三个苹果",
+          "missing:书",
+          "numbered_items:0!=expected:3"
+        ],
+        "changed_from_baseline": true
+      }
+    ]
+  },
+  {
+    "case": "three_priorities_counterexample",
+    "input": "Just want to test out. So there are three priorities for today. First, I need to update Velora. Second, I need to post it on Hacker News. And the third important priority is posting the first comment on Hacker News.",
+    "models": [
+      {
+        "model": "Baseline Qwen 4B8",
+        "output": "Just want to test out. So there are three priorities for today:\n1. I need to update Velora.\n2. I need to post it on Hacker News.\n3. The third important priority is posting the first comment on Hacker News.",
+        "failures": [],
+        "changed_from_baseline": false
+      },
+      {
+        "model": "Qwen 2B4",
+        "output": "Just want to test out.\nSo there are three priorities for today:\n1. I need to update Velora.\n2. I need to post it on Hacker News.\n3. The third important priority is posting the first comment on Hacker News.",
+        "failures": [],
+        "changed_from_baseline": true
+      },
+      {
+        "model": "Muesli 2B8",
+        "output": "There are three priorities for today. First, I need to update Velora. Second, I need to post it on Hacker News. And the third important priority is posting the first comment on Hacker News.",
+        "failures": [
+          "missing:first comment on Hacker News",
+          "missing:post it on Hacker News",
+          "missing:update Velora",
+          "numbered_items:0!=expected:3"
+        ],
+        "changed_from_baseline": true
+      },
+      {
+        "model": "Vedu 0.8B",
+        "output": "Just want to test out. So there are three priorities for today:\n1. I need to update Velora\n2. I need to post it on Hacker News\n3. The third important priority is posting the first comment on Hacker News.",
+        "failures": [],
+        "changed_from_baseline": true
+      },
+      {
+        "model": "Muesli 0.8B8",
+        "output": "Just want to test out. There are three priorities for today. First, I need to update Velora. Second, I need to post it on Hacker News. And the third important priority is posting the first comment on Hacker News.",
+        "failures": [
+          "missing:first comment on Hacker News",
+          "missing:post it on Hacker News",
+          "missing:update Velora",
+          "numbered_items:0!=expected:3"
+        ],
+        "changed_from_baseline": true
+      },
+      {
+        "model": "Qwen 2B8",
+        "output": "Just want to test out.\nSo there are three priorities for today:\n1. I need to update Velora.\n2. I need to post it on Hacker News.\n3. The third important priority is posting the first comment on Hacker News.",
+        "failures": [],
+        "changed_from_baseline": true
+      }
+    ]
+  },
+  {
+    "case": "explicit_separate_count_lines",
+    "input": "Here are the counting and each of them is on a different line. 1, 2, 3, 4.",
+    "models": [
+      {
+        "model": "Baseline Qwen 4B8",
+        "output": "Here are the counting, each of them is on a different line:\n1\n2\n3\n4.",
+        "failures": [],
+        "changed_from_baseline": false
+      },
+      {
+        "model": "Qwen 2B4",
+        "output": "Here are the counting, each of them is on a different line:\n1\n2\n3\n4.",
+        "failures": [],
+        "changed_from_baseline": false
+      },
+      {
+        "model": "Muesli 2B8",
+        "output": "Here are the counting and each of them is on a different line. 1, 2, 3, 4.",
+        "failures": [
+          "missing_line:1",
+          "missing_line:2",
+          "missing_line:3",
+          "missing_line:4"
+        ],
+        "changed_from_baseline": true
+      },
+      {
+        "model": "Vedu 0.8B",
+        "output": "Here are the counting, and each of them is on a different line. 1, 2, 3, 4.",
+        "failures": [
+          "missing_line:1",
+          "missing_line:2",
+          "missing_line:3",
+          "missing_line:4"
+        ],
+        "changed_from_baseline": true
+      },
+      {
+        "model": "Muesli 0.8B8",
+        "output": "Here are the counting and each of them is on a different line. 1, 2, 3, 4.",
+        "failures": [
+          "missing_line:1",
+          "missing_line:2",
+          "missing_line:3",
+          "missing_line:4"
+        ],
+        "changed_from_baseline": true
+      },
+      {
+        "model": "Qwen 2B8",
+        "output": "Here are the values, each on a different line:\n1\n2\n3\n4.",
+        "failures": [],
+        "changed_from_baseline": true
+      }
+    ]
+  },
+  {
+    "case": "note_ordinal_priorities",
+    "input": "For the launch there are three priorities. First update Velora. Second post it on Hacker News. Third post the first comment.",
+    "models": [
+      {
+        "model": "Baseline Qwen 4B8",
+        "output": "For the launch, there are three priorities:\n1. Update Velora.\n2. Post it on Hacker News.\n3. Post the first comment.",
+        "failures": [],
+        "changed_from_baseline": false
+      },
+      {
+        "model": "Qwen 2B4",
+        "output": "For the launch:\n1. Update Velora.\n2. Post it on Hacker News.\n3. Post the first comment.",
+        "failures": [],
+        "changed_from_baseline": true
+      },
+      {
+        "model": "Muesli 2B8",
+        "output": "For the launch there are three priorities. First update Velora. Second post it on Hacker News. Third post the first comment.",
+        "failures": [
+          "missing:Hacker News",
+          "missing:first comment",
+          "missing:update Velora",
+          "numbered_items:0!=expected:3"
+        ],
+        "changed_from_baseline": true
+      },
+      {
+        "model": "Vedu 0.8B",
+        "output": "For the launch there are three priorities:\n1. Update Velora\n2. Post it on Hacker News\n3. Post the first comment.",
+        "failures": [],
+        "changed_from_baseline": true
+      },
+      {
+        "model": "Muesli 0.8B8",
+        "output": "For the launch there are three priorities. First update Velora. Second post it on Hacker News. Third post the first comment.",
+        "failures": [
+          "missing:Hacker News",
+          "missing:first comment",
+          "missing:update Velora",
+          "numbered_items:0!=expected:3"
+        ],
+        "changed_from_baseline": true
+      },
+      {
+        "model": "Qwen 2B8",
+        "output": "For the launch:\n1. Update Velora.\n2. Post it on Hacker News.\n3. Post the first comment.",
+        "failures": [],
+        "changed_from_baseline": true
+      }
+    ]
+  },
+  {
+    "case": "rambling_multi_problem_request",
+    "input": "Velora feels very slow compared with Wispr Flow and longer dictations take too much time to return the text and I also do not feel it is smart about issue reports because separate problems stay in one paragraph and the intended structure is lost",
+    "models": [
+      {
+        "model": "Baseline Qwen 4B8",
+        "output": "1. Velora feels very slow compared with Wispr Flow and longer dictations take too much time to return the text.\n2. I also do not feel it is smart about issue reports because separate problems stay in one paragraph and the intended structure is lost.",
+        "failures": [],
+        "changed_from_baseline": false
+      },
+      {
+        "model": "Qwen 2B4",
+        "output": "1. Velora feels very slow compared with Wispr Flow.\n2. Longer dictations take too much time to return the text.\n3. I also do not feel it is smart about issue reports because separate problems stay in one paragraph and the intended structure is lost.",
+        "failures": [
+          "numbered_items:3!=expected:2"
+        ],
+        "changed_from_baseline": true
+      },
+      {
+        "model": "Muesli 2B8",
+        "output": "Velora feels very slow compared with Wispr Flow and longer dictations take too much time to return the text and I also do not feel it is smart about issue reports because separate problems stay in one paragraph and the intended structure is lost.",
+        "failures": [
+          "missing:issue reports",
+          "missing:longer dictations",
+          "numbered_items:0!=expected:2"
+        ],
+        "changed_from_baseline": true
+      },
+      {
+        "model": "Vedu 0.8B",
+        "output": "Velora feels very slow compared with Wispr Flow and longer dictations take too much time to return the text, and I also do not feel it is smart about issue reports because separate problems stay in one paragraph and the intended structure is lost.",
+        "failures": [
+          "missing:issue reports",
+          "missing:longer dictations",
+          "numbered_items:0!=expected:2"
+        ],
+        "changed_from_baseline": true
+      },
+      {
+        "model": "Muesli 0.8B8",
+        "output": "Velora feels very slow compared with Wispr Flow and longer dictations take too much time to return the text and I also do not feel it is smart about issue reports because separate problems stay in one paragraph and the intended structure is lost.",
+        "failures": [
+          "missing:issue reports",
+          "missing:longer dictations",
+          "numbered_items:0!=expected:2"
+        ],
+        "changed_from_baseline": true
+      },
+      {
+        "model": "Qwen 2B8",
+        "output": "1. Velora feels very slow compared with Wispr Flow.\n2. Longer dictations take too much time to return the text.\n3. I also do not feel it is smart about issue reports because separate problems stay in one paragraph and the intended structure is lost.",
+        "failures": [
+          "numbered_items:3!=expected:2"
+        ],
+        "changed_from_baseline": true
+      }
+    ]
+  },
+  {
+    "case": "single_issue_stays_prose",
+    "input": "the only issue I found is that the settings window opens slowly after the first launch but everything else behaves correctly and should stay unchanged",
+    "models": [
+      {
+        "model": "Baseline Qwen 4B8",
+        "output": "The only issue I found is that the settings window opens slowly after the first launch, but everything else behaves correctly and should stay unchanged.",
+        "failures": [],
+        "changed_from_baseline": false
+      },
+      {
+        "model": "Qwen 2B4",
+        "output": "1. The settings window opens slowly after the first launch.",
+        "failures": [
+          "missing:everything else",
+          "missing:only issue",
+          "numbered_items:1!=expected:0",
+          "unexpected_list_items"
+        ],
+        "changed_from_baseline": true
+      },
+      {
+        "model": "Muesli 2B8",
+        "output": "the only issue I found is that the settings window opens slowly after the first launch but everything else behaves correctly and should stay unchanged.",
+        "failures": [],
+        "changed_from_baseline": true
+      },
+      {
+        "model": "Vedu 0.8B",
+        "output": "The only issue I found is that the settings window opens slowly after the first launch, but everything else behaves correctly and should stay unchanged.",
+        "failures": [],
+        "changed_from_baseline": false
+      },
+      {
+        "model": "Muesli 0.8B8",
+        "output": "the only issue I found is that the settings window opens slowly after the first launch but everything else behaves correctly and should stay unchanged.",
+        "failures": [],
+        "changed_from_baseline": true
+      },
+      {
+        "model": "Qwen 2B8",
+        "output": "1. The settings window opens slowly after the first launch.",
+        "failures": [
+          "missing:everything else",
+          "missing:only issue",
+          "numbered_items:1!=expected:0",
+          "unexpected_list_items"
+        ],
+        "changed_from_baseline": true
+      }
+    ]
+  },
+  {
+    "case": "temporal_narrative_stays_prose",
+    "input": "First I woke up early and made coffee. Second I walked to the station. Third I remembered that I had left my notebook at home, so I went back for it.",
+    "models": [
+      {
+        "model": "Baseline Qwen 4B8",
+        "output": "First, I woke up early and made coffee. Second, I walked to the station. Third, I remembered that I had left my notebook at home, so I went back for it.",
+        "failures": [],
+        "changed_from_baseline": false
+      },
+      {
+        "model": "Qwen 2B4",
+        "output": "First I woke up early and made coffee.\nSecond I walked to the station.\nThird I remembered that I had left my notebook at home, so I went back for it.",
+        "failures": [],
+        "changed_from_baseline": true
+      },
+      {
+        "model": "Muesli 2B8",
+        "output": "1. Woke up early and made coffee.\n2. Walked to the station.\n3. Remembered leaving the notebook at home, so went back for it.",
+        "failures": [
+          "numbered_items:3!=expected:0",
+          "unexpected_list_items"
+        ],
+        "changed_from_baseline": true
+      },
+      {
+        "model": "Vedu 0.8B",
+        "output": "1. I woke up early and made coffee\n2. I walked to the station\n3. I remembered that I had left my notebook at home, so I went back for it.",
+        "failures": [
+          "numbered_items:3!=expected:0",
+          "unexpected_list_items"
+        ],
+        "changed_from_baseline": true
+      },
+      {
+        "model": "Muesli 0.8B8",
+        "output": "1. I woke up early and made coffee.\n2. I walked to the station.\n3. I remembered that I had left my notebook at home, so I went back for it.",
+        "failures": [
+          "numbered_items:3!=expected:0",
+          "unexpected_list_items"
+        ],
+        "changed_from_baseline": true
+      },
+      {
+        "model": "Qwen 2B8",
+        "output": "First, I woke up early and made coffee.\nSecond, I walked to the station.\nThird, I remembered that I had left my notebook at home, so I went back for it.",
+        "failures": [],
+        "changed_from_baseline": true
+      }
+    ]
+  },
+  {
+    "case": "ordinal_nouns_stay_prose",
+    "input": "This is my first time visiting the office on the second floor, and the third room on the left is where the design team works.",
+    "models": [
+      {
+        "model": "Baseline Qwen 4B8",
+        "output": "This is my first time visiting the office on the second floor, and the third room on the left is where the design team works.",
+        "failures": [],
+        "changed_from_baseline": false
+      },
+      {
+        "model": "Qwen 2B4",
+        "output": "This is my first time visiting the office on the second floor, and the third room on the left is where the design team works.",
+        "failures": [
+          "cleanup_not_applied"
+        ],
+        "changed_from_baseline": false
+      },
+      {
+        "model": "Muesli 2B8",
+        "output": "This is my first time visiting the office on the second floor, and the third room on the left is where the design team works.",
+        "failures": [],
+        "changed_from_baseline": false
+      },
+      {
+        "model": "Vedu 0.8B",
+        "output": "This is my first time visiting the office on the second floor, and the third room on the left is where the design team works.",
+        "failures": [],
+        "changed_from_baseline": false
+      },
+      {
+        "model": "Muesli 0.8B8",
+        "output": "This is my first time visiting the office on the second floor, and the third room on the left is where the design team works.",
+        "failures": [],
+        "changed_from_baseline": false
+      },
+      {
+        "model": "Qwen 2B8",
+        "output": "1. This is my first time visiting the office on the second floor.\n2. The third room on the left is where the design team works.",
+        "failures": [
+          "numbered_items:2!=expected:0",
+          "unexpected_list_items"
+        ],
+        "changed_from_baseline": true
+      }
+    ]
+  },
+  {
+    "case": "counted_narrative_becomes_list",
+    "input": "Three things happened today. First I overslept. Second I missed the standup. Third my badge stopped working, so I had to wait for security.",
+    "models": [
+      {
+        "model": "Baseline Qwen 4B8",
+        "output": "Three things happened today:\n1. I overslept.\n2. I missed the standup.\n3. My badge stopped working, so I had to wait for security.",
+        "failures": [],
+        "changed_from_baseline": false
+      },
+      {
+        "model": "Qwen 2B4",
+        "output": "Three things happened today:\n1. I overslept.\n2. I missed the standup.\n3. My badge stopped working, so I had to wait for security.",
+        "failures": [],
+        "changed_from_baseline": false
+      },
+      {
+        "model": "Muesli 2B8",
+        "output": "Three things happened today. First I overslept. Second I missed the standup. Third my badge stopped working, so I had to wait for security.",
+        "failures": [
+          "missing:badge",
+          "missing:overslept",
+          "missing:standup",
+          "numbered_items:0!=expected:3"
+        ],
+        "changed_from_baseline": true
+      },
+      {
+        "model": "Vedu 0.8B",
+        "output": "Three things happened today:\n1. I overslept\n2. I missed the standup\n3. My badge stopped working, so I had to wait for security.",
+        "failures": [],
+        "changed_from_baseline": true
+      },
+      {
+        "model": "Muesli 0.8B8",
+        "output": "Three things happened today. First I overslept. Second I missed the standup. Third my badge stopped working, so I had to wait for security.",
+        "failures": [
+          "missing:badge",
+          "missing:overslept",
+          "missing:standup",
+          "numbered_items:0!=expected:3"
+        ],
+        "changed_from_baseline": true
+      },
+      {
+        "model": "Qwen 2B8",
+        "output": "Three things happened today:\n1. I overslept.\n2. I missed the standup.\n3. My badge stopped working, so I had to wait for security.",
+        "failures": [],
+        "changed_from_baseline": false
+      }
+    ]
+  },
+  {
+    "case": "ordinary_counting_stays_prose",
+    "input": "During practice he counted one two three four five and then jumped into the pool while everyone watched from the side.",
+    "models": [
+      {
+        "model": "Baseline Qwen 4B8",
+        "output": "During practice, he counted one, two, three, four, five, and then jumped into the pool while everyone watched from the side.",
+        "failures": [],
+        "changed_from_baseline": false
+      },
+      {
+        "model": "Qwen 2B4",
+        "output": "1. During practice, he counted one, two, three, four, and five, and then jumped into the pool while everyone watched from the side.",
+        "failures": [
+          "numbered_items:1!=expected:0",
+          "unexpected_list_items"
+        ],
+        "changed_from_baseline": true
+      },
+      {
+        "model": "Muesli 2B8",
+        "output": "During practice he counted one two three four five and then jumped into the pool while everyone watched from the side.",
+        "failures": [],
+        "changed_from_baseline": true
+      },
+      {
+        "model": "Vedu 0.8B",
+        "output": "During practice he counted one, two, three, four, five, and then jumped into the pool while everyone watched from the side.",
+        "failures": [],
+        "changed_from_baseline": true
+      },
+      {
+        "model": "Muesli 0.8B8",
+        "output": "During practice he counted one two three four five and then jumped into the pool while everyone watched from the side.",
+        "failures": [],
+        "changed_from_baseline": true
+      },
+      {
+        "model": "Qwen 2B8",
+        "output": "1. During practice he counted one, two, three, four, and five, and then jumped into the pool while everyone watched from the side.",
+        "failures": [
+          "numbered_items:1!=expected:0",
+          "unexpected_list_items"
+        ],
+        "changed_from_baseline": true
+      }
+    ]
+  },
+  {
+    "case": "new_topic_follows_implicit_list",
+    "input": "Today's shopping list has three items. First I need to buy books. Second I need to buy apples. Third I need to buy eggs. Anyway, I will head out at noon.",
+    "models": [
+      {
+        "model": "Baseline Qwen 4B8",
+        "output": "Today's shopping list has three items:\n1. Buy books.\n2. Buy apples.\n3. Buy eggs.\n\nAnyway, I will head out at noon.",
+        "failures": [],
+        "changed_from_baseline": false
+      },
+      {
+        "model": "Qwen 2B4",
+        "output": "Today's shopping list has three items:\n1. Buy books.\n2. Buy apples.\n3. Buy eggs.\nAnyway, I will head out at noon.",
+        "failures": [],
+        "changed_from_baseline": true
+      },
+      {
+        "model": "Muesli 2B8",
+        "output": "Today's shopping list has three items. First I need to buy books. Second I need to buy apples. Third I need to buy eggs. I will head out at noon.",
+        "failures": [
+          "missing:buy apples",
+          "missing:buy books",
+          "missing:buy eggs",
+          "numbered_items:0!=expected:3"
+        ],
+        "changed_from_baseline": true
+      },
+      {
+        "model": "Vedu 0.8B",
+        "output": "Today's shopping list has three items:\n1. I need to buy books\n2. I need to buy apples\n3. I need to buy eggs\n\nAnyway, I will head out at noon.",
+        "failures": [],
+        "changed_from_baseline": true
+      },
+      {
+        "model": "Muesli 0.8B8",
+        "output": "Today's shopping list has three items. First I need to buy books. Second I need to buy apples. Third I need to buy eggs. I will head out at noon.",
+        "failures": [
+          "missing:buy apples",
+          "missing:buy books",
+          "missing:buy eggs",
+          "numbered_items:0!=expected:3"
+        ],
+        "changed_from_baseline": true
+      },
+      {
+        "model": "Qwen 2B8",
+        "output": "Today's shopping list has three items:\n1. Buy books.\n2. Buy apples.\n3. Buy eggs.\nAnyway, I will head out at noon.",
+        "failures": [],
+        "changed_from_baseline": true
+      }
+    ]
+  }
+]

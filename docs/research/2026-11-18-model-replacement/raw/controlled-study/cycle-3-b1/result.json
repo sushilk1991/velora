@@ -1,0 +1,122 @@
+{
+  "model_id": "heyvedu/vedu-scribe-0.8b",
+  "prompt_style": "vedu",
+  "model_snapshot": "7dced5841c58d7d6e0118c4c123f222b35057871",
+  "command": [
+    "/Users/sushil/Code/Github/velora/engine/.venv/bin/python",
+    "/Users/sushil/Code/Github/velora-model-study-2026-11-18/engine/scripts/benchmark_model_replacement.py",
+    "--model-id",
+    "heyvedu/vedu-scribe-0.8b",
+    "--model-path",
+    "/Users/sushil/.cache/huggingface/hub/models--heyvedu--vedu-scribe-0.8b/snapshots/7dced5841c58d7d6e0118c4c123f222b35057871",
+    "--prompt-style",
+    "vedu",
+    "--output",
+    "docs/research/2026-11-18-model-replacement/raw/controlled-study/cycle-3-b1"
+  ],
+  "source_sha256": {
+    "benchmark_model_replacement.py": "65db195e2792ecc4afad880345805710dfbde25ac87178b900c10bfaeae3cb7c",
+    "benchmark_cleanup_quality.py": "c8f85d095872b1e841e27a785739965ef07c436390e88a22f2f4ce28f47f58d2",
+    "cleanup.py": "e35d522c34a4cfd29196c9353de8440c481f64045af5914f81706213e16cfe0a",
+    "formatting.py": "abadb2f08ea5720a4052edab5ed323a6b0192e1b82ed3a9bf0133ca6bd0ce8f1",
+    "cleanup_process.py": "a1a62e07a0393912357f6231ed3ca815960881b9c5864aadb667d6cb119a4224",
+    "cleanup_worker.py": "69c2ba54bf9544e4dd2cf32f6ffe5e68b7d503590c629cdaa51b1738d6b3e2da"
+  },
+  "copy_draft_requested": true,
+  "copy_draft_allowlist_override": false,
+  "cache_limit_mb_override": null,
+  "expected_cases": [
+    "declarative",
+    "grammar",
+    "question",
+    "terminal_prose",
+    "terminal_meta_edit_correction",
+    "names_and_numbers",
+    "custom_mode_prompt",
+    "romanize_hindi_custom_mode",
+    "romanize_hindi_note_mode",
+    "long_meaning",
+    "implicit_issue_list",
+    "implicit_feedback_list",
+    "natural_launch_plan",
+    "implicit_counted_todo_list",
+    "mismatched_ordinal_counted_list",
+    "hindi_counted_list",
+    "chinese_counted_list",
+    "three_priorities_counterexample",
+    "explicit_separate_count_lines",
+    "note_ordinal_priorities",
+    "rambling_multi_problem_request",
+    "single_issue_stays_prose",
+    "temporal_narrative_stays_prose",
+    "ordinal_nouns_stay_prose",
+    "counted_narrative_becomes_list",
+    "ordinary_counting_stays_prose",
+    "new_topic_follows_implicit_list"
+  ],
+  "started_ns": 1794943524597917000,
+  "ended_ns": 1794943541286255000,
+  "worker_pids": [
+    61526
+  ],
+  "repeats": 2,
+  "requests": 54,
+  "error": null,
+  "percentiles_wall_ms": {
+    "p50": 239.827979,
+    "p95": 304.83418115,
+    "p99": 389.85517100999994
+  },
+  "peak_rss_bytes": 1551646720,
+  "summary": {
+    "event": "summary",
+    "model": "heyvedu/vedu-scribe-0.8b",
+    "resolved_revision": "7dced5841c58d7d6e0118c4c123f222b35057871",
+    "weight_sha256": {
+      "model.safetensors": "9912660269b0a57dec85a368fa37b23ed7e76ca438b05b9b2238b4b887e7d2e6"
+    },
+    "cases": 27,
+    "failed_cases": [
+      "terminal_meta_edit_correction",
+      "romanize_hindi_custom_mode",
+      "romanize_hindi_note_mode",
+      "implicit_feedback_list",
+      "natural_launch_plan",
+      "hindi_counted_list",
+      "chinese_counted_list",
+      "explicit_separate_count_lines",
+      "rambling_multi_problem_request",
+      "temporal_narrative_stays_prose"
+    ],
+    "load_ms": 2993,
+    "p50_wall_ms": 232.5,
+    "p95_wall_ms": 302.6,
+    "p50_ttft_ms": 142.0,
+    "p95_ttft_ms": 169.7,
+    "mlx_after_load": {
+      "active_bytes": 563529930,
+      "peak_bytes": 592459588,
+      "cache_bytes": 15647024
+    },
+    "mlx_inference": {
+      "active_bytes": 586434762,
+      "peak_bytes": 783712402,
+      "cache_bytes": 45435242
+    },
+    "footprint_after_load": {
+      "current_bytes": 1425344456,
+      "peak_bytes": 1438812104
+    },
+    "footprint_after_inference": {
+      "current_bytes": 1485293512,
+      "peak_bytes": 1664665544
+    }
+  },
+  "contamination": [],
+  "host_monitor_errors": [],
+  "runtime": {
+    "mlx": "0.31.2",
+    "mlx-lm": "0.31.3",
+    "transformers": "5.3.0"
+  }
+}
