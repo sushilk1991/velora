@@ -808,6 +808,10 @@ class Engine:
         # Sessions whose stop-time cleanup warm-up is still running. A warm-up
         # can outlive its final, so the next start and shutdown settle these.
         self._warming_sessions: set[Session] = set()
+        # V-02 key-down prewarm: at most one in-flight task, rate-limited 1/s.
+        self._prewarm_task: asyncio.Task[None] | None = None
+        self._prewarm_cancel = threading.Event()
+        self._last_prewarm_at: float = 0.0
         # Mirror-image guard for START: `self.session` is published only after
         # the (possibly queued) start_session call returns, and a transcribe
         # chunk submitted in that window would destroy the fresh live stream
@@ -1837,6 +1841,12 @@ class Engine:
                 await asyncio.gather(*self._final_ack_tasks.values(), return_exceptions=True)
             # Stop warm-ups before their worker closes below; a wedged one
             # ends when that close kills the worker.
+            if self._prewarm_task is not None:
+                self._prewarm_cancel.set()
+                self._prewarm_task.cancel()
+                with contextlib.suppress(asyncio.CancelledError, Exception):
+                    await self._prewarm_task
+                self._prewarm_task = None
             warming = list(self._warming_sessions)
             for session in warming:
                 await self._settle_cleanup_warmup(session)
@@ -2207,6 +2217,8 @@ class Engine:
                 await self._cmd_ack_final(msg)
             elif cmd == "ping":
                 await self._send({"event": "pong", "ts": time.time()})
+            elif cmd == "warm":
+                await self._cmd_warm(msg)
             elif cmd == "status":
                 await self._cmd_status()
             elif cmd == "reload_config":
@@ -4091,6 +4103,80 @@ class Engine:
         # session where every chunk fell back deterministic must not report
         # itself as LLM-cleaned to the app/history (review finding).
         return text, gate.mode.name, tail_ms, applied_any, "streaming"
+
+    async def _cmd_warm(self, msg: dict[str, Any]) -> None:
+        """V-02: non-blocking key-down prewarm (capped at 1/s, zero decode).
+
+        Wakes a hibernated cleanup worker and warms the session-stable prompt
+        prefix while the user starts speaking. Accidental taps are bounded by
+        the 1 s rate limit and single in-flight task guard.
+        """
+        now = time.monotonic()
+        if (
+            self._prewarm_task is not None
+            and not self._prewarm_task.done()
+        ):
+            await self._send({"event": "warmed", "started": False, "reason": "in_flight"})
+            return
+        if self._last_prewarm_at > 0.0 and (now - self._last_prewarm_at) < 1.0:
+            await self._send({"event": "warmed", "started": False, "reason": "rate_limited"})
+            return
+        if (
+            self.session is not None
+            or self._starting
+            or self._finalizing
+            or self._adopting
+        ):
+            await self._send({"event": "warmed", "started": False, "reason": "busy"})
+            return
+        if not getattr(self.config, "cleanup_enabled", True):
+            await self._send({"event": "warmed", "started": False, "reason": "cleanup_disabled"})
+            return
+
+        cleanup = self.cleanup
+        if cleanup is None or getattr(cleanup, "unhealthy", False):
+            await self._send({"event": "warmed", "started": False, "reason": "unavailable"})
+            return
+
+        hibernated = bool(getattr(cleanup, "_hibernated", False)) and not cleanup.loaded
+        prepare = getattr(cleanup, "prepare_prefix", None)
+        if not hibernated and (not cleanup.loaded or not callable(prepare)):
+            await self._send({"event": "warmed", "started": False, "reason": "not_ready"})
+            return
+
+        ctx = msg.get("context") if isinstance(msg.get("context"), dict) else {}
+        candidates = formatting.build_prefill_prompt_candidates(
+            self.config,
+            bundle_id=ctx.get("bundle_id"),
+            app_name=ctx.get("app_name"),
+            explicit_mode=ctx.get("mode"),
+        )
+        if not hibernated and not candidates:
+            await self._send({"event": "warmed", "started": False, "reason": "no_prompt"})
+            return
+
+        self._last_prewarm_at = now
+        self._cancel_action_cleanup()
+        cancel = threading.Event()
+        self._prewarm_cancel = cancel
+
+        async def _run_prewarm() -> None:
+            try:
+                if hibernated:
+                    ensure = getattr(cleanup, "ensure_loaded", None)
+                    if callable(ensure):
+                        await ensure(cancel_event=cancel)
+                if cancel.is_set() or not cleanup.loaded:
+                    return
+                if candidates and callable(prepare):
+                    await prepare(candidates, cancel_event=cancel)
+            except asyncio.CancelledError:
+                raise
+            except Exception:  # noqa: BLE001 — prewarm is strictly best-effort
+                log.debug("key-down prewarm failed", exc_info=True)
+
+        self._prewarm_task = asyncio.create_task(_run_prewarm())
+        await self._send({"event": "warmed", "started": True, "reason": "ok"})
 
     def _start_cleanup_warmup(self, session: Session) -> None:
         """Warm the cleanup model's prompt prefix while STT finalizes.
