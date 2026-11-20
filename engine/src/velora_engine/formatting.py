@@ -18,6 +18,7 @@ import unicodedata
 from dataclasses import dataclass, field
 
 from .config import Config, Mode, normalize_site_slug
+from .phonetic_glossary import apply_phonetic_glossary
 from .prepasses import spoken_numbers_to_digits, undo_title_case
 from .prompts import CORE_SYSTEM_PREFIX, CompiledPrompt, compile_prompt
 from .snippets import expansion as snippet_expansion
@@ -793,6 +794,7 @@ class GateResult:
     auto_punctuation: bool = True
     examples: tuple[tuple[str, str], ...] = ()
     active_rules: tuple[str, ...] = ()
+    vocabulary: tuple[str, ...] = ()
 
 
 # --- voice @-tagging (Cursor/Windsurf file tags, Slack @-mentions) ----------
@@ -1072,13 +1074,15 @@ def run_gate(
                 task_prompt=SMART_TERMINAL_PROMPT,
                 transcript=prepared,
             )
+            vocab_terms = tuple(dict.fromkeys(config.global_vocabulary + mode.vocabulary))
             return GateResult(
                 mode, category, True, "smart_terminal",
                 prepared,
                 compiled.system_prompt, replacements, entities=entities or [],
                 auto_punctuation=config.auto_punctuation,
                 examples=compiled.examples,
-                active_rules=compiled.active_rules)
+                active_rules=compiled.active_rules,
+                vocabulary=vocab_terms)
         if mode.name.lower() == "terminal":
             # The command-shaped short-input contract is model-free and safe:
             # no vocabulary replacement, tag injection, or filler deletion may
@@ -1106,6 +1110,7 @@ def run_gate(
     # Non-Latin scripts use the same prompt-driven cleanup path. In particular,
     # unspaced CJK text must not look like a one-word short utterance and bypass
     # the model entirely.
+    vocab_terms = tuple(dict.fromkeys(config.global_vocabulary + mode.vocabulary))
     if len(text.split()) < SHORT_UTTERANCE_WORDS and not is_mostly_non_latin(text):
         out = normalize_spoken_punctuation(
             _prepare_prose(
@@ -1115,11 +1120,13 @@ def run_gate(
         )
         out = _punctuation_only(out, chat_style, config.auto_punctuation)
         out = apply_replacements(out, replacements)
+        out = apply_phonetic_glossary(out, vocab_terms)
         out = apply_tags(out, entities, category)
         return GateResult(
             mode, category, False, "short_utterance", out, None,
             replacements, entities=entities or [],
-            auto_punctuation=config.auto_punctuation)
+            auto_punctuation=config.auto_punctuation,
+            vocabulary=vocab_terms)
 
     # Structural spoken commands ('new line'/'new paragraph') are converted
     # deterministically even for the LLM path: the small model handles the
@@ -1142,7 +1149,8 @@ def run_gate(
         compiled.system_prompt, replacements, entities=entities or [],
         auto_punctuation=config.auto_punctuation,
         examples=compiled.examples,
-        active_rules=compiled.active_rules)
+        active_rules=compiled.active_rules,
+        vocabulary=vocab_terms)
 
 
 def build_prefill_prompt_candidates(
@@ -1246,6 +1254,8 @@ def postprocess(text: str, gate: GateResult) -> str:
     """Deterministic pass over LLM output and its punctuation contract."""
     out = strip_leaked_punct_commands(_tidy_whitespace(decode_breaks(text)))
     out = apply_replacements(out, gate.replacements)
+    if gate.vocabulary and not gate.romanize:
+        out = apply_phonetic_glossary(out, gate.vocabulary)
     out = apply_tags(out, gate.entities, gate.category)
     mode_name = gate.mode.name.lower()
     if mode_name == "code":
