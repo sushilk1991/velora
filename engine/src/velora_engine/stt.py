@@ -31,6 +31,7 @@ from typing import Any, Protocol
 import numpy as np
 
 from .media import quietest_cut
+from .vad import NeuralSilenceTracker, VadFactory
 
 log = logging.getLogger("velora.stt")
 
@@ -127,6 +128,7 @@ class SilenceTracker:
     def __init__(self) -> None:
         self._speech_ema = self._EMA_START
         self._trailing_silence_samples = 0
+        self._speaking = False
 
     def feed(self, chunk: np.ndarray) -> bool:
         """Track one chunk; returns True when the chunk carried speech."""
@@ -136,10 +138,16 @@ class SilenceTracker:
         threshold = max(self._MIN_THRESHOLD, 0.15 * self._speech_ema)
         if rms < threshold:
             self._trailing_silence_samples += len(chunk)
+            self._speaking = False
             return False
         self._trailing_silence_samples = 0
         self._speech_ema += self._EMA_ALPHA * (rms - self._speech_ema)
+        self._speaking = True
         return True
+
+    @property
+    def is_speaking(self) -> bool:
+        return self._speaking
 
     @property
     def trailing_silence_s(self) -> float:
@@ -150,6 +158,10 @@ class SilenceTracker:
         """The adapted per-session speech RMS (EMA over speechy chunks)."""
         return self._speech_ema
 
+    def trim_silence(self, audio: np.ndarray, **_kwargs: Any) -> np.ndarray:
+        """RMS-only fallback does not trim; neural VAD overrides this."""
+        return audio
+
     def consume_pause(self) -> None:
         """Zero the trailing-silence run (a segment consumed this pause) while
         KEEPING the adapted speech level — a full reset per segment would throw
@@ -159,6 +171,14 @@ class SilenceTracker:
     def reset(self) -> None:
         self._speech_ema = self._EMA_START
         self._trailing_silence_samples = 0
+        self._speaking = False
+
+
+def create_silence_tracker(
+    detector_factory: VadFactory | None = None,
+) -> NeuralSilenceTracker:
+    """Build a Silero-backed silence tracker that falls back to RMS when absent."""
+    return NeuralSilenceTracker(SilenceTracker(), detector_factory=detector_factory)
 
 
 def speech_window_fraction(
@@ -557,7 +577,7 @@ class ParakeetBackend:
         self._decoded_samples = 0  # offset of the first un-decoded sample
         self._segments: list[str] = []
         self._new_segments: list[str] = []
-        self._silence = SilenceTracker()
+        self._silence = create_silence_tracker()
         # Tracker-flagged speech since the last committed span. An empty
         # decode of a span with speech is not evidence that it was empty.
         self._span_speech_samples = 0
@@ -780,7 +800,10 @@ class ParakeetBackend:
             return ""
 
         try:
-            tail = self._transcribe(self._audio_span(self._decoded_samples, self._samples))
+            tail_audio = self._silence.trim_silence(
+                self._audio_span(self._decoded_samples, self._samples)
+            )
+            tail = self._transcribe(tail_audio)
         except Exception:  # noqa: BLE001 — the whole-clip decode below recovers
             log.exception("parakeet tail decode failed — decoding the whole clip")
             return self._decode_whole_clip()
@@ -800,7 +823,9 @@ class ParakeetBackend:
             # reports each decoded window before this can become one long call.
             self.needs_windowed_fallback = True
             return ""
-        return self._transcribe(self._audio_span(0, self._samples))
+        return self._transcribe(
+            self._silence.trim_silence(self._audio_span(0, self._samples))
+        )
 
     def _transcribe(self, audio: np.ndarray) -> str:
         """Decode one span; past _PARAKEET_WINDOW_S, in overlapping windows.
@@ -1328,7 +1353,7 @@ class WhisperBackend:
         self._decoded_samples = 0  # offset of the first un-decoded sample
         self._segments: list[str] = []
         self._new_segments: list[str] = []
-        self._silence = SilenceTracker()
+        self._silence = create_silence_tracker()
         self._speech_rms = np.empty(0, dtype=np.float64)
         self._speech_rms_chunks = 0
         self._speech_p90 = 0.0
@@ -1821,7 +1846,9 @@ class WhisperBackend:
                 self.needs_windowed_fallback = True
                 return ""
             try:
-                tail_audio = self._audio_span(self._decoded_samples, self._samples)
+                tail_audio = self._silence.trim_silence(
+                    self._audio_span(self._decoded_samples, self._samples)
+                )
                 # A tail without real speech evidence is the pause the user
                 # stopped on plus the stop-key transient — decoding it is
                 # where trailing hallucinations came from, and skipping it
@@ -1854,8 +1881,10 @@ class WhisperBackend:
             # to the server's bounded, progress-reporting window planner.
             self.needs_windowed_fallback = True
             return ""
-        audio = np.concatenate(self._chunks)
+        audio = self._silence.trim_silence(np.concatenate(self._chunks))
         try:
+            if len(audio) < MIN_FINAL_AUDIO_S * SAMPLE_RATE:
+                return ""
             text = self._strip_final_prompt_echo(
                 self._decode(
                     audio,
