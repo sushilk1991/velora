@@ -410,6 +410,15 @@ extension SettingsDocument {
     struct MachineLocalSettings: Equatable {
         var onboardingComplete: Bool
         var inputDeviceUid: String?
+        /// The microphone that actually delivered audio for the last take. Used
+        /// only as a fallback in the resolve ladder, so a broken or unplugged
+        /// choice does not strand the app on "first connected".
+        var inputDeviceLastUid: String?
+        /// Microphones the user picked explicitly, most recent first. Keeps two
+        /// devices in rotation (desk mic, headset) without re-picking each time.
+        var inputDeviceRecentUids: [String]
+        /// Microphones never to select automatically.
+        var excludedInputDeviceUids: [String]
         var localAgentAccess: Bool
         var meetingCalendar: Bool
         var launchAtLogin: Bool
@@ -428,6 +437,9 @@ extension SettingsDocument {
         static let defaults = MachineLocalSettings(
             onboardingComplete: false,
             inputDeviceUid: nil,
+            inputDeviceLastUid: nil,
+            inputDeviceRecentUids: [],
+            excludedInputDeviceUids: [],
             localAgentAccess: false,
             meetingCalendar: false,
             launchAtLogin: false,

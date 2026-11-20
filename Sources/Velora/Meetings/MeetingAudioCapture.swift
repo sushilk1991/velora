@@ -663,19 +663,14 @@ final class MeetingAudioCapture {
         }
     }
 
-    /// Mirrors MicrophoneStreamCapture's device choice (same policy, same
-    /// inputs) for the diagnostic log only.
+    /// The device meeting capture will open, for the diagnostic log only. It
+    /// runs the same ladder as MicrophoneStreamCapture, so the log cannot name
+    /// a device the capture did not use.
     private static func microphoneDeviceDescription(persistedUID: String?) -> String {
-        let devices = AVCaptureDevice.DiscoverySession(
-            deviceTypes: [.microphone], mediaType: .audio, position: .unspecified).devices
-        let uid = MicrophoneCaptureDevicePolicy.selectedUID(
-            persistedUID: persistedUID,
-            availableUIDs: devices.map(\.uniqueID),
-            defaultUID: AVCaptureDevice.default(for: .audio)?.uniqueID)
-        guard let device = devices.first(where: { $0.uniqueID == uid }) else {
-            return "device=unknown"
-        }
-        return "device=\"\(device.localizedName)\" uid=\(device.uniqueID)"
+        guard let chosen = MicrophoneStreamCapture.resolveCandidate(chosenUID: persistedUID)
+        else { return "device=unknown" }
+        return "device=\"\(chosen.device.localizedName)\" uid=\(chosen.device.uniqueID)"
+            + " resolved-by=\(chosen.resolution.step.rawValue)"
     }
 
     private static func describe(_ format: AVAudioFormat) -> String {

@@ -122,14 +122,14 @@ so explicitly rather than passing by omission.
 | Connect AirPods, wait for the route chime, dictate immediately | First take uses the AirPods mic; no silent take, no wrong-device take |
 | Dictate, then switch the system input to the built-in mic mid-take | The take finishes without a stuck HUD; audio after the switch is either captured or visibly reported, never silently missing |
 | USB interface: select it, dictate, unplug mid-take | Capture reports the disconnect; no crash, no wedge, clipboard fallback still delivers |
-| Close the lid with an external monitor and dictate | Velora switches off the built-in mic or says why it cannot; no take of digital silence presented as text |
+| Close the lid with an external monitor and dictate | If a second microphone is connected, Velora switches to it after ~1 s of digital silence and says so in the HUD (`dead-input rescue` in the app log); with no alternative it keeps the take and reports "Mic is silent" instead of inserting nothing |
 | Mute the microphone in System Settings, dictate | "Mic is silent" rather than an empty insert |
 
 ### C. Playback (4 min)
 
 | Do | Pass looks like |
 |---|---|
-| AirPods on, Music playing, dictate | Playback lowers or pauses per the setting; it resumes only if Velora paused it |
+| AirPods on, Music playing, dictate | Playback lowers or pauses per the setting; it resumes only if Velora paused it. The first take after connecting waits for the headset's two-way route and never records the built-in mic |
 | Spotify: same, plus a manual volume change during dictation | Resume respects the user's change |
 | Chrome playing a video: dictate | The video is not toggled; dictation still works |
 | Already-paused player: dictate | Nothing starts playing |

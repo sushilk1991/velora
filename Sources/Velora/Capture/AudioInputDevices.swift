@@ -20,6 +20,13 @@ enum AudioInputDevices {
         let uid: String
         let name: String
         let id: AudioDeviceID
+        /// True for the Mac's own microphone array. Used when rescuing a dead
+        /// input: a lid-closed built-in mic is the one that fails, so it must
+        /// never be the device we switch to.
+        var isBuiltIn: Bool = false
+        /// True for Bluetooth transports, where opening the microphone moves
+        /// the headset onto its low-bandwidth two-way route.
+        var isBluetooth: Bool = false
     }
 
     /// Snapshot of currently connected devices that can capture audio (at least
@@ -30,8 +37,25 @@ enum AudioInputDevices {
                   let name = stringProperty(id, selector: kAudioObjectPropertyName),
                   !isHiddenDevice(id, name: name)
             else { return nil }
-            return Device(uid: uid, name: name, id: id)
+            let transport = transportType(id)
+            return Device(
+                uid: uid, name: name, id: id,
+                isBuiltIn: AudioTransport.isBuiltIn(transport),
+                isBluetooth: AudioTransport.isBluetooth(transport))
         }
+    }
+
+    /// Core Audio transport, or 0 when the device reports none.
+    private static func transportType(_ id: AudioDeviceID) -> UInt32 {
+        var address = AudioObjectPropertyAddress(
+            mSelector: kAudioDevicePropertyTransportType,
+            mScope: kAudioObjectPropertyScopeGlobal,
+            mElement: kAudioObjectPropertyElementMain)
+        var value: UInt32 = 0
+        var size = UInt32(MemoryLayout<UInt32>.size)
+        guard AudioObjectGetPropertyData(id, &address, 0, nil, &size, &value) == noErr
+        else { return 0 }
+        return value
     }
 
     /// Clears a persisted mic choice that points at a device we now hide (a
@@ -115,6 +139,22 @@ enum AudioInputDevices {
         return flag.boolValue
     }
 
+    /// UID of the system's current default input device, or nil when the HAL
+    /// reports none. The resolve ladder asks this before falling back to a
+    /// remembered device.
+    static func systemDefaultUID() -> String? {
+        var id = AudioDeviceID(kAudioObjectUnknown)
+        var size = UInt32(MemoryLayout<AudioDeviceID>.size)
+        var address = AudioObjectPropertyAddress(
+            mSelector: kAudioHardwarePropertyDefaultInputDevice,
+            mScope: kAudioObjectPropertyScopeGlobal,
+            mElement: kAudioObjectPropertyElementMain)
+        guard AudioObjectGetPropertyData(
+            AudioObjectID(kAudioObjectSystemObject), &address, 0, nil, &size, &id
+        ) == noErr, id != kAudioObjectUnknown else { return nil }
+        return stringProperty(id, selector: kAudioDevicePropertyDeviceUID)
+    }
+
     /// `current()` in a stable order for menus and pickers.
     static func displayList() -> [Device] {
         current().sorted { $0.name.localizedCaseInsensitiveCompare($1.name) == .orderedAscending }
@@ -125,6 +165,32 @@ enum AudioInputDevices {
     /// notification never need to hop threads themselves.
     static func beginObserving() { _ = installListenerOnce }
 
+    /// Uptime of the most recent device-list change, or nil when none has been
+    /// seen since launch.
+    ///
+    /// This lives with the process-wide listener, not with a capture session:
+    /// the session observers are torn down between dictations, so a headset
+    /// connected while idle would not mark the route as recently moved and the
+    /// next start would skip its settle window.
+    static var lastDeviceListChangeUptime: TimeInterval? {
+        deviceListChangeLock.lock()
+        defer { deviceListChangeLock.unlock() }
+        return lastDeviceListChange
+    }
+
+    private static let deviceListChangeLock = NSLock()
+    private static var lastDeviceListChange: TimeInterval?
+
+    /// Records a device-list change. The listener calls this; selftest calls it
+    /// directly so the settle rule can be asserted without hardware.
+    static func recordDeviceListChange(
+        at uptime: TimeInterval = ProcessInfo.processInfo.systemUptime
+    ) {
+        deviceListChangeLock.lock()
+        lastDeviceListChange = uptime
+        deviceListChangeLock.unlock()
+    }
+
     private static let installListenerOnce: Void = {
         var address = AudioObjectPropertyAddress(
             mSelector: kAudioHardwarePropertyDevices,
@@ -133,6 +199,7 @@ enum AudioInputDevices {
         let status = AudioObjectAddPropertyListenerBlock(
             AudioObjectID(kAudioObjectSystemObject), &address, DispatchQueue.main
         ) { _, _ in
+            AudioInputDevices.recordDeviceListChange()
             NotificationCenter.default.post(name: .veloraAudioInputDevicesChanged, object: nil)
         }
         if status != noErr {
@@ -157,7 +224,7 @@ enum AudioInputDevices {
         return buffers.reduce(0) { $0 + Int($1.mNumberChannels) }
     }
 
-    private static func stringProperty(
+    static func stringProperty(
         _ id: AudioDeviceID, selector: AudioObjectPropertySelector
     ) -> String? {
         var address = AudioObjectPropertyAddress(

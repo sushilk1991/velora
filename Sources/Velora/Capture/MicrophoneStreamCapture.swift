@@ -2,27 +2,6 @@ import AVFoundation
 import CoreMedia
 import Foundation
 
-/// Resolves Velora's persisted microphone choice against AVFoundation's
-/// capture-device list. Unlike AVAudioEngine's input node, AVCaptureSession
-/// opens this device directly and does not couple it to the current output
-/// route (the failure seen when AirPods own output and the Mac mic is chosen).
-enum MicrophoneCaptureDevicePolicy {
-    static func selectedUID(
-        persistedUID: String?,
-        availableUIDs: [String],
-        defaultUID: String?
-    ) -> String? {
-        if let persistedUID, !persistedUID.isEmpty,
-           availableUIDs.contains(persistedUID) {
-            return persistedUID
-        }
-        if let defaultUID, availableUIDs.contains(defaultUID) {
-            return defaultUID
-        }
-        return availableUIDs.first
-    }
-}
-
 /// A direct, audio-only microphone source. Sample callbacks are serialized on
 /// a private queue and contain copied PCM whose lifetime extends through the
 /// callback. Failure callbacks are delivered once on the main queue.
@@ -61,6 +40,46 @@ final class MicrophoneStreamCapture: NSObject, AVCaptureAudioDataOutputSampleBuf
     private var stopping = false
     private var generation: UInt64 = 0
 
+    /// The device a running session was opened on. Readers that must reason
+    /// about *which* microphone is recording (the dead-input rescue) use it
+    /// instead of guessing from the settings.
+    private var resolvedDevice: MicrophoneDevice?
+    /// The running session's device, safe to read from any queue.
+    var currentDevice: MicrophoneDevice? {
+        stateLock.lock()
+        defer { stateLock.unlock() }
+        return resolvedDevice
+    }
+
+    static func describe(_ device: AVCaptureDevice) -> MicrophoneDevice {
+        MicrophoneDevice(
+            uid: device.uniqueID,
+            name: device.localizedName,
+            isBuiltIn: AudioTransport.isBuiltIn(device.transportType),
+            isBluetooth: AudioTransport.isBluetooth(device.transportType))
+    }
+
+    /// The resolve ladder over the devices AVFoundation can see right now.
+    /// `chosenUID` comes from the caller so the start path and the tests agree
+    /// on which choice is being resolved.
+    static func resolveCandidate(
+        chosenUID: String?, config: AppConfig = .shared
+    ) -> (device: AVCaptureDevice, resolution: MicrophoneResolution)? {
+        let devices = AVCaptureDevice.DiscoverySession(
+            deviceTypes: [.microphone], mediaType: .audio, position: .unspecified).devices
+        let ladder = MicrophoneSelection.Ladder(
+            chosenUID: chosenUID,
+            systemDefaultUID: AVCaptureDevice.default(for: .audio)?.uniqueID,
+            lastUsedUID: config.inputDeviceLastUID,
+            recentUIDs: config.recentInputDeviceUIDs,
+            excludedUIDs: config.excludedInputDeviceUIDs,
+            connectedUIDs: devices.map(\.uniqueID))
+        guard let resolution = MicrophoneSelection.resolve(ladder),
+              let device = devices.first(where: { $0.uniqueID == resolution.uid })
+        else { return nil }
+        return (device, resolution)
+    }
+
     func start(
         persistedUID: String?,
         onBuffer: @escaping (AVAudioPCMBuffer) -> Void,
@@ -79,17 +98,28 @@ final class MicrophoneStreamCapture: NSObject, AVCaptureAudioDataOutputSampleBuf
             guard self.generationMatches(requestedGeneration) else { return }
 
             do {
-                let discovery = AVCaptureDevice.DiscoverySession(
-                    deviceTypes: [.microphone], mediaType: .audio, position: .unspecified)
-                let devices = discovery.devices
-                let defaultDevice = AVCaptureDevice.default(for: .audio)
-                let uid = MicrophoneCaptureDevicePolicy.selectedUID(
-                    persistedUID: persistedUID,
-                    availableUIDs: devices.map(\.uniqueID),
-                    defaultUID: defaultDevice?.uniqueID)
-                guard let uid, let device = devices.first(where: { $0.uniqueID == uid }) else {
-                    throw CaptureError.noDevice
-                }
+                // Resolve through the ladder, then let a moving route settle
+                // before binding: a Bluetooth headset needs a few hundred
+                // milliseconds to reach its two-way route, and binding during
+                // the switch records the wrong device or digital silence.
+                let resolveCandidate = { Self.resolveCandidate(chosenUID: persistedUID) }
+                guard let initial = resolveCandidate() else { throw CaptureError.noDevice }
+                let plan = MicrophoneRouteSettle.plan(
+                    isBluetooth: Self.describe(initial.device).isBluetooth,
+                    // The process-wide listener, not a per-session one: a
+                    // headset connected while idle has to count too, and the
+                    // session observers do not exist between dictations.
+                    deviceListChangedAt: AudioInputDevices.lastDeviceListChangeUptime,
+                    now: ProcessInfo.processInfo.systemUptime)
+                guard let chosen = self.settleRoute(
+                    plan: plan, initial: initial,
+                    generation: requestedGeneration, resolve: resolveCandidate)
+                else { return }
+                let device = chosen.device
+                let uid = device.uniqueID
+                veloraLog(
+                    "Velora: mic resolved by \(chosen.resolution.step.label) → "
+                        + "\(device.localizedName)")
 
                 let input = try AVCaptureDeviceInput(device: device)
                 let output = AVCaptureAudioDataOutput()
@@ -135,8 +165,22 @@ final class MicrophoneStreamCapture: NSObject, AVCaptureAudioDataOutputSampleBuf
                     return
                 }
                 guard session.isRunning else { throw CaptureError.sessionDidNotStart }
+                let resolved = Self.describe(device)
+                self.stateLock.lock()
+                if self.generation == requestedGeneration {
+                    self.resolvedDevice = resolved
+                }
+                self.stateLock.unlock()
+                veloraLog("Velora: capturing from \(resolved.name) [\(resolved.uid)]")
                 DispatchQueue.main.async { [weak self] in
-                    guard self?.generationIsCurrent(requestedGeneration) == true else { return }
+                    guard let self,
+                          self.generationIsCurrent(requestedGeneration) else { return }
+                    // Only a start that actually delivered a session teaches the
+                    // ladder which device works, and only once the take is
+                    // confirmed: a failed or superseded start must not become
+                    // "last used". Written on the main queue because it is app
+                    // state; the capture queue has no business doing it.
+                    AppConfig.shared.inputDeviceLastUID = resolved.uid
                     completion(.success(()))
                 }
             } catch {
@@ -165,6 +209,7 @@ final class MicrophoneStreamCapture: NSObject, AVCaptureAudioDataOutputSampleBuf
             self.stateLock.lock()
             if self.generation == stoppedGeneration {
                 self.selectedUID = nil
+                self.resolvedDevice = nil
                 self.onBuffer = nil
                 self.onFailure = nil
             }
@@ -183,6 +228,130 @@ final class MicrophoneStreamCapture: NSObject, AVCaptureAudioDataOutputSampleBuf
         output = nil
     }
 
+    /// lifecycleQueue only. Holds the start until the resolved device stops
+    /// moving, so a Bluetooth route switch cannot be bound mid-flight. A plan
+    /// that does not wait returns `initial` without sleeping, so a stable wired
+    /// microphone pays no latency. Returns nil when a newer start or a stop
+    /// superseded this one.
+    private func settleRoute(
+        plan: MicrophoneRouteSettle.Plan,
+        initial: (device: AVCaptureDevice, resolution: MicrophoneResolution),
+        generation: UInt64,
+        resolve: () -> (device: AVCaptureDevice, resolution: MicrophoneResolution)?
+    ) -> (device: AVCaptureDevice, resolution: MicrophoneResolution)? {
+        guard plan.waits else { return initial }
+        var state = MicrophoneRouteSettleState(
+            plan: plan, firstUID: initial.device.uniqueID,
+            at: ProcessInfo.processInfo.systemUptime)
+        var current = initial
+        while true {
+            guard generationMatches(generation) else { return nil }
+            if case .bind(let uid) = state.observe(
+                current.device.uniqueID, at: ProcessInfo.processInfo.systemUptime) {
+                // Bind the device the state machine settled on, not the one seen
+                // before its verdict.
+                if uid != current.device.uniqueID, let next = resolve() {
+                    current = next
+                }
+                return current
+            }
+            Thread.sleep(forTimeInterval: plan.pollInterval)
+            if let next = resolve() { current = next }
+        }
+    }
+
+    /// Replaces the running input without ending the take.
+    ///
+    /// Buffers keep flowing to the same `onBuffer` callback, so the caller's
+    /// chunk stream and take identity are untouched: this is one take recorded
+    /// from two devices, used when a lid-closed built-in microphone is
+    /// delivering digital silence. The old session is detached first; two live
+    /// taps would splice two devices into the same 100 ms chunk grid.
+    func switchInput(
+        to uid: String,
+        completion: @escaping (Result<MicrophoneDevice, Error>) -> Void
+    ) {
+        stateLock.lock()
+        let swapGeneration = generation
+        let isLive = session != nil && !stopping
+        stateLock.unlock()
+        guard isLive else {
+            DispatchQueue.main.async { completion(.failure(CaptureError.noDevice)) }
+            return
+        }
+
+        lifecycleQueue.async { [weak self] in
+            guard let self else { return }
+            // A newer start, or a stop, may have replaced the session while
+            // this swap sat in the queue. Check before touching anything:
+            // detaching first would kill the new take's input, which is exactly
+            // the take the user is now speaking into.
+            guard self.swapIsCurrent(swapGeneration) else {
+                DispatchQueue.main.async {
+                    completion(.failure(CaptureError.sessionDidNotStart))
+                }
+                return
+            }
+            self.output?.setSampleBufferDelegate(nil, queue: nil)
+            self.session?.stopRunning()
+            self.sampleQueue.sync {}
+            self.removeObservers()
+            do {
+                let devices = AVCaptureDevice.DiscoverySession(
+                    deviceTypes: [.microphone], mediaType: .audio,
+                    position: .unspecified).devices
+                guard let device = devices.first(where: { $0.uniqueID == uid }) else {
+                    throw CaptureError.noDevice
+                }
+                let input = try AVCaptureDeviceInput(device: device)
+                let output = AVCaptureAudioDataOutput()
+                let session = AVCaptureSession()
+                session.beginConfiguration()
+                guard session.canAddInput(input) else {
+                    session.commitConfiguration()
+                    throw CaptureError.cannotAddInput
+                }
+                session.addInput(input)
+                guard session.canAddOutput(output) else {
+                    session.commitConfiguration()
+                    throw CaptureError.cannotAddOutput
+                }
+                session.addOutput(output)
+                output.setSampleBufferDelegate(self, queue: self.sampleQueue)
+                session.commitConfiguration()
+
+                self.stateLock.lock()
+                guard MicrophoneSwapPolicy.maySwap(
+                    requestedGeneration: swapGeneration,
+                    currentGeneration: self.generation,
+                    stopping: self.stopping) else {
+                    self.stateLock.unlock()
+                    output.setSampleBufferDelegate(nil, queue: nil)
+                    DispatchQueue.main.async {
+                        completion(.failure(CaptureError.sessionDidNotStart))
+                    }
+                    return
+                }
+                self.session = session
+                self.output = output
+                self.selectedUID = uid
+                self.failureReported = false
+                let resolved = Self.describe(device)
+                self.resolvedDevice = resolved
+                self.stateLock.unlock()
+                self.installObservers(for: session)
+                session.startRunning()
+                guard session.isRunning else { throw CaptureError.sessionDidNotStart }
+                DispatchQueue.main.async { completion(.success(resolved)) }
+            } catch {
+                // The old input is already detached, so say so: the take ends
+                // visibly through the failure path instead of recording silence.
+                self.reportFailure("Could not switch microphone: \(error.localizedDescription)")
+                DispatchQueue.main.async { completion(.failure(error)) }
+            }
+        }
+    }
+
     private func generationIsCurrent(_ value: UInt64) -> Bool {
         stateLock.lock(); defer { stateLock.unlock() }
         return generation == value && !stopping
@@ -191,6 +360,15 @@ final class MicrophoneStreamCapture: NSObject, AVCaptureAudioDataOutputSampleBuf
     private func generationMatches(_ value: UInt64) -> Bool {
         stateLock.lock(); defer { stateLock.unlock() }
         return generation == value
+    }
+
+    /// Whether a queued input swap still owns the session it was requested for.
+    private func swapIsCurrent(_ requestedGeneration: UInt64) -> Bool {
+        stateLock.lock(); defer { stateLock.unlock() }
+        return MicrophoneSwapPolicy.maySwap(
+            requestedGeneration: requestedGeneration,
+            currentGeneration: generation,
+            stopping: stopping)
     }
 
     private func finishStartFailure(
