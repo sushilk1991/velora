@@ -750,7 +750,7 @@ final class EngineSupervisor: NSObject, EngineClientDelegate {
                 updateLoading(phase: nil, fraction: nil)
             }
             if setupIsComplete { setupComplete = true }
-        case .pong:
+        case .pong, .warmed:
             break
         case .downloadStatus(let snapshot):
             if downloads.apply(snapshot) {

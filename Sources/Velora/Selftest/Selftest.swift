@@ -2607,6 +2607,17 @@ enum Selftest {
         supervisor.engineClient(supervisor.client, didReceive: .pong)
         expect(supervisor.state == .connecting && !supervisor.downloads.speechReady,
                "pong proves liveness, not loaded speech")
+        if case .warmed(let started, let reason) = EngineEvent.parse(["event": "warmed", "started": true, "reason": "ok"]) {
+            expect(started && reason == "ok", "warmed event parses cleanly")
+        } else {
+            expect(false, "warmed event parses cleanly")
+        }
+        supervisor.engineClient(supervisor.client, didReceive: .warmed(started: true, reason: "ok"))
+        expect(supervisor.state == .connecting, "warmed event does not alter supervisor state")
+        var prewarm = PrewarmThrottle()
+        expect(prewarm.shouldSend(at: 10.0), "first key-down prewarm is allowed")
+        expect(!prewarm.shouldSend(at: 10.4), "key-down prewarm within 1s is throttled")
+        expect(prewarm.shouldSend(at: 11.0), "key-down prewarm after 1s is allowed again")
         supervisor.engineClient(supervisor.client, didReceive: .setupComplete)
         expect(!supervisor.downloads.speechReady, "setup_complete is not speech adoption")
         let item = recoveryItem()

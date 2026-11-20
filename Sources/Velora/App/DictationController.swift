@@ -52,6 +52,21 @@ enum DictationOutputFailure {
     }
 }
 
+/// Rate-limits non-blocking key-down prewarm requests (V-02) to at most once
+/// per interval so accidental taps cannot spam the engine socket.
+struct PrewarmThrottle {
+    static let minimumInterval: TimeInterval = 1.0
+    private(set) var lastSentAt: TimeInterval?
+
+    mutating func shouldSend(at now: TimeInterval, interval: TimeInterval = minimumInterval) -> Bool {
+        if let lastSentAt, now - lastSentAt >= 0, now - lastSentAt < interval {
+            return false
+        }
+        lastSentAt = now
+        return true
+    }
+}
+
 /// Decides when an error makes every later engine final unsafe to consume.
 /// Normal user dictation keeps its short late-final grace period, but external
 /// requests and Voice Edit must fail closed: their final is either API output
@@ -415,6 +430,7 @@ final class DictationController: NSObject {
     /// One dead-input rescue per take: a second switch would drop audio the HUD
     /// is already showing as being recorded.
     private var deadInputRescueAttempted = false
+    private var prewarmThrottle = PrewarmThrottle()
     /// Owns both playback primitives (the pause coordinator and the volume
     /// ducker) and allows exactly one of them per take.
     private let playback: DictationPlayback
@@ -4267,6 +4283,20 @@ extension DictationController: HotkeyMonitorDelegate {
         // Velora's non-activating HUD is also observed as global mouse input.
     }
 
+    /// V-02: fire-and-forget prewarm on key-down (capped at 1/s) so a
+    /// hibernated writing model wakes and warms its prefix while the user speaks.
+    private func sendPrewarmIfNeeded() {
+        guard supervisor.state == .ready,
+              prewarmThrottle.shouldSend(at: ProcessInfo.processInfo.systemUptime)
+        else { return }
+        let frontmost = contextTracker.frontmost ?? NSWorkspace.shared.frontmostApplication
+        var context: [String: Any] = [:]
+        if let bundleID = frontmost?.bundleIdentifier { context["bundle_id"] = bundleID }
+        if let appName = frontmost?.localizedName { context["app_name"] = appName }
+        if let mode = config.defaultMode { context["mode"] = mode }
+        supervisor.send(["cmd": "warm", "context": context])
+    }
+
     func hotkeyDown() {
         guard sublimeApplyID == nil else {
             showNotice(symbol: "hourglass", message: "Finishing edit")
@@ -4283,6 +4313,7 @@ extension DictationController: HotkeyMonitorDelegate {
 
         switch (config.hotkeyMode, phase) {
         case (.toggle, .idle):
+            sendPrewarmIfNeeded()
             startRecording(locked: true)
         case (.toggle, .starting):
             cancel()
@@ -4295,6 +4326,7 @@ extension DictationController: HotkeyMonitorDelegate {
 
         case (.hold, .idle):
             hotkeyDownAt = Date()
+            sendPrewarmIfNeeded()
             startRecording(locked: false)
         case (.hold, .starting(locked: true)):
             cancel()

@@ -155,6 +155,9 @@ enum EngineEvent {
     /// Response to `status`.
     case status([String: Any])
 
+    /// Response to key-down `warm` (V-02).
+    case warmed(started: Bool, reason: String)
+
     /// Anything this client version doesn't know; ignored but logged.
     case unknown([String: Any])
 
@@ -443,6 +446,10 @@ enum EngineEvent {
                     ?? object["error"] as? String ?? "Engine error")
         case "pong":
             return .pong
+        case "warmed":
+            return .warmed(
+                started: object["started"] as? Bool ?? false,
+                reason: object["reason"] as? String ?? "")
         case "status":
             return .status(object)
         default:
