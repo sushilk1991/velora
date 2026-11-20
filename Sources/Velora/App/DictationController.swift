@@ -44,6 +44,12 @@ enum DictationOutputFailure {
         }
         return unreadable
     }
+
+    /// Which cue an empty or failed take earns. "Nothing was heard" is a
+    /// result, not a fault, so it must not sound like `error`.
+    static func cue(for message: String) -> SoundPlayer.Cue {
+        message == silentMic || message == noSpeech ? .noResult : .error
+    }
 }
 
 /// Decides when an error makes every later engine final unsafe to consume.
@@ -2656,7 +2662,10 @@ final class DictationController: NSObject {
             editStopGeneration = UserInputActivity.selectionSnapshot()
         }
         recordingDurationMs = elapsedRecordingMs
-        sounds.play(.stop)
+        // The release cue answers now. `stop` stays on the paths that act on
+        // an existing result (an applied edit, a finished meeting), so the two
+        // cues never fire for the same event.
+        sounds.play(.preStop)
         // Take completed spelling data exactly once; finalization never waits.
         var stopCmd: [String: Any] = ["cmd": "stop", "session": sessionID]
         let glossary = glossarySession.take()
@@ -2867,7 +2876,8 @@ final class DictationController: NSObject {
     }
 
     private func showError(
-        _ message: String, retryIntent explicitRetryIntent: ErrorRetryIntent? = nil
+        _ message: String, retryIntent explicitRetryIntent: ErrorRetryIntent? = nil,
+        cue: SoundPlayer.Cue = .error
     ) {
         // Context has no recovery/history lifetime after a recording failure.
         glossarySession.cancel()
@@ -2912,7 +2922,7 @@ final class DictationController: NSObject {
         errorRetryIntent = retryIntent
         hud.model.retryTitle = "Retry"
         NSLog("Velora: error HUD — %@", message)
-        sounds.play(.error)
+        sounds.play(cue)
         hud.transition(to: .error(message))
         phase = .idle
         failExternalRequest(
@@ -3016,7 +3026,7 @@ final class DictationController: NSObject {
                 : config.portableEngineSettings.maximumRecordingSeconds
             stopEnqueuedSession = session
             if isRecording {
-                sounds.play(.stop)
+                sounds.play(.preStop)
                 stopCaptureAndRestoreMedia()
             }
             hud.transition(to: .transcribing)
@@ -3376,7 +3386,7 @@ final class DictationController: NSObject {
                 }
                 externalRequest = nil
                 phase = .idle
-                showError(finalNotice(message))
+                showError(finalNotice(message), cue: DictationOutputFailure.cue(for: message))
                 request.completion(.failure(.unavailable(finalNotice(message))))
             } else {
                 recordHistory(
@@ -3452,7 +3462,7 @@ final class DictationController: NSObject {
                         cleanupWallMs: cleanupWallMs,
                         finalizationMs: finalizationMs, audio: audio)
                 }
-                showError(finalNotice(message))
+                showError(finalNotice(message), cue: DictationOutputFailure.cue(for: message))
             } else {
                 inserter.stageFinalOutput(text)
                 recordHistory(
@@ -3480,7 +3490,7 @@ final class DictationController: NSObject {
                     cleanupWallMs: cleanupWallMs,
                     finalizationMs: finalizationMs, audio: audio)
             }
-            showError(finalNotice(message))
+            showError(finalNotice(message), cue: DictationOutputFailure.cue(for: message))
             return
         }
 

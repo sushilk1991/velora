@@ -17389,6 +17389,16 @@ private final class RecordingOutputVolume: OutputVolumeControlling {
         expect(
             DictationOutputFailure.message(for: "Recognized text.", level: deadChannel) == nil,
             "recognized output never produces an error, whatever the level")
+
+        // "Nothing was heard" is a result, not a fault, so it must not sound
+        // like a failure. An unreadable final still does.
+        expect(
+            DictationOutputFailure.cue(for: DictationOutputFailure.silentMic) == .noResult
+                && DictationOutputFailure.cue(for: DictationOutputFailure.noSpeech) == .noResult,
+            "a take with no speech gets the no-result cue, not the error cue")
+        expect(
+            DictationOutputFailure.cue(for: DictationOutputFailure.unreadable) == .error,
+            "an unreadable final keeps the error cue")
     }
 
     /// The level of a finished take, measured on the mono stream the engine
@@ -18460,12 +18470,27 @@ static func testMeetingIntelligence() {
                && SoundSet.soft.assetName(for: "stop") == "soft-stop"
                && SoundSet.chime.assetName(for: "error") == "chime-error",
                "sound sets resolve distinct assets while preserving Classic names")
+        // Raw values are asset names, and every set restates every cue. A new
+        // cue without its .caf in all three sets fails here, not at runtime as
+        // a "missing sound asset" log line during a dictation.
+        expect(SoundPlayer.Cue.allCases.map(\.rawValue)
+               == ["start", "stop", "error", "prestop", "noresult"],
+               "cue raw values are the bundled asset names")
+        expect(SoundSet.classic.assetName(for: SoundPlayer.Cue.preStop.rawValue) == "prestop"
+               && SoundSet.soft.assetName(for: SoundPlayer.Cue.noResult.rawValue) == "soft-noresult"
+               && SoundSet.chime.assetName(for: SoundPlayer.Cue.noResult.rawValue) == "chime-noresult",
+               "new cues follow the same per-set asset naming")
         for soundSet in SoundSet.allCases {
-            for cue in ["start", "stop", "error"] {
-                expect(ResourceLocator.resource(named: soundSet.assetName(for: cue), extension: "caf") != nil,
-                       "every sound set has each local cue: \(soundSet.rawValue) \(cue)")
+            for cue in SoundPlayer.Cue.allCases {
+                expect(ResourceLocator.resource(
+                           named: soundSet.assetName(for: cue.rawValue), extension: "caf") != nil,
+                       "every sound set has each local cue: \(soundSet.rawValue) \(cue.rawValue)")
             }
         }
+        // The harness's silent player accepts every cue without resolving
+        // preferences or opening an audio device.
+        let silentPlayer = SoundPlayer(cues: [])
+        for cue in SoundPlayer.Cue.allCases { silentPlayer.play(cue) }
         do {
             let decoder = JSONDecoder()
             decoder.keyDecodingStrategy = .convertFromSnakeCase

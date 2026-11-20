@@ -93,6 +93,66 @@ or updates change:
 | Signed release DMG | Signature, notarization, staple, Gatekeeper, bundle identity, stripped harness-free executable, and packaged engine/CLI/MCP runtime checks all pass |
 | Software update window | Full release-note structure is readable; closing a manual changelog changes nothing; closing an automatic prompt defers only that version; one Install click downloads, verifies, replaces a disposable app copy, and relaunches that copy; a local-feed E2E leaves the real Skip/Later/check preferences unchanged |
 
+## Release-candidate acceptance run (25 minutes)
+
+Every release candidate runs this matrix once, in order, on the Mac that
+ships. It is a fixed script, not a change-triggered gate: the table above is
+run when the affected area changes, this one is run every time because the
+audio, meeting and insertion paths cannot be checked in CI. Record it in the
+release PR and copy the one-line result into `docs/releases/vX.Y.Z.md`.
+
+Record: version, macOS build, Mac model, headset model, date, and pass/fail
+per phase. A failure is a release blocker; a step that could not be run says
+so explicitly rather than passing by omission.
+
+### A. Cues (3 min)
+
+| Do | Pass looks like |
+|---|---|
+| Hold the dictation key, speak, release | A short tick at the instant of release; nothing plays twice |
+| Hold, stay silent, release | The low two-note "nothing heard" cue and the "Didn't hear any speech" HUD; no error tone |
+| Unplug the mic, hold, release | "Mic is silent" copy with the same two-note cue, not the error tone |
+| Settings › Sound: preview each cue, then each sound set | Every cue plays in Classic, Soft and Chime; previews never open the mic |
+
+### B. Microphones (8 min)
+
+| Do | Pass looks like |
+|---|---|
+| Built-in mic: three dictations in three apps | Text lands in each; HUD shows the built-in device |
+| Connect AirPods, wait for the route chime, dictate immediately | First take uses the AirPods mic; no silent take, no wrong-device take |
+| Dictate, then switch the system input to the built-in mic mid-take | The take finishes without a stuck HUD; audio after the switch is either captured or visibly reported, never silently missing |
+| USB interface: select it, dictate, unplug mid-take | Capture reports the disconnect; no crash, no wedge, clipboard fallback still delivers |
+| Close the lid with an external monitor and dictate | Velora switches off the built-in mic or says why it cannot; no take of digital silence presented as text |
+| Mute the microphone in System Settings, dictate | "Mic is silent" rather than an empty insert |
+
+### C. Playback (4 min)
+
+| Do | Pass looks like |
+|---|---|
+| AirPods on, Music playing, dictate | Playback lowers or pauses per the setting; it resumes only if Velora paused it |
+| Spotify: same, plus a manual volume change during dictation | Resume respects the user's change |
+| Chrome playing a video: dictate | The video is not toggled; dictation still works |
+| Already-paused player: dictate | Nothing starts playing |
+
+### D. Meetings (6 min)
+
+| Do | Pass looks like |
+|---|---|
+| Zoom: start a call, accept the recording prompt, speak, end the call | Suggestion appears once; both tracks are written; the transcript separates Me and Them; end is detected after the call ends |
+| Google Meet in a browser tab: same | Detected as a browser call, not as a native app; the tab's mic attribution survives a tab switch |
+| Teams: start and stop without speaking | No empty meeting is created, or an empty one is clearly marked |
+| Mute and unmute during a meeting | Mute does not end the recording; a device switch does not either |
+| Deny the system-audio permission | Mic-only capture continues, and the UI says computer audio is missing |
+
+### E. Resilience and insertion (4 min)
+
+| Do | Pass looks like |
+|---|---|
+| Quit and relaunch the engine (`pkill -f velora-engine`) mid-take | The take is preserved or clearly failed; the next take works; no stuck HUD |
+| Quit Velora mid-take | Capture stops, media is restored, and the take is recoverable or absent — never half-inserted |
+| Insert into five app classes: TextEdit (NSTextView), Terminal (non-AX), Chrome textarea, Slack (Electron), VS Code (Electron) | Text lands once in each; where insertion cannot be confirmed the result is on the clipboard and the HUD says so |
+| Insert with `paste and restore` while the clipboard holds an image | Text lands once; the image is restored afterwards |
+
 ## Stop-to-delivery timing
 
 After a real dictation, run `rg 'stop-path' ~/.velora/velora-app.log`.

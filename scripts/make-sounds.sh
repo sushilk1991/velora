@@ -6,6 +6,16 @@
 #               each 70 ms, 8 ms attack / 60 ms exponential decay, peak −18 dBFS.
 #   stop.caf  — the reverse (880→660 Hz), −20 dBFS (quieter than start).
 #   error.caf — single 330 Hz tone, 120 ms, −18 dBFS.
+#   prestop.caf  — one very short 520 Hz tick, 45 ms, −24 dBFS. Fires the
+#                  instant the key is released, before any transcript exists,
+#                  so the ear gets an answer at 0 ms. Deliberately quieter and
+#                  shorter than stop: "caught it", not "done".
+#   noresult.caf — two low 240 Hz blips with a 40 ms gap, −22 dBFS. A take
+#                  with nothing above the speech floor is not an error, so this
+#                  is lower and rounder than error's single 330 Hz tone.
+#
+# Soft and Chime restate every cue at their own pitch and timbre; a new cue
+# must be added to all three sets or `Velora --selftest` fails.
 #
 # Uses python3 (ships with CommandLineTools) to write PCM WAVs, then
 # afconvert (macOS builtin) to package them as AAC-in-CAF, with a lossless
@@ -53,15 +63,28 @@ def write_wav(name, samples):
         )
         w.writeframes(frames)
 
+def silence(dur):
+    return [0.0] * int(dur * SR)
+
 write_wav("start", tone(660, 0.070, -18) + tone(880, 0.070, -18))
 write_wav("stop",  tone(880, 0.070, -20) + tone(660, 0.070, -20))
 write_wav("error", tone(330, 0.120, -18))
+# PreStop answers the release, so it must read as an acknowledgement rather
+# than a completion: one short, quiet tick.
+write_wav("prestop", tone(520, 0.045, -24, .003, .008))
+# No-result is "nothing was heard", not "something went wrong": two low,
+# round blips instead of error's single brighter tone.
+write_wav("noresult", tone(240, 0.055, -22, .004, .020) + silence(0.040)
+                    + tone(240, 0.055, -22, .004, .020))
 
 # Each set uses the same peaks as Classic. Soft has a rounder attack and
 # lower notes; Chime adds quiet upper partials. No microphone is involved.
 write_wav("soft-start", tone(440, .09, -18, .018, .030) + tone(554.365, .09, -18, .018, .030))
 write_wav("soft-stop", tone(554.365, .09, -20, .018, .030) + tone(440, .09, -20, .018, .030))
 write_wav("soft-error", tone(261.626, .16, -18, .018, .035))
+write_wav("soft-prestop", tone(392, .055, -22, .014, .018))
+write_wav("soft-noresult", tone(196, .065, -22, .016, .028) + silence(0.050)
+                         + tone(196, .065, -22, .016, .028))
 
 def bell(freq, dur, db):
     fundamental = tone(freq, dur, db, .005, .055)
@@ -74,11 +97,16 @@ def bell(freq, dur, db):
 write_wav("chime-start", bell(783.991, .11, -18) + bell(1046.502, .14, -18))
 write_wav("chime-stop", bell(1046.502, .11, -20) + bell(783.991, .14, -20))
 write_wav("chime-error", bell(391.995, .20, -18))
+write_wav("chime-prestop", bell(659.255, .08, -24))
+write_wav("chime-noresult", bell(246.942, .12, -22) + silence(0.040)
+                           + bell(196.000, .14, -22))
 print("synthesized Classic, Soft and Chime wavs")
 PY
 
 mkdir -p "$OUT_DIR"
-for name in start stop error soft-start soft-stop soft-error chime-start chime-stop chime-error; do
+for name in start stop error prestop noresult \
+            soft-start soft-stop soft-error soft-prestop soft-noresult \
+            chime-start chime-stop chime-error chime-prestop chime-noresult; do
   if [[ "$VARIANTS_ONLY" == "--variants-only" && "$name" != *-* ]]; then continue; fi
   # New variants are deterministic lossless PCM, with no encoder dependency.
   if [[ "$name" == *-* ]]; then
