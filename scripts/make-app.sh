@@ -14,7 +14,9 @@
 # - Development bundles may carry VeloraEngineDir as a checkout fallback.
 #   Distribution bundles never expose a builder-local path and use only their
 #   bundled engine (or an explicit VELORA_ENGINE_DIR runtime override).
-# - UI sounds (start/stop/error.caf) generated if missing and copied in
+# - UI sounds (every cue in every set: start/stop/error/prestop/noresult,
+#   Classic plus soft-* and chime-*) generated if missing, copied in, and
+#   verified present in the bundle
 # - The bundled executable is stripped; its symbols stay in build/Velora.app.dSYM
 #   for symbolicating crash reports. Distribution builds also compile out the
 #   self-test harness (Sources/Velora/Selftest).
@@ -155,7 +157,23 @@ if [[ "$MCP_METADATA" != *'"version":"'"$VERSION"'"'* ]]; then
 fi
 
 # Ensure sounds exist (checked-in normally; regenerate when absent).
-if [[ ! -f Resources/start.caf || ! -f Resources/stop.caf || ! -f Resources/error.caf ]]; then
+#
+# SOUND_CUES mirrors `SoundPlayer.Cue.allCases` and SOUND_SETS mirrors
+# `SoundSet.allCases`; `--selftest` asserts the same pairing on the asset
+# names. A cue added to one list and not the others fails this build, which
+# is how a missing classic cue used to reach the bundle unnoticed.
+SOUND_CUES=(start stop error prestop noresult)
+SOUND_SETS=(soft chime)
+SOUND_ASSETS=()
+for cue in $SOUND_CUES; do
+  SOUND_ASSETS+=("Resources/$cue.caf")
+  for set in $SOUND_SETS; do SOUND_ASSETS+=("Resources/$set-$cue.caf"); done
+done
+missing_sound=0
+for asset in $SOUND_ASSETS; do
+  [[ -f "$asset" ]] || missing_sound=1
+done
+if (( missing_sound )); then
   ./scripts/make-sounds.sh
 fi
 
@@ -164,8 +182,16 @@ mkdir -p "$APP/Contents/MacOS" "$APP/Contents/Resources"
 
 cp "$SHIPPED_BIN" "$APP/Contents/MacOS/Velora"
 cp Resources/Info.plist "$APP/Contents/Info.plist"
-cp Resources/start.caf Resources/stop.caf Resources/error.caf "$APP/Contents/Resources/"
-cp Resources/soft-*.caf Resources/chime-*.caf "$APP/Contents/Resources/"
+# Every cue in every set, then a hard check that each expected file landed:
+# a cue that is missing here plays as silence at runtime, which no test on
+# the checkout can see.
+cp Resources/*.caf "$APP/Contents/Resources/"
+for asset in $SOUND_ASSETS; do
+  [[ -f "$APP/Contents/Resources/${asset:t}" ]] || {
+    echo "ERROR: ${asset:t} missing from $APP/Contents/Resources" >&2
+    exit 1
+  }
+done
 cp -R Resources/en.lproj Resources/es.lproj "$APP/Contents/Resources/"
 python3 scripts/app-intents-metadata.py
 cp -R Resources/Metadata.appintents "$APP/Contents/Resources/"
