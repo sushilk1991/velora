@@ -44,11 +44,6 @@ final class MicrophoneStreamCapture: NSObject, AVCaptureAudioDataOutputSampleBuf
     /// about *which* microphone is recording (the dead-input rescue) use it
     /// instead of guessing from the settings.
     private var resolvedDevice: MicrophoneDevice?
-    /// Uptime of the last device-list change. A change seconds ago means the
-    /// route may still be moving: a Bluetooth headset that just appeared, or
-    /// one that is about to disappear.
-    private var lastDeviceListChange: TimeInterval?
-
     /// The running session's device, safe to read from any queue.
     var currentDevice: MicrophoneDevice? {
         stateLock.lock()
@@ -111,7 +106,10 @@ final class MicrophoneStreamCapture: NSObject, AVCaptureAudioDataOutputSampleBuf
                 guard let initial = resolveCandidate() else { throw CaptureError.noDevice }
                 let plan = MicrophoneRouteSettle.plan(
                     isBluetooth: Self.describe(initial.device).isBluetooth,
-                    deviceListChangedAt: self.deviceListChangeUptime(),
+                    // The process-wide listener, not a per-session one: a
+                    // headset connected while idle has to count too, and the
+                    // session observers do not exist between dictations.
+                    deviceListChangedAt: AudioInputDevices.lastDeviceListChangeUptime,
                     now: ProcessInfo.processInfo.systemUptime)
                 guard let chosen = self.settleRoute(
                     plan: plan, initial: initial,
@@ -173,13 +171,16 @@ final class MicrophoneStreamCapture: NSObject, AVCaptureAudioDataOutputSampleBuf
                     self.resolvedDevice = resolved
                 }
                 self.stateLock.unlock()
-                // Only a start that actually delivered a session teaches the
-                // ladder which device works. A failed start must not become
-                // "last used".
-                AppConfig.shared.inputDeviceLastUID = resolved.uid
                 veloraLog("Velora: capturing from \(resolved.name) [\(resolved.uid)]")
                 DispatchQueue.main.async { [weak self] in
-                    guard self?.generationIsCurrent(requestedGeneration) == true else { return }
+                    guard let self,
+                          self.generationIsCurrent(requestedGeneration) else { return }
+                    // Only a start that actually delivered a session teaches the
+                    // ladder which device works, and only once the take is
+                    // confirmed: a failed or superseded start must not become
+                    // "last used". Written on the main queue because it is app
+                    // state; the capture queue has no business doing it.
+                    AppConfig.shared.inputDeviceLastUID = resolved.uid
                     completion(.success(()))
                 }
             } catch {
@@ -225,13 +226,6 @@ final class MicrophoneStreamCapture: NSObject, AVCaptureAudioDataOutputSampleBuf
         removeObservers()
         session = nil
         output = nil
-    }
-
-    /// Uptime of the last device-list change, or nil when none has arrived.
-    private func deviceListChangeUptime() -> TimeInterval? {
-        stateLock.lock()
-        defer { stateLock.unlock() }
-        return lastDeviceListChange
     }
 
     /// lifecycleQueue only. Holds the start until the resolved device stops
@@ -288,6 +282,16 @@ final class MicrophoneStreamCapture: NSObject, AVCaptureAudioDataOutputSampleBuf
 
         lifecycleQueue.async { [weak self] in
             guard let self else { return }
+            // A newer start, or a stop, may have replaced the session while
+            // this swap sat in the queue. Check before touching anything:
+            // detaching first would kill the new take's input, which is exactly
+            // the take the user is now speaking into.
+            guard self.swapIsCurrent(swapGeneration) else {
+                DispatchQueue.main.async {
+                    completion(.failure(CaptureError.sessionDidNotStart))
+                }
+                return
+            }
             self.output?.setSampleBufferDelegate(nil, queue: nil)
             self.session?.stopRunning()
             self.sampleQueue.sync {}
@@ -317,7 +321,10 @@ final class MicrophoneStreamCapture: NSObject, AVCaptureAudioDataOutputSampleBuf
                 session.commitConfiguration()
 
                 self.stateLock.lock()
-                guard self.generation == swapGeneration, !self.stopping else {
+                guard MicrophoneSwapPolicy.maySwap(
+                    requestedGeneration: swapGeneration,
+                    currentGeneration: self.generation,
+                    stopping: self.stopping) else {
                     self.stateLock.unlock()
                     output.setSampleBufferDelegate(nil, queue: nil)
                     DispatchQueue.main.async {
@@ -353,6 +360,15 @@ final class MicrophoneStreamCapture: NSObject, AVCaptureAudioDataOutputSampleBuf
     private func generationMatches(_ value: UInt64) -> Bool {
         stateLock.lock(); defer { stateLock.unlock() }
         return generation == value
+    }
+
+    /// Whether a queued input swap still owns the session it was requested for.
+    private func swapIsCurrent(_ requestedGeneration: UInt64) -> Bool {
+        stateLock.lock(); defer { stateLock.unlock() }
+        return MicrophoneSwapPolicy.maySwap(
+            requestedGeneration: requestedGeneration,
+            currentGeneration: generation,
+            stopping: stopping)
     }
 
     private func finishStartFailure(
@@ -428,9 +444,6 @@ final class MicrophoneStreamCapture: NSObject, AVCaptureAudioDataOutputSampleBuf
             self.stateLock.lock()
             let selected = self.selectedUID
             let stopping = self.stopping
-            // Stamp the change: a start in the next couple of seconds is a
-            // route that may still be moving.
-            self.lastDeviceListChange = ProcessInfo.processInfo.systemUptime
             self.stateLock.unlock()
             guard !stopping, let selected,
                   !AVCaptureDevice.DiscoverySession(

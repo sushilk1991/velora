@@ -240,6 +240,7 @@ enum Selftest {
         testMicrophoneResolveLadder()
         testMicrophoneAlternateAndExclusions()
         testMicrophoneRouteSettle()
+        testMicrophoneSwapAndRouteStamp()
         testDeadInputRescue()
         testMicrophonePreferencePersistence()
         testAudioCaptureRequiresPCM()
@@ -16237,6 +16238,44 @@ private final class RecordingOutputVolume: OutputVolumeControlling {
         // Step 8 is even, so the device current when the deadline expires is "a".
         expect(binds.first.map { $0.element } == .bind("a"),
                "the deadline binds the device that is current when it expires")
+    }
+
+    /// A queued input swap belongs to the take that asked for it, and a route
+    /// change while idle still counts when the next take starts.
+    private static func testMicrophoneSwapAndRouteStamp() {
+        expect(
+            MicrophoneSwapPolicy.maySwap(
+                requestedGeneration: 7, currentGeneration: 7, stopping: false),
+            "a swap whose generation is still current may touch the session")
+        expect(
+            !MicrophoneSwapPolicy.maySwap(
+                requestedGeneration: 7, currentGeneration: 8, stopping: false),
+            "a newer start bumps the generation, so a queued swap must not touch it")
+        expect(
+            !MicrophoneSwapPolicy.maySwap(
+                requestedGeneration: 7, currentGeneration: 7, stopping: true),
+            "a stop in flight also takes the session away from a queued swap")
+
+        // The stamp lives with the process-wide listener, so a headset that
+        // appeared between dictations is still a route in motion. Stamped with
+        // the real clock: this is process state, and the rest of the run should
+        // see a value that is merely "just now", not a fiction.
+        let stamp = ProcessInfo.processInfo.systemUptime
+        AudioInputDevices.recordDeviceListChange(at: stamp)
+        expect(AudioInputDevices.lastDeviceListChangeUptime == stamp,
+               "a device-list change is visible to the next start, not just to a live session")
+        let afterIdleChange = MicrophoneRouteSettle.plan(
+            isBluetooth: false,
+            deviceListChangedAt: AudioInputDevices.lastDeviceListChangeUptime,
+            now: stamp + 0.5)
+        expect(afterIdleChange.waits,
+               "a microphone connected half a second ago settles before binding")
+        let longAfter = MicrophoneRouteSettle.plan(
+            isBluetooth: false,
+            deviceListChangedAt: AudioInputDevices.lastDeviceListChangeUptime,
+            now: stamp + 30)
+        expect(!longAfter.waits,
+               "thirty seconds later, the same microphone binds immediately")
     }
 
     /// The dead-input rescue only fires on the exact evidence it needs, once.

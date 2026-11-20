@@ -3382,8 +3382,12 @@ final class DictationController: NSObject {
                 "Velora: dead-input rescue — \(device.name) delivered "
                     + String(format: "%.1f", seconds) + "s of digital silence; "
                     + "switching to \(name)")
+            let rescueSession = sessionID
             capture.replaceInput(to: uid) { [weak self] switched in
                 guard let self else { return }
+                // The take may have ended, or a new one may have started, while
+                // the swap ran. Its outcome is not this take's to announce.
+                guard self.sessionID == rescueSession else { return }
                 guard switched else {
                     self.showNotice(symbol: "mic.slash", message: "Microphone is silent")
                     return

@@ -197,6 +197,23 @@ enum AudioTransport {
     }
 }
 
+/// Whether a queued input swap may touch the session it was requested for.
+///
+/// A swap is requested while a take is recording but runs later on the capture
+/// lifecycle queue. By then the user may have stopped, or started a new take
+/// whose session is the one on screen. Detaching before checking that would
+/// kill the input of the take they are speaking into, so the check is a named
+/// rule with its own test rather than an inline condition.
+enum MicrophoneSwapPolicy {
+    static func maySwap(
+        requestedGeneration: UInt64,
+        currentGeneration: UInt64,
+        stopping: Bool
+    ) -> Bool {
+        requestedGeneration == currentGeneration && !stopping
+    }
+}
+
 /// How long a route may still be moving before it is safe to bind.
 ///
 /// Opening a Bluetooth headset microphone makes macOS move that headset from

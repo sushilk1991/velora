@@ -165,6 +165,32 @@ enum AudioInputDevices {
     /// notification never need to hop threads themselves.
     static func beginObserving() { _ = installListenerOnce }
 
+    /// Uptime of the most recent device-list change, or nil when none has been
+    /// seen since launch.
+    ///
+    /// This lives with the process-wide listener, not with a capture session:
+    /// the session observers are torn down between dictations, so a headset
+    /// connected while idle would not mark the route as recently moved and the
+    /// next start would skip its settle window.
+    static var lastDeviceListChangeUptime: TimeInterval? {
+        deviceListChangeLock.lock()
+        defer { deviceListChangeLock.unlock() }
+        return lastDeviceListChange
+    }
+
+    private static let deviceListChangeLock = NSLock()
+    private static var lastDeviceListChange: TimeInterval?
+
+    /// Records a device-list change. The listener calls this; selftest calls it
+    /// directly so the settle rule can be asserted without hardware.
+    static func recordDeviceListChange(
+        at uptime: TimeInterval = ProcessInfo.processInfo.systemUptime
+    ) {
+        deviceListChangeLock.lock()
+        lastDeviceListChange = uptime
+        deviceListChangeLock.unlock()
+    }
+
     private static let installListenerOnce: Void = {
         var address = AudioObjectPropertyAddress(
             mSelector: kAudioHardwarePropertyDevices,
@@ -173,6 +199,7 @@ enum AudioInputDevices {
         let status = AudioObjectAddPropertyListenerBlock(
             AudioObjectID(kAudioObjectSystemObject), &address, DispatchQueue.main
         ) { _, _ in
+            AudioInputDevices.recordDeviceListChange()
             NotificationCenter.default.post(name: .veloraAudioInputDevicesChanged, object: nil)
         }
         if status != noErr {
