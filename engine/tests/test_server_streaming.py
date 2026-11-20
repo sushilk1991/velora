@@ -46,7 +46,7 @@ class FakeCleanup:
     async def cleanup(
         self, raw, system_prompt, timeout_ms=None, check_ratio=True,
         cancel_event=None, allowed_terms=None, prefix_candidates=None,
-        copy_draft=False, queue_timeout_s=None,
+        copy_draft=False, queue_timeout_s=None, examples=None,
     ):
         self.calls.append((raw, system_prompt))
         self.cancel_events.append(cancel_event)
@@ -63,7 +63,7 @@ class RestartingListCleanup(FakeCleanup):
     async def cleanup(
         self, raw, system_prompt, timeout_ms=None, check_ratio=True,
         cancel_event=None, allowed_terms=None, prefix_candidates=None,
-        copy_draft=False, queue_timeout_s=None,
+        copy_draft=False, queue_timeout_s=None, examples=None,
     ):
         self.calls.append((raw, system_prompt))
         self.cancel_events.append(cancel_event)
@@ -98,7 +98,7 @@ class PendingLastCleanup(FakeCleanup):
     async def cleanup(
         self, raw, system_prompt, timeout_ms=None, check_ratio=True,
         cancel_event=None, allowed_terms=None, prefix_candidates=None,
-        copy_draft=False, queue_timeout_s=None,
+        copy_draft=False, queue_timeout_s=None, examples=None,
     ):
         self.calls.append((raw, system_prompt))
         self.cancel_events.append(cancel_event)
@@ -124,7 +124,7 @@ class FirstCallHangsCleanup(FakeCleanup):
     async def cleanup(
         self, raw, system_prompt, timeout_ms=None, check_ratio=True,
         cancel_event=None, allowed_terms=None, prefix_candidates=None,
-        copy_draft=False, queue_timeout_s=None,
+        copy_draft=False, queue_timeout_s=None, examples=None,
     ):
         self.calls.append((raw, system_prompt))
         self.cancel_events.append(cancel_event)
@@ -149,7 +149,7 @@ class HardTimeoutThenRecoveringCleanup(FakeCleanup):
     async def cleanup(
         self, raw, system_prompt, timeout_ms=None, check_ratio=True,
         cancel_event=None, allowed_terms=None, prefix_candidates=None,
-        copy_draft=False, queue_timeout_s=None,
+        copy_draft=False, queue_timeout_s=None, examples=None,
     ):
         self.calls.append((raw, system_prompt))
         self.cancel_events.append(cancel_event)
@@ -1080,7 +1080,7 @@ class SlowLastCleanup(FakeCleanup):
     async def cleanup(
         self, raw, system_prompt, timeout_ms=None, check_ratio=True,
         cancel_event=None, allowed_terms=None, prefix_candidates=None,
-        copy_draft=False, queue_timeout_s=None,
+        copy_draft=False, queue_timeout_s=None, examples=None,
     ):
         self.calls.append((raw, system_prompt))
         self.cancel_events.append(cancel_event)

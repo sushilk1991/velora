@@ -515,6 +515,7 @@ class CleanupProcess:
         max_input_tokens: int | None = None,
         copy_draft: bool = False,
         queue_timeout_s: float | None = None,
+        examples: tuple[tuple[str, str], ...] | list[tuple[str, str]] | None = None,
     ) -> CleanupResult:
         """Clean one transcript on the worker.
 
@@ -596,6 +597,8 @@ class CleanupProcess:
                 "max_input_tokens": max_input_tokens,
                 "copy_draft": copy_draft,
             }
+            if examples:
+                message["examples"] = [[u, a] for u, a in examples]
             async with self._write_lock:
                 writer.write(encode_cleanup_ipc_message(message))
                 # Begin after submission; include drain and the response future.

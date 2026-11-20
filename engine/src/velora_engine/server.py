@@ -4352,6 +4352,8 @@ class Engine:
                 kwargs = dict(timeout_ms=timeout_ms, cancel_event=cancel_event,
                     allowed_terms=allowed_terms, prefix_candidates=prefix_candidates,
                     copy_draft=True, queue_timeout_s=queue_timeout_s)
+                if gate.examples:
+                    kwargs["examples"] = gate.examples
                 if native_context is not None:
                     result = await router.cleanup_dictation(
                         formatting.encode_breaks(gate.text), gate.system_prompt or STATIC_SYSTEM_PROMPT,

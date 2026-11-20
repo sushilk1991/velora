@@ -115,6 +115,12 @@ class Worker:
                     message.get("prefix_candidates"),
                     message.get("shared_prompt_prefixes"),
                 )
+                raw_examples = message.get("examples")
+                examples = [
+                    (str(pair[0]), str(pair[1]))
+                    for pair in (raw_examples or [])
+                    if isinstance(pair, (list, tuple)) and len(pair) == 2
+                ]
                 result = await self.engine.cleanup(
                     raw,
                     prompt,
@@ -127,6 +133,7 @@ class Worker:
                     cache_scope=message.get("cache_scope"),
                     max_input_tokens=message.get("max_input_tokens"),
                     copy_draft=bool(message.get("copy_draft", False)),
+                    examples=examples or None,
                 )
                 await self._respond(request_id, ok=True, result=asdict(result))
                 return

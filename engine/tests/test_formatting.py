@@ -138,14 +138,20 @@ def test_terminal_long_prose_uses_smart_llm(config):
     assert "VERBATIM" in (gate.system_prompt or "")
 
 
-def test_cleanup_prompt_executes_unambiguous_meta_edit_commands():
-    prompt = formatting.STATIC_SYSTEM_PROMPT
-    assert "change the previous line" in prompt.lower()
-    assert "6pm not 3pm" in prompt.lower()
+def test_cleanup_prompt_executes_unambiguous_meta_edit_commands(config):
+    raw = "let's meet at 3pm 6pm not 3pm can you change the previous line and make it 6pm"
+    gate = run_gate(raw, config)
+    prompt = gate.system_prompt or ""
+    assert "meta_edit" in gate.active_rules
     assert "meta-edit" in prompt.lower()
+    assert "previous line" in prompt.lower()
+    assert any("6pm not 3pm" in ex_user for ex_user, _ in gate.examples)
+    # Ordinary prose must not pay prompt tokens for meta-edit rules.
+    plain = run_gate(LONG, config)
+    assert "meta_edit" not in plain.active_rules
 
 
-def test_terminal_issue_report_allows_inferred_numbered_structure(config):
+def test_terminal_issue_report_activates_lists_rule_on_markers(config):
     raw = (
         "there are a few issues with this app the first is that saving is slow "
         "also the toolbar is confusing and the last problem is that errors give no recovery step"
@@ -155,7 +161,8 @@ def test_terminal_issue_report_allows_inferred_numbered_structure(config):
 
     assert gate.reason == "smart_terminal"
     assert "Formatting strength: FULL" in prompt
-    assert "two or more distinct issues, feedback points, tasks, or requirements" in prompt
+    assert "lists" in gate.active_rules
+    assert "prose" not in gate.active_rules
     assert "numbered list" in prompt.lower()
 
 
@@ -168,9 +175,9 @@ def test_default_prompt_requires_counted_ordinal_items_without_a_format_command(
     prompt = gate.system_prompt or ""
 
     assert gate.use_llm is True
-    assert "counted collection of items, tasks, priorities, requests, products, or events" in prompt
-    assert "formatting, NOT prohibited paraphrasing" in prompt
-    assert "A trailing fragment belongs inside the last item" in prompt
+    assert "lists" in gate.active_rules
+    assert "counted collection" in prompt.lower()
+    assert "trailing clarifying fragment" in prompt.lower()
 
 
 def test_default_prompt_handles_misspoken_ordinal_labels_without_inventing_items(config):
@@ -182,14 +189,15 @@ def test_default_prompt_handles_misspoken_ordinal_labels_without_inventing_items
     prompt = gate.system_prompt or ""
 
     assert gate.use_llm is True
-    assert "ordinal labels are boundary cues, not item content" in prompt
-    assert "spoken ordinal label is mistaken or skips a number" in prompt
-    assert "numbered list is REQUIRED" in prompt
-    assert "invent nothing" in prompt
-    assert "sequentially by spoken order" in prompt
+    assert "lists" in gate.active_rules
+    assert "skips a label" in prompt.lower()
+    assert "number sequentially" in prompt.lower()
+    assert "without inventing" in prompt.lower()
 
 
-def test_note_prompt_infers_structure_without_spoken_formatting_commands(config):
+def test_markers_only_list_policy_keeps_unmarked_prose_as_prose(config):
+    # V-10 option (a): without spoken list markers or an explicit count,
+    # the compiled prompt activates the `prose` rule instead of `lists`.
     raw = (
         "for friday's launch sam owns the release maya will send the notes before lunch "
         "and i will check metrics after we ship"
@@ -199,9 +207,9 @@ def test_note_prompt_infers_structure_without_spoken_formatting_commands(config)
 
     assert gate.use_llm is True
     assert gate.mode.name == "Note"
-    assert "speaker does NOT need to say 'new line'" in prompt
-    assert "even without a spoken formatting command" in prompt
-    assert "Keep ordinary compound sentences as prose" in prompt
+    assert "prose" in gate.active_rules
+    assert "lists" not in gate.active_rules
+    assert "Keep prose as prose" in prompt
 
 
 def test_terminal_long_prose_keeps_sentence_period_after_cleanup(config):

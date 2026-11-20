@@ -734,11 +734,17 @@ class CleanupEngine:
         self.loaded = True
         self.unhealthy = False
 
-    def _prompt_tokens(self, system_prompt: str, user_text: str) -> list[int]:
-        messages = [
-            {"role": "system", "content": system_prompt},
-            {"role": "user", "content": neutralize_control_tokens(user_text)},
-        ]
+    def _prompt_tokens(
+        self,
+        system_prompt: str,
+        user_text: str,
+        examples: tuple[tuple[str, str], ...] | list[tuple[str, str]] | None = None,
+    ) -> list[int]:
+        messages = [{"role": "system", "content": system_prompt}]
+        for ex_user, ex_assistant in examples or ():
+            messages.append({"role": "user", "content": neutralize_control_tokens(ex_user)})
+            messages.append({"role": "assistant", "content": ex_assistant})
+        messages.append({"role": "user", "content": neutralize_control_tokens(user_text)})
         try:
             return list(
                 self._tokenizer.apply_chat_template(
@@ -1118,6 +1124,7 @@ class CleanupEngine:
         cache_scope: str | None = None,
         max_input_tokens: int | None = None,
         copy_draft: bool = False,
+        examples: tuple[tuple[str, str], ...] | list[tuple[str, str]] | None = None,
     ) -> _GenerationResult:
         """Generate with a quality budget that begins at first output token.
 
@@ -1157,7 +1164,11 @@ class CleanupEngine:
         if cancel_event is not None and cancel_event.is_set():
             return result(status="cancelled")
         with _latency_span("prompt_tokenization_ns"):
-            tokens = self._prompt_tokens(system_prompt, user_text)
+            tokens = (
+                self._prompt_tokens(system_prompt, user_text, examples)
+                if examples
+                else self._prompt_tokens(system_prompt, user_text)
+            )
         if max_input_tokens is not None and len(tokens) > max_input_tokens:
             return result(status="context_limit", input_tokens=len(tokens))
         with _latency_span("cache_select_restore_ns"):
@@ -1407,6 +1418,7 @@ class CleanupEngine:
         cache_scope: str | None = None,
         max_input_tokens: int | None = None,
         copy_draft: bool = False,
+        examples: tuple[tuple[str, str], ...] | list[tuple[str, str]] | None = None,
     ) -> CleanupResult:
         t0 = time.perf_counter()
         with self._lock:
@@ -1430,6 +1442,7 @@ class CleanupEngine:
                 cache_scope,
                 max_input_tokens,
                 copy_draft=copy_draft and self.model_id in COPY_DRAFT_MODELS,
+                examples=examples,
             )
         ms = int((time.perf_counter() - t0) * 1000)
         log.info(
@@ -1510,6 +1523,7 @@ class CleanupEngine:
         cache_scope: str | None = None,
         max_input_tokens: int | None = None,
         copy_draft: bool = False,
+        examples: tuple[tuple[str, str], ...] | list[tuple[str, str]] | None = None,
     ) -> CleanupResult:
         """Clean `raw` under `system_prompt`. Never raises; returns raw on any failure.
 
@@ -1538,7 +1552,7 @@ class CleanupEngine:
             return self._run(
                 raw, system_prompt, timeout_ms, check_ratio,
                 worker_cancel, allowed_terms, prefix_candidates, max_tokens,
-                cache_scope, max_input_tokens, copy_draft,
+                cache_scope, max_input_tokens, copy_draft, examples,
             )
 
         worker = loop.run_in_executor(self._executor, run_started)

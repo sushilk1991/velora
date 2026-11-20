@@ -676,6 +676,11 @@ async def _run_model(
                                 )
                             ),
                             prefix_candidates=candidates,
+                            examples=(
+                                gate.examples or None
+                                if model_id != S1_MINI_MODEL_ID and not gate.romanize
+                                else None
+                            ),
                         )
                         output = (
                             postprocess(result.text, gate)
