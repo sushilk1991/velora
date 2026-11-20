@@ -4293,7 +4293,6 @@ extension DictationController: HotkeyMonitorDelegate {
         var context: [String: Any] = [:]
         if let bundleID = frontmost?.bundleIdentifier { context["bundle_id"] = bundleID }
         if let appName = frontmost?.localizedName { context["app_name"] = appName }
-        if let mode = config.defaultMode { context["mode"] = mode }
         supervisor.send(["cmd": "warm", "context": context])
     }
 
