@@ -44,6 +44,12 @@ final class MicrophoneStreamCapture: NSObject, AVCaptureAudioDataOutputSampleBuf
     /// about *which* microphone is recording (the dead-input rescue) use it
     /// instead of guessing from the settings.
     private var resolvedDevice: MicrophoneDevice?
+    /// The take was started on System Default, so it may follow the system
+    /// default when it moves. An explicit choice never moves mid-take.
+    private var followsSystemDefault = false
+    /// One default-change swap at a time; a second notification while the first
+    /// is running would queue a redundant teardown.
+    private var swapInFlight = false
     /// The running session's device, safe to read from any queue.
     var currentDevice: MicrophoneDevice? {
         stateLock.lock()
@@ -147,6 +153,9 @@ final class MicrophoneStreamCapture: NSObject, AVCaptureAudioDataOutputSampleBuf
                 self.onBuffer = onBuffer
                 self.onFailure = onFailure
                 self.selectedUID = uid
+                let explicitChoice = MicrophoneSelection.Ladder.identity(persistedUID ?? "")
+                self.followsSystemDefault = explicitChoice == nil
+                self.swapInFlight = false
                 self.failureReported = false
                 self.stopping = false
                 self.session = session
@@ -210,6 +219,8 @@ final class MicrophoneStreamCapture: NSObject, AVCaptureAudioDataOutputSampleBuf
             if self.generation == stoppedGeneration {
                 self.selectedUID = nil
                 self.resolvedDevice = nil
+                self.followsSystemDefault = false
+                self.swapInFlight = false
                 self.onBuffer = nil
                 self.onFailure = nil
             }
@@ -292,16 +303,25 @@ final class MicrophoneStreamCapture: NSObject, AVCaptureAudioDataOutputSampleBuf
                 }
                 return
             }
-            self.output?.setSampleBufferDelegate(nil, queue: nil)
-            self.session?.stopRunning()
-            self.sampleQueue.sync {}
-            self.removeObservers()
             do {
                 let devices = AVCaptureDevice.DiscoverySession(
                     deviceTypes: [.microphone], mediaType: .audio,
                     position: .unspecified).devices
                 guard let device = devices.first(where: { $0.uniqueID == uid }) else {
                     throw CaptureError.noDevice
+                }
+                // A Bluetooth target needs the settle a start gets: opening it
+                // is what moves the headset onto its two-way route, and binding
+                // mid-switch records the wrong thing. Done before detaching, so
+                // the take keeps its current audio while the route settles.
+                if AudioTransport.isBluetooth(device.transportType) {
+                    Thread.sleep(forTimeInterval: MicrophoneRouteSettle.stableWindow)
+                    guard self.swapIsCurrent(swapGeneration) else {
+                        DispatchQueue.main.async {
+                            completion(.failure(CaptureError.sessionDidNotStart))
+                        }
+                        return
+                    }
                 }
                 let input = try AVCaptureDeviceInput(device: device)
                 let output = AVCaptureAudioDataOutput()
@@ -319,6 +339,13 @@ final class MicrophoneStreamCapture: NSObject, AVCaptureAudioDataOutputSampleBuf
                 session.addOutput(output)
                 output.setSampleBufferDelegate(self, queue: self.sampleQueue)
                 session.commitConfiguration()
+
+                // The replacement is ready to run: detach the old session only
+                // now, so the take keeps its audio through the whole build.
+                self.output?.setSampleBufferDelegate(nil, queue: nil)
+                self.session?.stopRunning()
+                self.sampleQueue.sync {}
+                self.removeObservers()
 
                 self.stateLock.lock()
                 guard MicrophoneSwapPolicy.maySwap(
@@ -438,6 +465,11 @@ final class MicrophoneStreamCapture: NSObject, AVCaptureAudioDataOutputSampleBuf
             self?.reportFailure("Microphone capture was interrupted")
         })
         observers.append(center.addObserver(
+            forName: .veloraDefaultInputDeviceChanged, object: nil, queue: .main
+        ) { [weak self] _ in
+            self?.systemDefaultInputChanged()
+        })
+        observers.append(center.addObserver(
             forName: .veloraAudioInputDevicesChanged, object: nil, queue: .main
         ) { [weak self] _ in
             guard let self else { return }
@@ -457,6 +489,60 @@ final class MicrophoneStreamCapture: NSObject, AVCaptureAudioDataOutputSampleBuf
     private func removeObservers() {
         for observer in observers { NotificationCenter.default.removeObserver(observer) }
         observers.removeAll()
+    }
+
+    /// The system default input moved while a take is recording. Follow it only
+    /// when this take follows the system default; a device list that churns (a
+    /// headset connecting, a dock appearing) must not start a swap that cannot
+    /// work, so the decision is a pure rule.
+    private func systemDefaultInputChanged() {
+        stateLock.lock()
+        let follows = followsSystemDefault
+        let current = resolvedDevice?.uid
+        let busy = swapInFlight
+        let live = session != nil && !stopping
+        stateLock.unlock()
+        guard live else { return }
+
+        let newDefault = AudioInputDevices.systemDefaultUID()
+        let connected = AudioInputDevices.current()
+        let decision = DefaultInputHotSwap.decide(DefaultInputHotSwap.Evidence(
+            followsSystemDefault: follows,
+            currentUID: current,
+            newDefaultUID: newDefault,
+            isConnected: newDefault.map { uid in
+                connected.contains { $0.uid == uid }
+            } ?? false,
+            isExcluded: newDefault.map {
+                AppConfig.shared.excludedInputDeviceUIDs.contains($0)
+            } ?? false,
+            switchInFlight: busy))
+
+        switch decision {
+        case .keep(let reason):
+            veloraLog("Velora: default input change ignored — \(reason)")
+        case .switchTo(let uid):
+            stateLock.lock()
+            guard !swapInFlight else {
+                stateLock.unlock()
+                return
+            }
+            swapInFlight = true
+            stateLock.unlock()
+            let name = connected.first(where: { $0.uid == uid })?.name ?? uid
+            veloraLog("Velora: system default input moved to \(name); following it")
+            switchInput(to: uid) { [weak self] result in
+                guard let self else { return }
+                self.stateLock.lock()
+                self.swapInFlight = false
+                self.stateLock.unlock()
+                if case .failure(let error) = result {
+                    self.reportFailure(
+                        "Could not follow the new default microphone: "
+                            + error.localizedDescription)
+                }
+            }
+        }
     }
 
     private func reportFailure(_ message: String) {

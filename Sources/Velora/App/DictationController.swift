@@ -415,8 +415,9 @@ final class DictationController: NSObject {
     /// One dead-input rescue per take: a second switch would drop audio the HUD
     /// is already showing as being recorded.
     private var deadInputRescueAttempted = false
-    private let mediaPlayback: MediaPlaybackCoordinator
-    private let outputDucking: OutputDuckingController
+    /// Owns both playback primitives (the pause coordinator and the volume
+    /// ducker) and allows exactly one of them per take.
+    private let playback: DictationPlayback
     private let contextTracker: AppContextTracker
     private let hud: HUDPanel
     private let inserter: TextInserter
@@ -720,8 +721,7 @@ final class DictationController: NSObject {
         self.sounds = sounds
         self.dictionary = dictionary
         self.capture = capture
-        self.mediaPlayback = mediaPlayback
-        self.outputDucking = outputDucking
+        self.playback = DictationPlayback(media: mediaPlayback, ducking: outputDucking)
         self.micAuthorized = micAuthorized
         self.secureInputActive = secureInputActive
         self.recordingLimit = recordingLimit
@@ -880,8 +880,7 @@ final class DictationController: NSObject {
                     message: "A password field is active; keystrokes are blocked")))
                 return
             }
-            mediaPlayback.restoreBeforeAction()
-            outputDucking.restoreAfterDictation()
+            playback.restoreBeforeAction()
         }
         let frontmost = contextTracker.frontmost ?? NSWorkspace.shared.frontmostApplication
         let context = ActionContextSnapshot.capture(
@@ -1027,8 +1026,7 @@ final class DictationController: NSObject {
             showError("Password field. Action stopped")
             return
         }
-        mediaPlayback.restoreBeforeAction()
-        outputDucking.restoreAfterDictation()
+        playback.restoreBeforeAction()
         let names = actionScreenNames
         actionScreenNames = []
         let context = ActionContextSnapshot.capture(
@@ -1201,8 +1199,7 @@ final class DictationController: NSObject {
         if phase == .editing { phase = .idle }
 
         guard phase != .idle else {
-            mediaPlayback.restoreImmediatelyForTermination()
-            outputDucking.restoreImmediatelyForTermination()
+            playback.restoreForTermination()
             guard history.hasPendingWrites else {
                 completion()
                 return
@@ -1230,8 +1227,7 @@ final class DictationController: NSObject {
         // `.transcribing` begins before AudioCapture finishes flushing its
         // tail. Arm the bounded wait only after that callback enqueues stop.
         guard phase != .transcribing else {
-            mediaPlayback.restoreImmediatelyForTermination()
-            outputDucking.restoreImmediatelyForTermination()
+            playback.restoreForTermination()
             if stopEnqueuedSession == terminatingSession {
                 armTerminationTimer()
             }
@@ -1242,8 +1238,7 @@ final class DictationController: NSObject {
         capture.stop { [weak self] in
             DispatchQueue.main.async {
                 guard let self, self.terminationSession == interruptedSession else { return }
-                self.mediaPlayback.restoreImmediatelyForTermination()
-                self.outputDucking.restoreImmediatelyForTermination()
+                self.playback.restoreForTermination()
                 self.supervisor.send([
                     "cmd": "interrupt", "session": interruptedSession,
                 ])
@@ -1276,8 +1271,7 @@ final class DictationController: NSObject {
     func cancelForTermination() {
         dispatchPrecondition(condition: .onQueue(.main))
         guard !terminating else {
-            mediaPlayback.restoreImmediatelyForTermination()
-            outputDucking.restoreImmediatelyForTermination()
+            playback.restoreForTermination()
             return
         }
         preserveForTermination {}
@@ -1290,8 +1284,7 @@ final class DictationController: NSObject {
         terminationSession = nil
         let completion = terminationCompletion
         terminationCompletion = nil
-        mediaPlayback.restoreImmediatelyForTermination()
-        outputDucking.restoreImmediatelyForTermination()
+        playback.restoreForTermination()
         completion?()
     }
 
@@ -2454,11 +2447,12 @@ final class DictationController: NSObject {
             return false
         }
 
-        // Request the media pause before opening the microphone. On Bluetooth
-        // headphones this prevents music from playing through the lower-quality
-        // two-way headset route while Velora captures speech.
-        mediaPlayback.pauseForDictation()
-        if AppConfig.shared.duckOtherAudio { outputDucking.duckForDictation() }
+        // Decide once, before opening the microphone, what this take does to
+        // whatever else is playing. One lever, chosen by a table: a headset
+        // that is also the microphone is lowered and never paused, a browser or
+        // a call is never touched, and one dedicated player is paused only
+        // after the coordinator verifies the pause.
+        playback.apply(playbackPlan())
 
         sessionID = UUID().uuidString
         stopTiming = nil
@@ -2685,10 +2679,9 @@ final class DictationController: NSObject {
         capture.stop { [weak self] in
             guard let self else { return }
             self.logStopStage(.captureDrained, session: stoppedSession)
-            self.mediaPlayback.restoreAfterDictation()
-            // Unconditional: restore is a no-op when nothing is ducked,
-            // so toggling the setting mid-recording can't wedge the volume.
-            outputDucking.restoreAfterDictation()
+            // Unconditional: each restore is a no-op when it owes nothing,
+              // so toggling the setting mid-recording can't wedge the volume.
+            self.playback.restore()
             guard self.sessionID == stoppedSession,
                   self.phase == .transcribing,
                   self.cancelledSessionID != stoppedSession else { return }
@@ -3348,6 +3341,22 @@ final class DictationController: NSObject {
         showError(message, retryIntent: retryIntent)
     }
 
+    /// What this take does to other audio, from the microphone it will open and
+    /// the user's preference.
+    ///
+    /// The mode-level override is part of the policy table but has no field in a
+    /// mode file yet (recipes reject unknown keys), so it is passed as nil here;
+    /// wiring it is a mode schema plus editor change, not a policy change.
+    private func playbackPlan() -> PlaybackPlan {
+        // The chosen microphone, else whatever the system default is right now.
+        // Deliberately not a full AVFoundation discovery: this runs on the
+        // hotkey path, and the rule only needs to know whether the microphone
+        // and the output are the same Bluetooth device.
+        let micUID = config.inputDeviceUID ?? AudioInputDevices.systemDefaultUID()
+        return PlaybackPolicy.decide(PlaybackProbe.evidence(
+            micUID: micUID, quietOtherAudio: config.duckOtherAudio))
+    }
+
     /// A take from a lid-closed built-in microphone records exact digital
     /// silence: the device is hardware-disconnected, not quiet. Switch to
     /// another connected microphone for the rest of the same take, once.
@@ -3933,10 +3942,9 @@ final class DictationController: NSObject {
         recordingLimitTimer?.invalidate()
         recordingLimitTimer = nil
         capture.stop()
-        mediaPlayback.restoreAfterDictation()
-        // Unconditional: restore is a no-op when nothing is ducked, so
+        // Unconditional: each restore is a no-op when it owes nothing, so
         // toggling the setting mid-recording can't wedge the volume.
-        outputDucking.restoreAfterDictation()
+        playback.restore()
     }
 
     private func failExternalRequest(

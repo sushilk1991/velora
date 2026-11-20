@@ -214,6 +214,54 @@ enum MicrophoneSwapPolicy {
     }
 }
 
+/// Whether a take should follow the system default input to another device.
+///
+/// Only a take that follows the system default may move: an explicitly chosen
+/// microphone is the user's decision and is never overridden mid-sentence.
+/// The rest are guards that keep a device-list churn from starting a swap that
+/// cannot work.
+enum DefaultInputHotSwap {
+    struct Evidence: Equatable {
+        /// The take was started with no explicit microphone (System Default).
+        var followsSystemDefault: Bool
+        /// The device the live session is on.
+        var currentUID: String?
+        /// The system's new default input, or nil when the HAL reports none.
+        var newDefaultUID: String?
+        var isConnected: Bool
+        var isExcluded: Bool
+        /// A swap for this session is already running.
+        var switchInFlight: Bool
+    }
+
+    enum Decision: Equatable {
+        case switchTo(uid: String)
+        case keep(String)
+    }
+
+    static func decide(_ evidence: Evidence) -> Decision {
+        guard evidence.followsSystemDefault else {
+            return .keep("an explicit microphone is selected")
+        }
+        guard let newUID = evidence.newDefaultUID, !newUID.isEmpty else {
+            return .keep("no default input device")
+        }
+        guard newUID != evidence.currentUID else {
+            return .keep("the default did not change the capture device")
+        }
+        guard evidence.isConnected else {
+            return .keep("the new default \(newUID) is not connected")
+        }
+        guard !evidence.isExcluded else {
+            return .keep("the new default \(newUID) is excluded")
+        }
+        guard !evidence.switchInFlight else {
+            return .keep("a microphone switch is already running")
+        }
+        return .switchTo(uid: newUID)
+    }
+}
+
 /// How long a route may still be moving before it is safe to bind.
 ///
 /// Opening a Bluetooth headset microphone makes macOS move that headset from
