@@ -93,6 +93,7 @@ def test_undo_title_case_false_positives_untouched(raw):
         ("version two point five ships soon", "version 2.5 ships soon"),
         # Clock times
         ("let us meet at three thirty pm", "let us meet at 3:30 pm"),
+        ("schedule the review at three thirty", "schedule the review at 3:30"),
         ("alarm set for six oh five a.m.", "alarm set for 6:05 a.m."),
         ("call starts at six pm", "call starts at 6 pm"),
         ("dinner is at nine o'clock", "dinner is at 9 o'clock"),

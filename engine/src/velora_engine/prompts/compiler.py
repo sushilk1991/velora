@@ -138,28 +138,39 @@ _RULES: tuple[PromptRule, ...] = (
         ),
     ),
     PromptRule(
+        id="bare_lines",
+        when_any_cues=("bare_lines",),
+        body=(
+            "Separate-line values: when the speaker asks for values or numbers "
+            "each on a separate/different line, keep the intro ending with ':' "
+            "and put each exact value on its own BARE line with NO bullets, NO "
+            "list numbering, and NO trailing periods after the values."
+        ),
+    ),
+    PromptRule(
         id="lists",
         when_any_cues=("list_request", "counted_ordinals"),
+        when_not_rules=("bare_lines",),
         body=(
-            "Lists (markers-only policy): format as a list ONLY when the speech "
-            "explicitly asks for a list/separate lines or counts off items with "
-            "spoken markers (counted collection + ordinals, 'first/second/third', "
-            "'one…two…three', or counting up). Put an introductory phrase on its "
+            "Lists (markers-only policy): format as a numbered list ('1.', '2.', "
+            "'3.') when the speech explicitly asks for a list or counts off items "
+            "with spoken markers (counted collection + ordinals, 'first/second/"
+            "third', 'one…two…three', or counting up). This overrides 'keep the "
+            "transcript's shape' in light mode. Put an introductory phrase on its "
             "own line ending with ':'. Drop meta-instructions ('put this in a "
             "numbered list') and ordinal boundary words ('first is', 'second is'). "
             "If the speaker counts up from a specific number ('six…seven…eight'), "
             "preserve their numbers (6., 7., 8.); if an ordinal skips a label in "
             "a counted set, keep all spoken items in order and number sequentially "
-            "without inventing a skipped item. For explicit separate-line values "
-            "('each on a different line 1 2 3 4'), put each value on a bare line. "
-            "Keep a trailing clarifying fragment inside the last item; never repeat "
+            "without inventing a skipped item. Keep a trailing clarifying fragment "
+            "verbatim inside the last item (never drop words from it); never repeat "
             "points as both prose and list. Ordinal nouns ('my first time', 'second "
             "floor') and uncounted stories stay prose."
         ),
     ),
     PromptRule(
         id="prose",
-        when_not_rules=("lists",),
+        when_not_rules=("lists", "bare_lines"),
         body=(
             "Keep prose as prose: do not turn ordinary sentences, compound clauses, "
             "or narratives into bulleted or numbered lists."
@@ -229,11 +240,18 @@ _EXAMPLES: tuple[PromptExample, ...] = (
         negative=True,
         specificity=2,
     ),
+    # --- bare_lines ---
+    PromptExample(
+        shows=("bare_lines",),
+        user="here are the values each on a different line 1 2 3 4",
+        assistant="Here are the values, each on a different line:\n1\n2\n3\n4",
+        specificity=4,
+    ),
     # --- lists (positive + negative) ---
     PromptExample(
         shows=("lists",),
-        user="three errands today first return the parcel second collect the keys fourth pick up medicine",
-        assistant="Three errands today:\n1. Return the parcel.\n2. Collect the keys.\n3. Pick up medicine.",
+        user="three errands today first return the parcel second collect the keys fourth pick up medicine basically the prescription",
+        assistant="Three errands today:\n1. Return the parcel.\n2. Collect the keys.\n3. Pick up medicine. Basically, the prescription.",
         specificity=3,
     ),
     PromptExample(

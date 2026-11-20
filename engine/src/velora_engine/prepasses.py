@@ -410,6 +410,12 @@ _TIME_HM_RE = re.compile(
     rf"\b(?P<hour>{_HOUR_ALT})\s+(?P<minute>{_MINUTE_ALT})\s*(?P<meridiem>a\.?m\.?|p\.?m\.?)(?!\w)",
     re.IGNORECASE,
 )
+_TIME_AT_HM_RE = re.compile(
+    rf"\b(?P<prep>at|by|around|before|after|until|till|from)\s+"
+    rf"(?P<hour>{_HOUR_ALT})\s+"
+    rf"(?P<minute>oh\s+(?:{_UNIT_WORDS_ALT})|fifteen|thirty|forty[-\s]+five|twenty|forty|fifty|ten)\b",
+    re.IGNORECASE,
+)
 _TIME_H_RE = re.compile(
     rf"\b(?P<hour>{_HOUR_ALT})\s+(?P<meridiem>a\.?m\.?|p\.?m\.?|o'clock)(?!\w)",
     re.IGNORECASE,
@@ -554,6 +560,18 @@ def _convert_time_hm(m: re.Match[str]) -> str:
     return f"{hour}:{minute:02d} {m.group('meridiem')}"
 
 
+def _convert_time_at_hm(m: re.Match[str]) -> str:
+    hour = _parse_cardinal(m.group("hour"))
+    min_raw = m.group("minute").strip().lower()
+    if min_raw.startswith("oh "):
+        minute = _parse_cardinal(min_raw[3:])
+    else:
+        minute = _parse_cardinal(min_raw)
+    if hour is None or minute is None or not (1 <= hour <= 12) or not (0 <= minute <= 59):
+        return m.group(0)
+    return f"{m.group('prep')} {hour}:{minute:02d}"
+
+
 def _convert_time_h(m: re.Match[str]) -> str:
     hour = _parse_cardinal(m.group("hour"))
     if hour is None or not (1 <= hour <= 12):
@@ -673,6 +691,7 @@ def _convert_numbers_segment(text: str) -> str:
     text = _CURRENCY_SIMPLE_RE.sub(_convert_currency_simple, text)
     text = _PERCENT_RE.sub(_convert_percent, text)
     text = _TIME_HM_RE.sub(_convert_time_hm, text)
+    text = _TIME_AT_HM_RE.sub(_convert_time_at_hm, text)
     text = _TIME_H_RE.sub(_convert_time_h, text)
     text = _YEAR_19XX_RE.sub(_convert_year_19xx, text)
     text = _YEAR_2000_RE.sub(_convert_year_2000, text)

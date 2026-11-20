@@ -41,6 +41,12 @@ _META_EDIT_RE = re.compile(
     re.IGNORECASE,
 )
 
+_BARE_LINES_RE = re.compile(
+    r"\b(?:each(?:\s+of\s+them)?(?:\s+is)?\s+on\s+(?:a\s+)?(?:different|new|separate|its\s+own)\s+line"
+    r"|on\s+separate\s+lines)\b",
+    re.IGNORECASE,
+)
+
 _LIST_REQUEST_RE = re.compile(
     r"\b(?:"
     r"(?:make|create|write|start|put\s+(?:this|these|it)\s+in)\s+a\s+(?:numbered\s+|bullet(?:ed)?\s+)?list"
@@ -133,6 +139,8 @@ def detect_cues(text: str) -> TranscriptCues:
     if _META_EDIT_RE.search(text):
         cues.add("meta_edit")
         cues.add("self_correction")
+    if _BARE_LINES_RE.search(text):
+        cues.add("bare_lines")
     if _LIST_REQUEST_RE.search(text):
         cues.add("list_request")
     if (

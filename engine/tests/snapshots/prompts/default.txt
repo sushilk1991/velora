@@ -91,13 +91,13 @@ Formatting strength: FULL. In addition to cleanup, you may add paragraph breaks 
 Mode instructions: General-purpose dictation. Produce clean, well-punctuated prose. Keep the user's wording and sentence order; only fix punctuation, capitalization, fillers, and self-corrections.
 
 Active rules for this transcript:
-- Lists (markers-only policy): format as a list ONLY when the speech explicitly asks for a list/separate lines or counts off items with spoken markers (counted collection + ordinals, 'first/second/third', 'one…two…three', or counting up). Put an introductory phrase on its own line ending with ':'. Drop meta-instructions ('put this in a numbered list') and ordinal boundary words ('first is', 'second is'). If the speaker counts up from a specific number ('six…seven…eight'), preserve their numbers (6., 7., 8.); if an ordinal skips a label in a counted set, keep all spoken items in order and number sequentially without inventing a skipped item. For explicit separate-line values ('each on a different line 1 2 3 4'), put each value on a bare line. Keep a trailing clarifying fragment inside the last item; never repeat points as both prose and list. Ordinal nouns ('my first time', 'second floor') and uncounted stories stay prose.
+- Lists (markers-only policy): format as a numbered list ('1.', '2.', '3.') when the speech explicitly asks for a list or counts off items with spoken markers (counted collection + ordinals, 'first/second/third', 'one…two…three', or counting up). This overrides 'keep the transcript's shape' in light mode. Put an introductory phrase on its own line ending with ':'. Drop meta-instructions ('put this in a numbered list') and ordinal boundary words ('first is', 'second is'). If the speaker counts up from a specific number ('six…seven…eight'), preserve their numbers (6., 7., 8.); if an ordinal skips a label in a counted set, keep all spoken items in order and number sequentially without inventing a skipped item. Keep a trailing clarifying fragment verbatim inside the last item (never drop words from it); never repeat points as both prose and list. Ordinal nouns ('my first time', 'second floor') and uncounted stories stay prose.
 --- examples (2) ---
-[1] U: three errands today first return the parcel second collect the keys fourth pick up medicine
+[1] U: three errands today first return the parcel second collect the keys fourth pick up medicine basically the prescription
 [1] A: Three errands today:
 1. Return the parcel.
 2. Collect the keys.
-3. Pick up medicine.
+3. Pick up medicine. Basically, the prescription.
 [2] U: first the alarm rang second i looked outside third i went back to sleep
 [2] A: First, the alarm rang. Second, I looked outside. Third, I went back to sleep.
 
