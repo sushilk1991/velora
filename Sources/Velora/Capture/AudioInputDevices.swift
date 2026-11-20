@@ -6,6 +6,11 @@ extension Notification.Name {
     /// queue) — the Settings picker refreshes its list and a running capture
     /// re-checks whether the chosen mic is still the right one.
     static let veloraAudioInputDevicesChanged = Notification.Name("VeloraAudioInputDevicesChanged")
+
+    /// The system default input moved to another device (posted on the main
+    /// queue). A take that follows the system default follows this; a take with
+    /// an explicitly chosen microphone ignores it.
+    static let veloraDefaultInputDeviceChanged = Notification.Name("VeloraDefaultInputDeviceChanged")
 }
 
 /// Core Audio enumeration of input-capable devices plus the pure resolver
@@ -44,6 +49,11 @@ enum AudioInputDevices {
                 isBluetooth: AudioTransport.isBluetooth(transport))
         }
     }
+
+    /// Core Audio transport of any device, input or output. Used to tell a
+    /// Bluetooth headset that is also the playback device from an unrelated
+    /// microphone and speakers.
+    static func transport(of id: AudioDeviceID) -> UInt32 { transportType(id) }
 
     /// Core Audio transport, or 0 when the device reports none.
     private static func transportType(_ id: AudioDeviceID) -> UInt32 {
@@ -192,20 +202,31 @@ enum AudioInputDevices {
     }
 
     private static let installListenerOnce: Void = {
+        observe(kAudioHardwarePropertyDevices, posting: .veloraAudioInputDevicesChanged)
+        observe(kAudioHardwarePropertyDefaultInputDevice, posting: .veloraDefaultInputDeviceChanged)
+    }()
+
+    /// One HAL property listener, delivered on the main queue. The device list
+    /// also stamps the route-change clock the settle window reads.
+    private static func observe(
+        _ selector: AudioObjectPropertySelector, posting name: Notification.Name
+    ) {
         var address = AudioObjectPropertyAddress(
-            mSelector: kAudioHardwarePropertyDevices,
+            mSelector: selector,
             mScope: kAudioObjectPropertyScopeGlobal,
             mElement: kAudioObjectPropertyElementMain)
         let status = AudioObjectAddPropertyListenerBlock(
             AudioObjectID(kAudioObjectSystemObject), &address, DispatchQueue.main
         ) { _, _ in
-            AudioInputDevices.recordDeviceListChange()
-            NotificationCenter.default.post(name: .veloraAudioInputDevicesChanged, object: nil)
+            if selector == kAudioHardwarePropertyDevices {
+                recordDeviceListChange()
+            }
+            NotificationCenter.default.post(name: name, object: nil)
         }
         if status != noErr {
-            veloraLog("Velora: audio device-list listener failed to install (\(status))")
+            veloraLog("Velora: audio listener \(name.rawValue) failed to install (\(status))")
         }
-    }()
+    }
 
     private static func inputChannelCount(_ id: AudioDeviceID) -> Int {
         var address = AudioObjectPropertyAddress(

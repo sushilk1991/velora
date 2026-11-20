@@ -241,6 +241,8 @@ enum Selftest {
         testMicrophoneAlternateAndExclusions()
         testMicrophoneRouteSettle()
         testMicrophoneSwapAndRouteStamp()
+        testDefaultInputHotSwap()
+        testPlaybackPolicy()
         testDeadInputRescue()
         testMicrophonePreferencePersistence()
         testAudioCaptureRequiresPCM()
@@ -16276,6 +16278,222 @@ private final class RecordingOutputVolume: OutputVolumeControlling {
             now: stamp + 30)
         expect(!longAfter.waits,
                "thirty seconds later, the same microphone binds immediately")
+    }
+
+    /// V-19: a take that follows the system default follows it when it moves;
+    /// a take on an explicitly chosen microphone never does.
+    private static func testDefaultInputHotSwap() {
+        typealias Evidence = DefaultInputHotSwap.Evidence
+        let viable = Evidence(
+            followsSystemDefault: true, currentUID: "builtin",
+            newDefaultUID: "airpods", isConnected: true, isExcluded: false,
+            switchInFlight: false)
+        expect(DefaultInputHotSwap.decide(viable) == .switchTo(uid: "airpods"),
+               "a System Default take follows the system default to a new device")
+
+        var evidence = viable
+        evidence.followsSystemDefault = false
+        expect(DefaultInputHotSwap.decide(evidence) != .switchTo(uid: "airpods"),
+               "an explicitly chosen microphone is never overridden mid-take")
+
+        evidence = viable
+        evidence.currentUID = "airpods"
+        expect(DefaultInputHotSwap.decide(evidence) != .switchTo(uid: "airpods"),
+               "a default change that does not change the capture device is ignored")
+
+        evidence = viable
+        evidence.newDefaultUID = nil
+        expect(DefaultInputHotSwap.decide(evidence) != .switchTo(uid: "airpods"),
+               "no default input device means nothing to follow")
+
+        evidence = viable
+        evidence.newDefaultUID = ""
+        expect(DefaultInputHotSwap.decide(evidence) != .switchTo(uid: "airpods"),
+               "an empty default uid is not a device")
+
+        evidence = viable
+        evidence.isConnected = false
+        expect(DefaultInputHotSwap.decide(evidence) != .switchTo(uid: "airpods"),
+               "a new default that is not connected is not opened")
+
+        evidence = viable
+        evidence.isExcluded = true
+        expect(DefaultInputHotSwap.decide(evidence) != .switchTo(uid: "airpods"),
+               "an excluded device is never followed, not even as the system default")
+
+        evidence = viable
+        evidence.switchInFlight = true
+        expect(DefaultInputHotSwap.decide(evidence) != .switchTo(uid: "airpods"),
+               "one switch at a time: a second notification waits for the first")
+    }
+
+    /// V-22: every row of the playback table, in the order that matters.
+    private static func testPlaybackPolicy() {
+        typealias Evidence = PlaybackPolicy.Evidence
+        typealias Override = PlaybackPolicy.Override
+        func decide(_ evidence: Evidence) -> PlaybackDecision {
+            PlaybackPolicy.decide(evidence).decision
+        }
+
+        // 1. A mode that wants its audio untouched outranks everything, even a
+        //    headset that is also the microphone.
+        expect(
+            decide(Evidence(
+                override: .keepPlaying, micIsOutputDevice: true,
+                dedicatedPlayerCount: 1)) == .none,
+            "keepPlaying keeps other audio playing, whatever the hardware")
+
+        // 2. Silent output has nothing to quiet.
+        expect(decide(Evidence(outputMuted: true, dedicatedPlayerCount: 1)) == .none,
+               "a muted output is left alone")
+        expect(decide(Evidence(outputVolume: 0, dedicatedPlayerCount: 1)) == .none,
+               "an output at zero volume is left alone")
+
+        // 3. The headline row: the headset is also the microphone. Lower, never
+        //    pause: the route change is the problem, not the music.
+        let headset = Evidence(
+            micIsOutputDevice: true, dedicatedPlayerCount: 1, otherAudioCount: 0)
+        expect(decide(headset) == .lower,
+               "a headset that is also the microphone is lowered, never paused")
+        expect(decide(Evidence(
+                   micAndOutputBothBluetooth: true, dedicatedPlayerCount: 1)) == .lower,
+               "two Bluetooth device objects for one headset still lower, never pause")
+        expect(decide(Evidence(
+                   override: .pause, micIsOutputDevice: true,
+                   dedicatedPlayerCount: 1)) == .lower,
+               "the headset rule outranks a mode that asks for a pause")
+        expect(decide(Evidence(
+                   outputVolume: nil, micIsOutputDevice: true,
+                   dedicatedPlayerCount: 1)) == .none,
+               "without a settable volume nothing is lowered and nothing is paused")
+
+        // 4. Mode preferences, still subject to the rules above.
+        expect(decide(Evidence(override: .lower, otherAudioCount: 1)) == .lower,
+               "a mode that asks to lower, lowers")
+        expect(decide(Evidence(
+                   override: .pause, dedicatedPlayerCount: 1)) == .pause,
+               "a mode that asks to pause, pauses one dedicated player")
+        expect(decide(Evidence(override: .pause)) == .none,
+               "a mode that asks to pause with no player playing does nothing")
+
+        // 5. One dedicated player and nothing else.
+        expect(decide(Evidence(dedicatedPlayerCount: 1)) == .pause,
+               "one dedicated player is paused")
+        expect(decide(Evidence(dedicatedPlayerCount: 2)) == .none,
+               "two players are left alone: a global media key is ambiguous")
+        expect(decide(Evidence(dedicatedPlayerCount: 1, otherAudioCount: 1)) == .none,
+               "a player next to other audio is left alone")
+
+        // 6. Browser and call audio is never touched.
+        expect(decide(Evidence(otherAudioCount: 1, onlyBrowserAudio: true)) == .none,
+               "browser audio is never paused or ducked")
+        expect(decide(Evidence(
+                   otherAudioCount: 1, onlyBrowserAudio: true,
+                   quietOtherAudio: true)) == .none,
+               "quiet other audio does not reach browser or call audio")
+        expect(decide(Evidence(dedicatedPlayerCount: 1, snapshotComplete: false)) == .none,
+               "an unreadable audio state is never paused")
+
+        // 7. Fallback: the user's preference, for audio that is neither a
+        //    dedicated player nor a browser.
+        expect(decide(Evidence(otherAudioCount: 1, quietOtherAudio: true)) == .lower,
+               "quiet other audio lowers audio it cannot identify")
+        expect(decide(Evidence(otherAudioCount: 1, quietOtherAudio: false)) == .none,
+               "with quiet other audio off, unidentified audio is left alone")
+        expect(decide(Evidence(
+                   outputVolume: nil, otherAudioCount: 1, quietOtherAudio: true)) == .none,
+               "quiet other audio cannot lower an output with no settable volume")
+
+        // The lever rule that keeps the two primitives apart.
+        expect(PlaybackLevers.releaseBefore(.pause, active: .lower) == .lower,
+               "pausing after a duck releases the duck first")
+        expect(PlaybackLevers.releaseBefore(.lower, active: .pause) == .pause,
+               "ducking after a pause releases the pause first")
+        expect(PlaybackLevers.releaseBefore(.lower, active: .lower) == nil,
+               "the same lever twice releases nothing")
+        expect(PlaybackLevers.releaseBefore(.none, active: .lower) == nil,
+               "doing nothing releases nothing")
+        expect(PlaybackLevers.releaseBefore(.pause, active: .none) == nil,
+               "acquiring a lever from idle releases nothing")
+
+        // The probe's mapping, where a mistake would silently pick the wrong row.
+        struct FakeVolume: OutputVolumeControlling {
+            var device: AudioObjectID?
+            var level: Float?
+            var muted: Bool?
+            func defaultDevice() -> AudioObjectID? { device }
+            func readVolume(device: AudioObjectID) -> Float? { level }
+            @discardableResult
+            func writeVolume(_ scalar: Float, device: AudioObjectID) -> Bool { false }
+            func isMuted(device: AudioObjectID) -> Bool? { muted }
+        }
+        typealias Snapshot = MediaPlaybackCoordinator.Snapshot
+        func snapshot(
+            players: [AudioObjectID: String], others: [AudioObjectID: String] = [:],
+            complete: Bool = true
+        ) -> Snapshot {
+            var bundles = players
+            others.forEach { bundles[$0.key] = $0.value }
+            let all = Set(players.keys).union(others.keys)
+            return Snapshot(
+                processes: all, playing: Set(players.keys), allPlaying: all,
+                isComplete: complete, bundleIDs: bundles)
+        }
+
+        let airpods = AudioInputDevices.Device(
+            uid: "airpods", name: "AirPods Pro", id: 42, isBuiltIn: false,
+            isBluetooth: true)
+        let sameDevice = PlaybackProbe.evidence(
+            micUID: "airpods", quietOtherAudio: false,
+            volume: FakeVolume(device: 42, level: 0.6, muted: false),
+            snapshot: snapshot(players: [1: "com.apple.Music"]),
+            inputDevices: [airpods],
+            transport: { _ in AudioTransport.builtIn })
+        expect(sameDevice.micIsOutputDevice,
+               "the probe notices the microphone is the output device")
+        expect(decide(sameDevice) == .lower,
+               "the probe turns that into a duck, not a pause")
+
+        let twoBluetoothDevices = PlaybackProbe.evidence(
+            micUID: "airpods", quietOtherAudio: false,
+            volume: FakeVolume(device: 7, level: 0.6, muted: false),
+            snapshot: snapshot(players: [1: "com.apple.Music"]),
+            inputDevices: [airpods],
+            transport: { _ in AudioTransport.bluetooth })
+        expect(twoBluetoothDevices.micAndOutputBothBluetooth
+               && !twoBluetoothDevices.micIsOutputDevice,
+               "the probe handles a headset that reports two device objects")
+        expect(decide(twoBluetoothDevices) == .lower,
+               "two Bluetooth device objects for one headset still duck")
+
+        let mutedOutput = PlaybackProbe.evidence(
+            micUID: "usb", quietOtherAudio: true,
+            volume: FakeVolume(device: 7, level: 0.6, muted: true),
+            snapshot: snapshot(players: [1: "com.apple.Music"]),
+            inputDevices: [AudioInputDevices.Device(uid: "usb", name: "Studio", id: 9)],
+            transport: { _ in AudioTransport.builtIn })
+        expect(mutedOutput.outputMuted && decide(mutedOutput) == .none,
+               "a muted output is reported to the table and nothing is touched")
+
+        let browserOnly = PlaybackProbe.evidence(
+            micUID: "usb", quietOtherAudio: false,
+            volume: FakeVolume(device: 7, level: 0.6, muted: false),
+            snapshot: snapshot(players: [:], others: [2: "com.google.Chrome"]),
+            inputDevices: [AudioInputDevices.Device(uid: "usb", name: "Studio", id: 9)],
+            transport: { _ in AudioTransport.builtIn })
+        expect(browserOnly.onlyBrowserAudio && browserOnly.otherAudioCount == 1,
+               "the probe reports browser-only audio as such")
+        expect(decide(browserOnly) == .none,
+               "browser audio in the probe never reaches a pause")
+
+        let music = PlaybackProbe.evidence(
+            micUID: "usb", quietOtherAudio: false,
+            volume: FakeVolume(device: 7, level: 0.6, muted: false),
+            snapshot: snapshot(players: [1: "com.apple.Music"]),
+            inputDevices: [AudioInputDevices.Device(uid: "usb", name: "Studio", id: 9)],
+            transport: { _ in AudioTransport.builtIn })
+        expect(decide(music) == .pause,
+               "a lone Music player is paused through the probe")
     }
 
     /// The dead-input rescue only fires on the exact evidence it needs, once.
