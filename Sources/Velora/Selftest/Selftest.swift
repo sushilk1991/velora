@@ -237,6 +237,11 @@ enum Selftest {
         testShellCopy()
         testAudioInputDeviceResolution()
         testMicrophoneCaptureDeviceSelection()
+        testMicrophoneResolveLadder()
+        testMicrophoneAlternateAndExclusions()
+        testMicrophoneRouteSettle()
+        testDeadInputRescue()
+        testMicrophonePreferencePersistence()
         testAudioCaptureRequiresPCM()
         testAudioCaptureQuickReleasePreservesFirstPCM()
         testAudioCaptureStopPreservesConvertedTail()
@@ -16009,37 +16014,285 @@ private final class RecordingOutputVolume: OutputVolumeControlling {
             "the name backstop does not over-match legitimate names")
     }
 
+    /// The four behaviours the old two-step policy promised, now stated
+    /// against the ladder itself: a chosen device stays independent of the
+    /// output route, an unplugged choice falls back, an empty uid never
+    /// matches, and the only connected input is usable with no default.
     private static func testMicrophoneCaptureDeviceSelection() {
+        func selected(
+            persistedUID: String?, availableUIDs: [String], defaultUID: String?
+        ) -> String? {
+            MicrophoneSelection.resolve(MicrophoneSelection.Ladder(
+                chosenUID: persistedUID,
+                systemDefaultUID: defaultUID,
+                connectedUIDs: availableUIDs))?.uid
+        }
         expect(
-            MicrophoneCaptureDevicePolicy.selectedUID(
+            selected(
                 persistedUID: "BuiltInMicrophoneDevice",
                 availableUIDs: ["AirPods:input", "BuiltInMicrophoneDevice"],
                 defaultUID: "AirPods:input") == "BuiltInMicrophoneDevice",
             "a chosen built-in microphone stays independent from AirPods system output")
         expect(
-            MicrophoneCaptureDevicePolicy.selectedUID(
+            selected(
                 persistedUID: "DisconnectedUSBMic",
                 availableUIDs: ["AirPods:input", "BuiltInMicrophoneDevice"],
                 defaultUID: "AirPods:input") == "AirPods:input",
             "a disconnected chosen microphone falls back to the current default")
         expect(
-            MicrophoneCaptureDevicePolicy.selectedUID(
+            selected(
                 persistedUID: nil,
                 availableUIDs: ["BuiltInMicrophoneDevice", "AirPods:input"],
                 defaultUID: "AirPods:input") == "AirPods:input",
             "no persisted mic follows the system default")
         expect(
-            MicrophoneCaptureDevicePolicy.selectedUID(
+            selected(
                 persistedUID: "",
                 availableUIDs: ["", "BuiltInMicrophoneDevice", "AirPods:input"],
                 defaultUID: "AirPods:input") == "AirPods:input",
             "an empty persisted UID follows the system default, never matches a device")
         expect(
-            MicrophoneCaptureDevicePolicy.selectedUID(
+            selected(
                 persistedUID: nil,
                 availableUIDs: ["BuiltInMicrophoneDevice"],
                 defaultUID: nil) == "BuiltInMicrophoneDevice",
             "microphone capture can use the only available input when no default is reported")
+    }
+
+    /// The resolve ladder: chosen → system default → last used → recent
+    /// choice → first connected, with exclusions honoured and a defined answer
+    /// when the user has excluded everything.
+    private static func testMicrophoneResolveLadder() {
+        func resolve(_ ladder: MicrophoneSelection.Ladder) -> MicrophoneResolution? {
+            MicrophoneSelection.resolve(ladder)
+        }
+
+        let all = ["builtin", "usb", "airpods"]
+        expect(
+            resolve(.init(
+                chosenUID: "usb", systemDefaultUID: "airpods",
+                connectedUIDs: all)) == MicrophoneResolution(uid: "usb", step: .chosen),
+            "a connected chosen microphone wins over the system default")
+        expect(
+            resolve(.init(
+                chosenUID: "unplugged", systemDefaultUID: "airpods",
+                connectedUIDs: all)) == MicrophoneResolution(uid: "airpods", step: .systemDefault),
+            "an unplugged choice falls back to the system default")
+        expect(
+            resolve(.init(
+                chosenUID: "unplugged", systemDefaultUID: "gone",
+                lastUsedUID: "usb", connectedUIDs: all)) == MicrophoneResolution(uid: "usb", step: .lastUsed),
+            "with no choice and no default, the last microphone that worked is used")
+        expect(
+            resolve(.init(
+                lastUsedUID: "gone", recentUIDs: ["gone", "airpods"],
+                connectedUIDs: all)) == MicrophoneResolution(uid: "airpods", step: .recentChoice),
+            "a previous explicit choice is preferred over the first connected device")
+        expect(
+            resolve(.init(connectedUIDs: all)) == MicrophoneResolution(uid: "builtin", step: .firstConnected),
+            "with nothing remembered, the first connected microphone is used")
+        expect(
+            resolve(.init(excludedUIDs: ["builtin"], connectedUIDs: all))
+                == MicrophoneResolution(uid: "usb", step: .firstConnected),
+            "an excluded microphone is never auto-selected")
+        expect(
+            resolve(.init(
+                chosenUID: "builtin", excludedUIDs: ["builtin"],
+                connectedUIDs: all)) == MicrophoneResolution(uid: "usb", step: .firstConnected),
+            "excluding the chosen microphone moves selection off it")
+        expect(
+            resolve(.init(
+                chosenUID: "usb", systemDefaultUID: "usb",
+                lastUsedUID: "airpods", excludedUIDs: ["usb"],
+                connectedUIDs: all)) == MicrophoneResolution(uid: "airpods", step: .lastUsed),
+            "exclusions are skipped step by step, not the whole ladder")
+        expect(
+            resolve(.init(
+                chosenUID: "usb",
+                excludedUIDs: ["builtin", "usb", "airpods"],
+                connectedUIDs: all)) == MicrophoneResolution(uid: "usb", step: .exclusionOverridden),
+            "excluding every microphone still records instead of failing silently")
+        expect(
+            resolve(.init(chosenUID: "", systemDefaultUID: "", connectedUIDs: ["", "usb"]))
+                == MicrophoneResolution(uid: "usb", step: .firstConnected),
+            "an empty uid is not a device identity and never matches")
+        expect(
+            MicrophoneSelection.resolve(.init(connectedUIDs: [])) == nil,
+            "no connected microphone resolves to nil rather than an empty uid")
+    }
+
+    /// The rescue device and the exclusion list's edges.
+    private static func testMicrophoneAlternateAndExclusions() {
+        let devices = [
+            AudioInputDevices.Device(
+                uid: "builtin", name: "MacBook Pro Microphone", id: 1, isBuiltIn: true),
+            AudioInputDevices.Device(
+                uid: "usb", name: "Studio Mic", id: 2, isBuiltIn: false),
+            AudioInputDevices.Device(
+                uid: "airpods", name: "AirPods Pro", id: 3, isBuiltIn: false,
+                isBluetooth: true),
+        ]
+        expect(
+            MicrophoneSelection.alternate(
+                to: "builtin", devices: devices,
+                systemDefaultUID: "airpods", excludedUIDs: []) == "airpods",
+            "the rescue prefers the system default when it is not the dead device")
+        expect(
+            MicrophoneSelection.alternate(
+                to: "usb", devices: devices,
+                systemDefaultUID: "usb", excludedUIDs: []) == "airpods",
+            "a dead device is never its own replacement, even when it is the default")
+        expect(
+            MicrophoneSelection.alternate(
+                to: "builtin", devices: devices,
+                systemDefaultUID: "gone", excludedUIDs: []) == "usb",
+            "with no usable default, an external microphone beats the built-in array")
+        expect(
+            MicrophoneSelection.alternate(
+                to: "builtin", devices: devices,
+                systemDefaultUID: nil, excludedUIDs: ["usb"]) == "airpods",
+            "an excluded microphone is never the rescue device")
+        expect(
+            MicrophoneSelection.alternate(
+                to: "builtin", devices: [devices[0]],
+                systemDefaultUID: nil, excludedUIDs: []) == nil,
+            "with only the dead built-in microphone connected there is nothing to switch to")
+
+        let defaults = UserDefaults(suiteName: "velora.selftest.mic.exclusions")!
+        defaults.removePersistentDomain(forName: "velora.selftest.mic.exclusions")
+        defaults.set(["", "  ", "usb", "usb"], forKey: "velora.excludedInputDeviceUIDs")
+        defaults.set(["a", "b", "c", "d", "e", "f", "g"], forKey: "velora.inputDeviceRecentUIDs")
+        let migrated = AppConfig.migratedLocalSettings(defaults: defaults)
+        expect(migrated.excludedInputDeviceUids == ["usb"],
+               "blank and duplicate exclusions are dropped when settings load")
+        expect(migrated.inputDeviceRecentUids == ["a", "b", "c", "d", "e"],
+               "the recent-choice list is capped on load")
+        defaults.removePersistentDomain(forName: "velora.selftest.mic.exclusions")
+    }
+
+    /// The settle window: Bluetooth and a just-changed route wait, a stable
+    /// wired route binds immediately, and the deadline always terminates.
+    private static func testMicrophoneRouteSettle() {
+        let now: TimeInterval = 1_000
+        expect(
+            !MicrophoneRouteSettle.plan(
+                isBluetooth: false, deviceListChangedAt: nil, now: now).waits,
+            "a stable wired microphone adds no settle delay at all")
+        expect(
+            !MicrophoneRouteSettle.plan(
+                isBluetooth: false, deviceListChangedAt: now - 30, now: now).waits,
+            "a device-list change half a minute ago is not a route in motion")
+        expect(
+            MicrophoneRouteSettle.plan(
+                isBluetooth: true, deviceListChangedAt: nil, now: now).waits,
+            "a Bluetooth microphone always gets the settle window")
+        expect(
+            MicrophoneRouteSettle.plan(
+                isBluetooth: false, deviceListChangedAt: now - 0.5, now: now).waits,
+            "a route that changed half a second ago is still moving")
+        expect(
+            MicrophoneRouteSettle.plan(
+                isBluetooth: false, deviceListChangedAt: now + 5, now: now).waits == false,
+            "a timestamp from the future cannot hold the start")
+
+        // A plan that does not wait binds on the first observation.
+        var immediate = MicrophoneRouteSettleState(
+            plan: .immediate, firstUID: "usb", at: now)
+        expect(immediate.observe("usb", at: now) == .bind("usb"),
+               "an immediate plan binds without a single poll")
+
+        let plan = MicrophoneRouteSettle.plan(
+            isBluetooth: true, deviceListChangedAt: nil, now: now)
+        var settling = MicrophoneRouteSettleState(plan: plan, firstUID: "builtin", at: now)
+        expect(settling.observe("builtin", at: now) == .keepWaiting,
+               "the first observation of a settling route waits one poll")
+        expect(settling.observe("builtin", at: now + 0.15) == .keepWaiting,
+               "a device that has not been stable long enough keeps waiting")
+        expect(settling.observe("builtin", at: now + 0.35) == .bind("builtin"),
+               "a device stable for the settle window is bound")
+
+        // The route moves: the stability clock restarts, the deadline still ends it.
+        var moving = MicrophoneRouteSettleState(plan: plan, firstUID: "builtin", at: now)
+        _ = moving.observe("builtin", at: now)
+        expect(moving.observe("airpods", at: now + 0.20) == .keepWaiting,
+               "a route change restarts the stability clock")
+        expect(moving.observe("airpods", at: now + 0.40) == .keepWaiting,
+               "two hundred milliseconds after the change is not yet stable")
+        expect(moving.observe("airpods", at: now + 0.55) == .bind("airpods"),
+               "the settled device is the one that gets bound")
+
+        var thrashing = MicrophoneRouteSettleState(plan: plan, firstUID: "a", at: now)
+        var verdicts: [MicrophoneRouteSettleState.Verdict] = []
+        for step in 0..<12 {
+            let uid = step % 2 == 0 ? "a" : "b"
+            verdicts.append(thrashing.observe(uid, at: now + Double(step) * 0.15))
+        }
+        // 0.15 s apart, so the first observation at or past the 1.2 s deadline
+        // is step 8. A device that never settles must not bind before then.
+        let binds = verdicts.enumerated().filter { _, verdict in
+            if case .bind = verdict { return true } else { return false }
+        }
+        expect(binds.first?.offset == 8,
+               "a route that never settles first binds at the deadline, not before")
+        // Step 8 is even, so the device current when the deadline expires is "a".
+        expect(binds.first.map { $0.element } == .bind("a"),
+               "the deadline binds the device that is current when it expires")
+    }
+
+    /// The dead-input rescue only fires on the exact evidence it needs, once.
+    private static func testDeadInputRescue() {
+        let viable = DeadInputRescue.Evidence(
+            deviceIsBuiltIn: true, lidClosed: true, silentSeconds: 1.2,
+            alternateUID: "usb", alreadyAttempted: false)
+        expect(DeadInputRescue.decide(viable) == .switchTo(uid: "usb"),
+               "a lid-closed built-in microphone with a second device switches")
+        var evidence = viable
+        evidence.deviceIsBuiltIn = false
+        expect(DeadInputRescue.decide(evidence) != .switchTo(uid: "usb"),
+               "a USB microphone that is silent is not a lid problem")
+        evidence = viable
+        evidence.lidClosed = false
+        expect(DeadInputRescue.decide(evidence) != .switchTo(uid: "usb"),
+               "an open lid keeps the current microphone")
+        evidence = viable
+        evidence.silentSeconds = 0.6
+        expect(DeadInputRescue.decide(evidence) != .switchTo(uid: "usb"),
+               "a pause shorter than the threshold is not a dead input")
+        evidence = viable
+        evidence.alternateUID = nil
+        expect(DeadInputRescue.decide(evidence) != .switchTo(uid: "usb"),
+               "with nothing else connected the take keeps its microphone")
+        evidence = viable
+        evidence.alternateUID = ""
+        expect(DeadInputRescue.decide(evidence) != .switchTo(uid: "usb"),
+               "an empty alternate uid is not a device")
+        evidence = viable
+        evidence.alreadyAttempted = true
+        expect(DeadInputRescue.decide(evidence) != .switchTo(uid: "usb"),
+               "a take switches at most once")
+        expect(DeadInputRescue.decide(viable, threshold: 2.0) != .switchTo(uid: "usb"),
+               "the threshold is honoured")
+    }
+
+    /// The three machine-local microphone preferences survive a reload and drop
+    /// junk, while a chosen microphone that is unplugged is not forgotten.
+    private static func testMicrophonePreferencePersistence() {
+        let suite = "velora.selftest.mic.preferences"
+        let defaults = UserDefaults(suiteName: suite)!
+        defaults.removePersistentDomain(forName: suite)
+        defaults.set("usb", forKey: "velora.inputDeviceUID")
+        defaults.set("airpods", forKey: "velora.inputDeviceLastUID")
+        let loaded = AppConfig.migratedLocalSettings(defaults: defaults)
+        expect(loaded.inputDeviceUid == "usb"
+               && loaded.inputDeviceLastUid == "airpods",
+               "the chosen and last-used microphones round-trip")
+        expect(loaded.inputDeviceRecentUids.isEmpty
+               && loaded.excludedInputDeviceUids.isEmpty,
+               "absent microphone lists load as empty rather than nil")
+        defaults.set(" \n", forKey: "velora.inputDeviceLastUID")
+        expect(AppConfig.migratedLocalSettings(defaults: defaults).inputDeviceLastUid == nil,
+               "a blank last-used uid is discarded")
+        defaults.removePersistentDomain(forName: suite)
     }
 
     private static func testMeetingSystemAudioFrameMath() {

@@ -412,6 +412,9 @@ final class DictationController: NSObject {
     private let capture: AudioCapture
     /// The session whose audio `capture.lastTakeLevel` measures.
     private var takeLevelSession: String?
+    /// One dead-input rescue per take: a second switch would drop audio the HUD
+    /// is already showing as being recorded.
+    private var deadInputRescueAttempted = false
     private let mediaPlayback: MediaPlaybackCoordinator
     private let outputDucking: OutputDuckingController
     private let contextTracker: AppContextTracker
@@ -2585,6 +2588,10 @@ final class DictationController: NSObject {
         let requestedSession = sessionID
         let recordingLimit = recordingLimit()
         takeLevelSession = requestedSession
+        deadInputRescueAttempted = false
+        capture.onExactZeroRun = { [weak self] seconds in
+            self?.rescueDeadInput(seconds: seconds)
+        }
         capture.start(
             onChunk: { data in client.send(audio: data) },
             onLevel: { [weak self] bands in self?.hud.model.levels.push(bands) },
@@ -3339,6 +3346,52 @@ final class DictationController: NSObject {
         editTimer = nil
         editDeadline.clear()
         showError(message, retryIntent: retryIntent)
+    }
+
+    /// A take from a lid-closed built-in microphone records exact digital
+    /// silence: the device is hardware-disconnected, not quiet. Switch to
+    /// another connected microphone for the rest of the same take, once.
+    ///
+    /// Capture can see the silence but not the lid, so the decision lives in
+    /// `DeadInputRescue` and takes the context only this layer has.
+    private func rescueDeadInput(seconds: TimeInterval) {
+        // Only a take that is still recording can be rescued: once the user has
+        // stopped, the audio is already on its way to the engine.
+        guard isRecording, let device = capture.device else { return }
+        let devices = AudioInputDevices.displayList()
+        let alternate = MicrophoneSelection.alternate(
+            to: device.uid,
+            devices: devices,
+            systemDefaultUID: AudioInputDevices.systemDefaultUID(),
+            excludedUIDs: config.excludedInputDeviceUIDs)
+        let decision = DeadInputRescue.decide(DeadInputRescue.Evidence(
+            deviceIsBuiltIn: device.isBuiltIn,
+            lidClosed: LidState.isClosed() == true,
+            silentSeconds: seconds,
+            alternateUID: alternate,
+            alreadyAttempted: deadInputRescueAttempted))
+        switch decision {
+        case .keep(let reason):
+            veloraLog(
+                "Velora: dead-input check kept \(device.name) after "
+                    + String(format: "%.1f", seconds) + "s of silence — " + reason)
+        case .switchTo(let uid):
+            deadInputRescueAttempted = true
+            let name = devices.first(where: { $0.uid == uid })?.name ?? "another microphone"
+            veloraLog(
+                "Velora: dead-input rescue — \(device.name) delivered "
+                    + String(format: "%.1f", seconds) + "s of digital silence; "
+                    + "switching to \(name)")
+            capture.replaceInput(to: uid) { [weak self] switched in
+                guard let self else { return }
+                guard switched else {
+                    self.showNotice(symbol: "mic.slash", message: "Microphone is silent")
+                    return
+                }
+                self.showNotice(
+                    symbol: "mic.and.signal.meter", message: "Switched to \(name)")
+            }
+        }
     }
 
     /// HUD copy for an empty final of the current take, from what its mic

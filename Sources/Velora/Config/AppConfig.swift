@@ -284,6 +284,9 @@ final class AppConfig {
         static let meetingAudioRetentionDays = "velora.meetingAudioRetentionDays"
         static let meetingDiarization = "velora.meetingDiarization"
         static let inputDeviceUID = "velora.inputDeviceUID"
+        static let inputDeviceLastUID = "velora.inputDeviceLastUID"
+        static let inputDeviceRecentUIDs = "velora.inputDeviceRecentUIDs"
+        static let excludedInputDeviceUIDs = "velora.excludedInputDeviceUIDs"
         static let editHotkey = "velora.editHotkey.v1"
         static let voiceEdit = "velora.voiceEdit"
         static let updateChecks = "velora.updateChecks"
@@ -588,13 +591,34 @@ final class AppConfig {
             else { return nil }
             return raw
         }
-        let inputDevice = defaults.string(forKey: Key.inputDeviceUID)
-        let validInputDevice = inputDevice.flatMap { value in
-            !value.isEmpty && value.count <= 1024
-                && value.unicodeScalars.allSatisfy({
-                    !CharacterSet.controlCharacters.contains($0)
-                }) ? value : nil
+        func validUID(_ raw: String?) -> String? {
+            guard let raw else { return nil }
+            let value = raw.trimmingCharacters(in: .whitespacesAndNewlines)
+            guard !value.isEmpty, value.count <= 1_024,
+                  value.unicodeScalars.allSatisfy({
+                      !CharacterSet.controlCharacters.contains($0)
+                  })
+            else { return nil }
+            return value
         }
+        func validUIDList(_ raw: [String]?, limit: Int) -> [String] {
+            var seen: Set<String> = []
+            var list: [String] = []
+            for candidate in raw ?? [] {
+                guard let uid = validUID(candidate), !seen.contains(uid) else { continue }
+                seen.insert(uid)
+                list.append(uid)
+                if list.count == limit { break }
+            }
+            return list
+        }
+        let validInputDevice = validUID(defaults.string(forKey: Key.inputDeviceUID))
+        let inputDeviceLast = validUID(defaults.string(forKey: Key.inputDeviceLastUID))
+        let inputDeviceRecent = validUIDList(
+            defaults.stringArray(forKey: Key.inputDeviceRecentUIDs),
+            limit: MicrophoneSelection.recentLimit)
+        let excludedInputDevices = validUIDList(
+            defaults.stringArray(forKey: Key.excludedInputDeviceUIDs), limit: 64)
         let lastUpdateCheck = defaults.double(forKey: Key.lastUpdateCheckAt)
         let deferredUpdateUntil = defaults.double(forKey: Key.deferredUpdateUntil)
         let cachedReleasePage = defaults.string(forKey: Key.cachedReleasePage)
@@ -632,6 +656,9 @@ final class AppConfig {
         return .init(
             onboardingComplete: defaults.bool(forKey: Key.onboardingComplete),
             inputDeviceUid: validInputDevice,
+            inputDeviceLastUid: inputDeviceLast,
+            inputDeviceRecentUids: inputDeviceRecent,
+            excludedInputDeviceUids: excludedInputDevices,
             localAgentAccess: defaults.bool(forKey: Key.localAgentAccess),
             meetingCalendar: defaults.bool(forKey: Key.meetingCalendar),
             launchAtLogin: defaults.bool(forKey: Key.launchAtLogin),
@@ -762,6 +789,21 @@ final class AppConfig {
             defaults.set(uid, forKey: Key.inputDeviceUID)
         } else {
             defaults.removeObject(forKey: Key.inputDeviceUID)
+        }
+        if let last = local.inputDeviceLastUid {
+            defaults.set(last, forKey: Key.inputDeviceLastUID)
+        } else {
+            defaults.removeObject(forKey: Key.inputDeviceLastUID)
+        }
+        if local.inputDeviceRecentUids.isEmpty {
+            defaults.removeObject(forKey: Key.inputDeviceRecentUIDs)
+        } else {
+            defaults.set(local.inputDeviceRecentUids, forKey: Key.inputDeviceRecentUIDs)
+        }
+        if local.excludedInputDeviceUids.isEmpty {
+            defaults.removeObject(forKey: Key.excludedInputDeviceUIDs)
+        } else {
+            defaults.set(local.excludedInputDeviceUids, forKey: Key.excludedInputDeviceUIDs)
         }
         defaults.set(local.localAgentAccess, forKey: Key.localAgentAccess)
         defaults.set(local.meetingCalendar, forKey: Key.meetingCalendar)
@@ -1047,10 +1089,56 @@ final class AppConfig {
 
     /// UID of the microphone to record from; nil = follow the system default.
     /// Kept while the device is unplugged so the choice wins again on
-    /// reconnect (see MicrophoneCaptureDevicePolicy).
+    /// reconnect (see MicrophoneSelection). Every explicit pick also joins the
+    /// recent-choice list the resolve ladder falls back to.
     var inputDeviceUID: String? {
         get { readLocalSetting(\.inputDeviceUid) }
-        set { updateLocalSettings { $0.inputDeviceUid = newValue } }
+        set {
+            updateLocalSettings { local in
+                local.inputDeviceUid = newValue
+                guard let uid = newValue.flatMap(MicrophoneSelection.Ladder.identity)
+                else { return }
+                local.inputDeviceRecentUids =
+                    ([uid] + local.inputDeviceRecentUids.filter { $0 != uid })
+                        .prefix(MicrophoneSelection.recentLimit)
+                        .map { $0 }
+            }
+        }
+    }
+
+    /// The microphone that actually delivered audio for the last take. Read by
+    /// the resolve ladder only when the chosen device and the system default
+    /// are both unusable.
+    var inputDeviceLastUID: String? {
+        get { readLocalSetting(\.inputDeviceLastUid) }
+        set { updateLocalSettings { $0.inputDeviceLastUid = newValue } }
+    }
+
+    /// Microphones the user picked before, most recent first.
+    var recentInputDeviceUIDs: [String] {
+        readLocalSetting(\.inputDeviceRecentUids)
+    }
+
+    /// Microphones the resolve ladder must never select automatically.
+    var excludedInputDeviceUIDs: [String] {
+        get { readLocalSetting(\.excludedInputDeviceUids) }
+        set {
+            updateLocalSettings { local in
+                var seen: Set<String> = []
+                local.excludedInputDeviceUids = newValue
+                    .compactMap(MicrophoneSelection.Ladder.identity)
+                    .filter { seen.insert($0).inserted }
+            }
+        }
+    }
+
+    func excludeInputDevice(_ uid: String) {
+        guard let uid = MicrophoneSelection.Ladder.identity(uid) else { return }
+        excludedInputDeviceUIDs = excludedInputDeviceUIDs + [uid]
+    }
+
+    func includeInputDevice(_ uid: String) {
+        excludedInputDeviceUIDs = excludedInputDeviceUIDs.filter { $0 != uid }
     }
 
     /// "system" | "light" | "dark"

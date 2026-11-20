@@ -11,6 +11,24 @@ protocol MicrophoneStreamCapturing: AnyObject {
         completion: @escaping (Result<Void, Error>) -> Void
     )
     func stop(completion: @escaping () -> Void)
+    /// The device the live session is open on, when the source knows.
+    var currentDevice: MicrophoneDevice? { get }
+    /// Replace the input without ending the take.
+    func switchInput(
+        to uid: String,
+        completion: @escaping (Result<MicrophoneDevice, Error>) -> Void
+    )
+}
+
+extension MicrophoneStreamCapturing {
+    /// Test sources have no device identity and cannot switch inputs.
+    var currentDevice: MicrophoneDevice? { nil }
+    func switchInput(
+        to uid: String,
+        completion: @escaping (Result<MicrophoneDevice, Error>) -> Void
+    ) {
+        completion(.failure(MicrophoneStreamCapture.CaptureError.noDevice))
+    }
 }
 
 extension MicrophoneStreamCapture: MicrophoneStreamCapturing {}
@@ -74,6 +92,14 @@ final class AudioCapture {
     private var limitHandler: (() -> Void)?
     private var takePeak: Float = 0
     private var takeLoudestChunkRMS: Float = 0
+    /// Consecutive seconds of exact digital silence in this take. A lid-closed
+    /// built-in microphone, or a muted interface, delivers zeros rather than a
+    /// quiet room; only this counter can tell the caller that.
+    private var zeroRunSeconds: TimeInterval = 0
+    private var zeroRunReported = false
+    /// Whether this take has delivered any non-silent audio. A pause after
+    /// speech is never a dead input, so the rescue is leading-silence only.
+    private var heardSound = false
 
     /// FFT window fed the spectrum analyzer; a ~1024-sample rolling buffer with
     /// a short hop so the HUD updates ~30x/s (lively) instead of ~10x/s.
@@ -135,6 +161,9 @@ final class AudioCapture {
             limitHandler = onLimit
             takePeak = 0
             takeLoudestChunkRMS = 0
+            zeroRunSeconds = 0
+            zeroRunReported = false
+            heardSound = false
         }
         source.start(
             persistedUID: AppConfig.shared.inputDeviceUID,
@@ -221,6 +250,28 @@ final class AudioCapture {
                 return nil
             }
             return CaptureTakeLevel(peak: takePeak, loudestChunkRMS: takeLoudestChunkRMS)
+        }
+    }
+
+    /// Called on the main queue once per take, the first time exact-zero audio
+    /// lasts `DeadInputRescue.silenceThreshold`. The owner decides what to do:
+    /// capture can see silence, not a lid.
+    var onExactZeroRun: ((TimeInterval) -> Void)?
+    /// The device the running session is open on, when the source reports one.
+    var device: MicrophoneDevice? { source.currentDevice }
+
+    /// Swaps the input for the rest of this take. Buffers keep arriving on the
+    /// same callbacks, so the take's chunk grid and identity do not change.
+    func replaceInput(to uid: String, completion: @escaping (Bool) -> Void) {
+        guard isRunning else {
+            completion(false)
+            return
+        }
+        source.switchInput(to: uid) { result in
+            switch result {
+            case .success: completion(true)
+            case .failure: completion(false)
+            }
         }
     }
 
@@ -341,8 +392,29 @@ final class AudioCapture {
             let power = chunk.reduce(Float(0)) { $0 + $1 * $1 }
             takeLoudestChunkRMS = max(
                 takeLoudestChunkRMS, (power / Float(chunk.count)).squareRoot())
+            // Same digital-silence line the meeting capture uses, so a silent
+            // dictation and a silent meeting track agree about what "nothing"
+            // means.
+            let chunkPeak = chunk.reduce(Float(0)) { max($0, abs($1)) }
+            if MeetingPCMLevel.isSilent(chunkPeak) {
+                zeroRunSeconds += Double(chunk.count) / Self.sampleRate
+            } else {
+                zeroRunSeconds = 0
+                heardSound = true
+            }
             let data = chunk.withUnsafeBufferPointer { Data(buffer: $0) }
             chunkHandler?(data)
+        }
+
+        // Leading silence only: once the take has carried sound, a pause is a
+        // pause, not a hardware-disconnected microphone.
+        if !zeroRunReported, !heardSound,
+           zeroRunSeconds >= DeadInputRescue.silenceThreshold {
+            zeroRunReported = true
+            let seconds = zeroRunSeconds
+            DispatchQueue.main.async { [weak self] in
+                self?.onExactZeroRun?(seconds)
+            }
         }
 
         // Send a partial final chunk when the limit falls between 100 ms

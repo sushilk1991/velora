@@ -20,6 +20,13 @@ enum AudioInputDevices {
         let uid: String
         let name: String
         let id: AudioDeviceID
+        /// True for the Mac's own microphone array. Used when rescuing a dead
+        /// input: a lid-closed built-in mic is the one that fails, so it must
+        /// never be the device we switch to.
+        var isBuiltIn: Bool = false
+        /// True for Bluetooth transports, where opening the microphone moves
+        /// the headset onto its low-bandwidth two-way route.
+        var isBluetooth: Bool = false
     }
 
     /// Snapshot of currently connected devices that can capture audio (at least
@@ -30,8 +37,25 @@ enum AudioInputDevices {
                   let name = stringProperty(id, selector: kAudioObjectPropertyName),
                   !isHiddenDevice(id, name: name)
             else { return nil }
-            return Device(uid: uid, name: name, id: id)
+            let transport = transportType(id)
+            return Device(
+                uid: uid, name: name, id: id,
+                isBuiltIn: AudioTransport.isBuiltIn(transport),
+                isBluetooth: AudioTransport.isBluetooth(transport))
         }
+    }
+
+    /// Core Audio transport, or 0 when the device reports none.
+    private static func transportType(_ id: AudioDeviceID) -> UInt32 {
+        var address = AudioObjectPropertyAddress(
+            mSelector: kAudioDevicePropertyTransportType,
+            mScope: kAudioObjectPropertyScopeGlobal,
+            mElement: kAudioObjectPropertyElementMain)
+        var value: UInt32 = 0
+        var size = UInt32(MemoryLayout<UInt32>.size)
+        guard AudioObjectGetPropertyData(id, &address, 0, nil, &size, &value) == noErr
+        else { return 0 }
+        return value
     }
 
     /// Clears a persisted mic choice that points at a device we now hide (a
@@ -115,6 +139,22 @@ enum AudioInputDevices {
         return flag.boolValue
     }
 
+    /// UID of the system's current default input device, or nil when the HAL
+    /// reports none. The resolve ladder asks this before falling back to a
+    /// remembered device.
+    static func systemDefaultUID() -> String? {
+        var id = AudioDeviceID(kAudioObjectUnknown)
+        var size = UInt32(MemoryLayout<AudioDeviceID>.size)
+        var address = AudioObjectPropertyAddress(
+            mSelector: kAudioHardwarePropertyDefaultInputDevice,
+            mScope: kAudioObjectPropertyScopeGlobal,
+            mElement: kAudioObjectPropertyElementMain)
+        guard AudioObjectGetPropertyData(
+            AudioObjectID(kAudioObjectSystemObject), &address, 0, nil, &size, &id
+        ) == noErr, id != kAudioObjectUnknown else { return nil }
+        return stringProperty(id, selector: kAudioDevicePropertyDeviceUID)
+    }
+
     /// `current()` in a stable order for menus and pickers.
     static func displayList() -> [Device] {
         current().sorted { $0.name.localizedCaseInsensitiveCompare($1.name) == .orderedAscending }
@@ -157,7 +197,7 @@ enum AudioInputDevices {
         return buffers.reduce(0) { $0 + Int($1.mNumberChannels) }
     }
 
-    private static func stringProperty(
+    static func stringProperty(
         _ id: AudioDeviceID, selector: AudioObjectPropertySelector
     ) -> String? {
         var address = AudioObjectPropertyAddress(
