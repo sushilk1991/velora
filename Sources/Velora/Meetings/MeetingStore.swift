@@ -122,6 +122,9 @@ struct MeetingRecord: Identifiable, Equatable {
     var micPath: String?
     var systemPath: String?
     var error: String?
+    /// Why the recording ended (user stop, detected call end, …); nil for
+    /// rows written before end reasons were recorded.
+    var endReason: MeetingEndReason? = nil
     var micIssue: MeetingTrackIssue?
     var systemIssue: MeetingTrackIssue?
     var segments: [MeetingSegment] = []
@@ -337,7 +340,8 @@ final class MeetingStore {
                 notes_partial INTEGER NOT NULL DEFAULT 0,
                 notes_auto_retried INTEGER NOT NULL DEFAULT 0,
                 imported INTEGER NOT NULL DEFAULT 0,
-                imported_duration_ms INTEGER
+                imported_duration_ms INTEGER,
+                end_reason TEXT
             );
             CREATE TABLE IF NOT EXISTS meeting_segments (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -394,6 +398,9 @@ final class MeetingStore {
             "chapters TEXT NOT NULL DEFAULT ''",
             "personal_notes TEXT NOT NULL DEFAULT ''",
             "personal_notes_revision INTEGER NOT NULL DEFAULT 0",
+            // V-24: why the recording ended. Idempotent — duplicate-column
+            // on already-migrated databases is ignored like the rest.
+            "end_reason TEXT",
         ] {
             sqlite3_exec(db, "ALTER TABLE meetings ADD COLUMN \(column);", nil, nil, nil)
         }
@@ -520,6 +527,14 @@ final class MeetingStore {
             }
         }
         sqlite3_finalize(stmt)
+        // Crash checkpoints (V-25): a leftover resume.json is the durable
+        // record of how much audio was flushed before the interruption.
+        // Gate on leftover markers so intact restores without any sidecar
+        // keep the exact pre-sidecar recovery behavior; a marker left
+        // without a recording row is an orphan the sweep below retires.
+        let pendingResumeIDs = Set(
+            MeetingResumeSidecarStore.pendingSidecars(in: filesRoot)
+                .map(\.meetingID))
 
         for (id, mic, system) in recoverable {
             func recoveredTrack(_ relative: String?) -> String? {
@@ -553,13 +568,23 @@ final class MeetingStore {
                 }
                 continue
             }
+            // A checkpointed sidecar repairs ended_at from flushed frames;
+            // without one, fall back to launch time as before. The sidecar
+            // is consumed either way so a second launch cannot re-recover
+            // (or double-merge) the same crash.
+            let sidecar = pendingResumeIDs.contains(id)
+                ? meetingDirectoryURL(id: id).flatMap {
+                    MeetingResumeSidecarStore.read(from: $0)
+                } : nil
             var update: OpaquePointer?
             if sqlite3_prepare_v2(db, """
                 UPDATE meetings SET status = ?, ended_at = ?, error = ?,
                     mic_path = ?, system_path = ? WHERE id = ?;
                 """, -1, &update, nil) == SQLITE_OK {
                 bindText(update, 1, MeetingStatus.failed.rawValue)
-                sqlite3_bind_double(update, 2, Date().timeIntervalSince1970)
+                sqlite3_bind_double(
+                    update, 2,
+                    (sidecar?.repairedEndedAt ?? Date()).timeIntervalSince1970)
                 bindText(update, 3, "Recording was interrupted; recovered local audio can be retried")
                 bindText(update, 4, recoveredMic)
                 bindText(update, 5, recoveredSystem)
@@ -567,6 +592,9 @@ final class MeetingStore {
                 sqlite3_step(update)
             }
             sqlite3_finalize(update)
+            if sidecar != nil, let directory = meetingDirectoryURL(id: id) {
+                MeetingResumeSidecarStore.remove(from: directory)
+            }
         }
     }
 
@@ -591,8 +619,8 @@ final class MeetingStore {
                 INSERT OR REPLACE INTO meetings
                     (id, title, started_at, ended_at, source_app, calendar_event_id,
                      status, summary, decisions, action_items, mic_path, system_path, error,
-                     imported, imported_duration_ms)
-                VALUES (?, ?, ?, ?, ?, ?, ?, '', '', '', ?, ?, NULL, ?, ?);
+                     imported, imported_duration_ms, end_reason)
+                VALUES (?, ?, ?, ?, ?, ?, ?, '', '', '', ?, ?, NULL, ?, ?, ?);
                 """
             var stmt: OpaquePointer?
             guard sqlite3_prepare_v2(db, sql, -1, &stmt, nil) == SQLITE_OK else { return }
@@ -610,6 +638,7 @@ final class MeetingStore {
             if let duration = record.importedDurationMs {
                 sqlite3_bind_int64(stmt, 11, Int64(max(0, duration)))
             } else { sqlite3_bind_null(stmt, 11) }
+            bindText(stmt, 12, record.endReason?.rawValue)
             if sqlite3_step(stmt) != SQLITE_DONE {
                 NSLog("Velora: meeting insert failed: %@", lastError)
             }
@@ -889,6 +918,26 @@ final class MeetingStore {
     func markReprocessFailed(meetingID: String, error: String) -> Bool {
         queue.sync { [self] in
             failOnQueue(meetingID: meetingID, stage: .recreate, error: error)
+        }
+    }
+
+    /// Records why a recording ended without touching its status or content,
+    /// so the reason can land even when the row already left `recording`
+    /// (or before `insertProcessing` rewrites it at finalize).
+    @discardableResult
+    func setEndReason(meetingID: String, reason: MeetingEndReason) -> Bool {
+        queue.sync { [self] in
+            guard db != nil else { return false }
+            var stmt: OpaquePointer?
+            guard sqlite3_prepare_v2(
+                db, "UPDATE meetings SET end_reason = ? WHERE id = ?;",
+                -1, &stmt, nil) == SQLITE_OK else { return false }
+            defer { sqlite3_finalize(stmt) }
+            bindText(stmt, 1, reason.rawValue)
+            bindText(stmt, 2, meetingID)
+            let done = sqlite3_step(stmt) == SQLITE_DONE
+            if done { protectDatabaseFiles() }
+            return done
         }
     }
 
@@ -1695,7 +1744,8 @@ final class MeetingStore {
             SELECT id, title, started_at, ended_at, source_app, calendar_event_id,
                    status, summary, decisions, action_items, mic_path, system_path, error,
                    mic_issue, system_issue, notes_partial, imported, imported_duration_ms,
-                   transcript_revision, personal_notes, personal_notes_revision, chapters
+                   transcript_revision, personal_notes, personal_notes_revision, chapters,
+                   end_reason
             FROM meetings \(whereClause) ORDER BY started_at DESC LIMIT ?;
             """
         var stmt: OpaquePointer?
@@ -1727,6 +1777,7 @@ final class MeetingStore {
                 micPath: columnText(stmt, 10),
                 systemPath: columnText(stmt, 11),
                 error: columnText(stmt, 12),
+                endReason: columnText(stmt, 22).flatMap(MeetingEndReason.init(rawValue:)),
                 micIssue: Self.issue(from: columnText(stmt, 13)),
                 systemIssue: Self.issue(from: columnText(stmt, 14)),
                 segments: includeSegments ? segmentsOnQueue(meetingID: id) : [],

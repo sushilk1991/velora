@@ -175,11 +175,40 @@ final class MeetingAudioCapture {
     private var systemAudioFailed = false
     private var microphoneWriteFailed = false
     private var stopping = false
+    // System-audio watchdog (V-23): supervised from the main queue timer
+    // and fed frames from the writer queue, hence the lock. Mic capture
+    // never touches any of this — a dead tap restarts beside it.
+    private let watchdogLock = NSLock()
+    private var systemWatchdog = SystemAudioWatchdog()
+    private var watchdogTimer: Timer?
+    private var restartingSystemAudio = false
+    /// Take segments in order: them.caf first, then them.segN.caf per
+    /// watchdog restart. Merged back into them.caf at stop when > 1.
+    private var systemSegmentURLs: [URL] = []
+    // Resume sidecar (V-25): frame counters are written on the mic sample
+    // queue and the system writer queue, read on main every ~10 s.
+    private let frameCounterLock = NSLock()
+    private var micFramesWritten: Int64 = 0
+    private var systemFramesWritten: Int64 = 0
+    private var micSampleRate: Double = 0
+    private var sidecarTimer: Timer?
+    private var sidecarTitle = "Meeting"
+    private var sidecarEndReason: MeetingEndReason?
+
+    /// Records why capture is ending so the last sidecar checkpoint (and
+    /// any crash recovery after it) can name the reason.
+    func noteEndReason(_ reason: MeetingEndReason) {
+        sidecarEndReason = reason
+    }
 
     /// Failure callbacks are delivered once on the main queue. A stream can
     /// fail after startup (device removal, permission revocation, disk full),
     /// and that must remain visible for the whole meeting.
     var onSystemAudioFailure: ((String) -> Void)?
+    /// System-audio watchdog transitions (restarting / reconnected / lost),
+    /// delivered on the main queue. `.lost` is also reported through
+    /// `onSystemAudioFailure`; reconnects only travel this path.
+    var onSystemAudioStatus: ((SystemAudioWatchdog.State) -> Void)?
     var onMicrophoneFailure: ((String) -> Void)?
     /// Reports the microphone recording only exact zeros for
     /// `MeetingMicrophoneLevelWatch.silentAlertSeconds`, and sound arriving
@@ -193,6 +222,7 @@ final class MeetingAudioCapture {
 
     func start(
         meetingID: String,
+        title: String = "Meeting",
         livePreview: Bool = false,
         completion: @escaping (Result<MeetingCaptureStart, MeetingCaptureError>) -> Void
     ) {
@@ -226,6 +256,18 @@ final class MeetingAudioCapture {
         self.systemURL = systemURL
         self.meetingID = meetingID
         self.startupCompletion = completion
+        sidecarTitle = title
+        sidecarEndReason = nil
+        systemSegmentURLs = [systemURL]
+        restartingSystemAudio = false
+        watchdogLock.lock()
+        systemWatchdog.reset()
+        watchdogLock.unlock()
+        frameCounterLock.lock()
+        micFramesWritten = 0
+        systemFramesWritten = 0
+        micSampleRate = 0
+        frameCounterLock.unlock()
         startupSystemAudio = false
         startupWarning = nil
         startupMicrophoneSilent = false
@@ -305,6 +347,8 @@ final class MeetingAudioCapture {
         let system = systemURL
         startupTimeout?.cancel()
         startupTimeout = nil
+        stopWatchdogTimer()
+        stopSidecarTimer()
         markStopping()
         micCapture.stop { [weak self] in
             guard let self else { completion(nil); return }
@@ -312,35 +356,56 @@ final class MeetingAudioCapture {
             self.liveMicrophone?.finish()
             self.liveMicrophone = nil
             self.stopSystemAudio { _ in
-                let hasSystem = Self.keepsSystemTrack(at: system)
-
-                self.meetingID = nil
-                self.startedAt = nil
-                self.micURL = nil
-                self.systemURL = nil
-                self.readiness = nil
-                self.microphoneLevel = nil
-                self.startupCompletion = nil
-                self.startupSystemAudio = false
-                self.startupWarning = nil
-                let directory = AppConfig.meetingsDirectory
-                    .appendingPathComponent(meetingID, isDirectory: true)
-                if cancelled {
-                    try? FileManager.default.removeItem(at: directory)
-                    completion(nil)
-                    return
+                let segments = self.systemSegmentURLs
+                func finishStop() {
+                    let hasSystem = Self.keepsSystemTrack(at: system)
+                    self.meetingID = nil
+                    self.startedAt = nil
+                    self.micURL = nil
+                    self.systemURL = nil
+                    self.systemSegmentURLs = []
+                    self.readiness = nil
+                    self.microphoneLevel = nil
+                    self.startupCompletion = nil
+                    self.startupSystemAudio = false
+                    self.startupWarning = nil
+                    let directory = AppConfig.meetingsDirectory
+                        .appendingPathComponent(meetingID, isDirectory: true)
+                    // Normal stop/discard: the crash marker is removed so
+                    // the next launch does not "recover" a finished meeting.
+                    MeetingResumeSidecarStore.remove(from: directory)
+                    if cancelled {
+                        try? FileManager.default.removeItem(at: directory)
+                        completion(nil)
+                        return
+                    }
+                    if !hasSystem, let system { try? FileManager.default.removeItem(at: system) }
+                    if let mic { try? FileManager.default.setAttributes(
+                        [.posixPermissions: 0o600], ofItemAtPath: mic.path) }
+                    if hasSystem, let system { try? FileManager.default.setAttributes(
+                        [.posixPermissions: 0o600], ofItemAtPath: system.path) }
+                    completion(MeetingCaptureFiles(
+                        startedAt: startedAt, endedAt: Date(),
+                        micRelativePath: FileManager.default.fileExists(atPath: mic?.path ?? "")
+                            ? "\(meetingID)/me.caf" : nil,
+                        systemRelativePath: hasSystem
+                            ? MeetingSystemAudioPolicy.relativePath(meetingID: meetingID) : nil))
                 }
-                if !hasSystem, let system { try? FileManager.default.removeItem(at: system) }
-                if let mic { try? FileManager.default.setAttributes(
-                    [.posixPermissions: 0o600], ofItemAtPath: mic.path) }
-                if hasSystem, let system { try? FileManager.default.setAttributes(
-                    [.posixPermissions: 0o600], ofItemAtPath: system.path) }
-                completion(MeetingCaptureFiles(
-                    startedAt: startedAt, endedAt: Date(),
-                    micRelativePath: FileManager.default.fileExists(atPath: mic?.path ?? "")
-                        ? "\(meetingID)/me.caf" : nil,
-                    systemRelativePath: hasSystem
-                        ? MeetingSystemAudioPolicy.relativePath(meetingID: meetingID) : nil))
+                // Watchdog restarts wrote extra take segments (V-23): fold
+                // them back into them.caf off-main so the processor sees
+                // one continuous track. A failed merge keeps segment 0.
+                if segments.count > 1, let system {
+                    DispatchQueue.global(qos: .userInitiated).async {
+                        if Self.mergeAudioSegments(segments, into: system) {
+                            for segment in segments.dropFirst() {
+                                try? FileManager.default.removeItem(at: segment)
+                            }
+                        }
+                        DispatchQueue.main.async { finishStop() }
+                    }
+                } else {
+                    finishStop()
+                }
             }
         }
     }
@@ -363,6 +428,8 @@ final class MeetingAudioCapture {
         }
         let capture = CoreAudioSystemAudioCapture()
         capture.onFrames = { [weak self] frames in
+            self?.addSystemFrames(frames)
+            self?.watchdogRecordFrame()
             guard readiness.recordSystemAudio(frames: frames) else { return }
             DispatchQueue.main.async { self?.finishStartupIfReady() }
         }
@@ -416,6 +483,14 @@ final class MeetingAudioCapture {
         let warning = [
             startupWarning, microphoneSilent ? Self.silentMicrophoneWarning : nil,
         ].compactMap { $0 }.joined(separator: " ")
+        if startupSystemAudio && !didSystemAudioFail {
+            watchdogLock.lock()
+            systemWatchdog.reset(at: date)
+            watchdogLock.unlock()
+            startWatchdogTimer()
+        }
+        startSidecarTimer()
+        writeSidecarCheckpoint()
         completion(.success(MeetingCaptureStart(
             startedAt: date,
             systemAudio: startupSystemAudio && !didSystemAudioFail,
@@ -491,7 +566,17 @@ final class MeetingAudioCapture {
                         userInfo: [NSLocalizedDescriptionKey: message]))
                     if readiness.continueWithoutSystemAudio() { self.finishStartupIfReady() }
                 }
+            } else if message.localizedCaseInsensitiveContains("stopped arriving") {
+                // A stall is exactly what the watchdog restarts (V-23): the
+                // tap device is alive but silent. Mic capture is untouched.
+                self.watchdogLock.lock()
+                let action = self.systemWatchdog.handleStall(at: Date())
+                self.watchdogLock.unlock()
+                self.applyWatchdogAction(action, stallMessage: message)
             } else {
+                self.watchdogLock.lock()
+                self.systemWatchdog.markLost()
+                self.watchdogLock.unlock()
                 self.reportSystemAudioFailure(message)
                 // A terminal writer/device failure cannot recover in-place.
                 // Tear the tap down now instead of invoking a failing callback
@@ -505,6 +590,8 @@ final class MeetingAudioCapture {
         dispatchPrecondition(condition: .onQueue(.main))
         startupTimeout?.cancel()
         startupTimeout = nil
+        stopWatchdogTimer()
+        stopSidecarTimer()
         markStopping()
         // Surface the startup failure immediately. Hardware teardown stays
         // serialized off-main and `isCapturing` remains true until it finishes,
@@ -595,6 +682,7 @@ final class MeetingAudioCapture {
             try micFile?.write(from: buffer)
             livePreview?.append(buffer)
             let frames = Int(buffer.frameLength)
+            addMicFrames(frames, sampleRate: buffer.format.sampleRate)
             let peak = MeetingPCMLevel.peak(buffer)
             if readiness.recordMicrophone(frames: frames, peak: peak) {
                 DispatchQueue.main.async { [weak self] in self?.finishStartupIfReady() }
@@ -715,6 +803,231 @@ final class MeetingAudioCapture {
                 return
             }
             self.onMicrophoneFailure?(message)
+        }
+    }
+
+    // MARK: - System-audio watchdog supervision (V-23)
+
+    private func addSystemFrames(_ frames: Int) {
+        guard frames > 0 else { return }
+        frameCounterLock.lock()
+        systemFramesWritten += Int64(frames)
+        frameCounterLock.unlock()
+    }
+
+    private func addMicFrames(_ frames: Int, sampleRate: Double) {
+        guard frames > 0 else { return }
+        frameCounterLock.lock()
+        micFramesWritten += Int64(frames)
+        if sampleRate > 0 { micSampleRate = sampleRate }
+        frameCounterLock.unlock()
+    }
+
+    /// Called from the system writer queue; only the reconnect transition
+    /// hops to main, so healthy frame traffic costs one lock per buffer.
+    private func watchdogRecordFrame() {
+        watchdogLock.lock()
+        let state = systemWatchdog.recordFrame(at: Date())
+        watchdogLock.unlock()
+        guard case .reconnected = state else { return }
+        failureLock.lock()
+        systemAudioFailed = false
+        failureLock.unlock()
+        DispatchQueue.main.async { [weak self] in
+            guard let self, self.isCapturing else { return }
+            veloraLog("Velora: meeting computer audio reconnected")
+            self.onSystemAudioStatus?(state)
+            self.writeSidecarCheckpoint()
+        }
+    }
+
+    private func startWatchdogTimer() {
+        dispatchPrecondition(condition: .onQueue(.main))
+        stopWatchdogTimer()
+        let timer = Timer(timeInterval: 1, repeats: true) { [weak self] _ in
+            self?.pollWatchdog()
+        }
+        timer.tolerance = 0.25
+        RunLoop.main.add(timer, forMode: .common)
+        watchdogTimer = timer
+    }
+
+    private func stopWatchdogTimer() {
+        watchdogTimer?.invalidate()
+        watchdogTimer = nil
+    }
+
+    private func pollWatchdog() {
+        dispatchPrecondition(condition: .onQueue(.main))
+        guard isCapturing, startedAt != nil, !restartingSystemAudio else { return }
+        watchdogLock.lock()
+        let action = systemWatchdog.poll(at: Date(), recording: true)
+        watchdogLock.unlock()
+        applyWatchdogAction(action, stallMessage: "computer-audio buffers stopped arriving")
+    }
+
+    private func applyWatchdogAction(
+        _ action: SystemAudioWatchdog.Action, stallMessage: String
+    ) {
+        dispatchPrecondition(condition: .onQueue(.main))
+        switch action {
+        case .none:
+            break
+        case .restart(let attempt):
+            attemptSystemAudioRestart(attempt: attempt)
+        case .lost:
+            stopWatchdogTimer()
+            onSystemAudioStatus?(.lost)
+            reportSystemAudioFailure(
+                "Computer audio lost after \(systemWatchdog.maxRestartAttempts) "
+                + "restart attempts (\(stallMessage))")
+            stopSystemAudio { _ in }
+        }
+    }
+
+    /// Tears the dead tap down and starts a fresh one into a new take
+    /// segment, leaving the mic track recording throughout. Bounded by
+    /// the watchdog, so this can never loop forever.
+    private func attemptSystemAudioRestart(attempt: Int) {
+        dispatchPrecondition(condition: .onQueue(.main))
+        guard isCapturing, startedAt != nil, !restartingSystemAudio,
+              let meetingID else { return }
+        restartingSystemAudio = true
+        onSystemAudioStatus?(.restarting(attempt: attempt))
+        veloraLog(
+            "Velora: meeting computer-audio tap stalled — restart "
+            + "attempt \(attempt)/\(systemWatchdog.maxRestartAttempts)")
+        stopSystemAudio { [weak self] _ in
+            guard let self else { return }
+            self.restartingSystemAudio = false
+            guard self.isCapturing, self.startedAt != nil, self.meetingID == meetingID,
+                  !self.isStoppingForWatchdog else { return }
+            let segment = AppConfig.meetingsDirectory
+                .appendingPathComponent(meetingID, isDirectory: true)
+                .appendingPathComponent("them.seg\(attempt).caf")
+            do {
+                try self.startSystemAudio(
+                    to: segment,
+                    readiness: MeetingCaptureReadiness(requiresSystemAudio: false),
+                    livePreview: nil)
+                self.systemSegmentURLs.append(segment)
+                self.writeSidecarCheckpoint()
+            } catch {
+                veloraLog(
+                    "Velora: meeting computer-audio restart \(attempt) "
+                    + "failed to start: \(error.localizedDescription)")
+                self.watchdogLock.lock()
+                self.systemWatchdog.noteRestartFailed(at: Date())
+                self.watchdogLock.unlock()
+            }
+        }
+    }
+
+    private var isStoppingForWatchdog: Bool {
+        failureLock.lock(); defer { failureLock.unlock() }
+        return stopping
+    }
+
+    /// Concatenates same-format CAF take segments into `output` (written to
+    /// a temp file, then swapped in). False leaves `output` untouched.
+    static func mergeAudioSegments(_ segments: [URL], into output: URL) -> Bool {
+        let readable = segments.filter { keepsSystemTrack(at: $0) }
+        guard readable.count > 1,
+              let first = try? AVAudioFile(forReading: readable[0]) else { return false }
+        let format = first.processingFormat
+        let temp = output.deletingLastPathComponent()
+            .appendingPathComponent("them.merged-\(UUID().uuidString).caf")
+        do {
+            let out = try AVAudioFile(
+                forWriting: temp, settings: format.settings,
+                commonFormat: format.commonFormat, interleaved: format.isInterleaved)
+            guard let buffer = AVAudioPCMBuffer(pcmFormat: format, frameCapacity: 8192)
+            else { try? FileManager.default.removeItem(at: temp); return false }
+            for url in readable {
+                let file = try AVAudioFile(forReading: url)
+                guard file.processingFormat.sampleRate == format.sampleRate,
+                      file.processingFormat.channelCount == format.channelCount
+                else { continue }
+                while file.framePosition < file.length {
+                    try file.read(into: buffer)
+                    guard buffer.frameLength > 0 else { break }
+                    try out.write(from: buffer)
+                }
+            }
+        } catch {
+            try? FileManager.default.removeItem(at: temp)
+            return false
+        }
+        do {
+            if FileManager.default.fileExists(atPath: output.path) {
+                _ = try FileManager.default.replaceItemAt(output, withItemAt: temp)
+            } else {
+                try FileManager.default.moveItem(at: temp, to: output)
+            }
+            return true
+        } catch {
+            try? FileManager.default.removeItem(at: temp)
+            return false
+        }
+    }
+
+    // MARK: - Resume sidecar checkpointing (V-25)
+
+    private func startSidecarTimer() {
+        dispatchPrecondition(condition: .onQueue(.main))
+        stopSidecarTimer()
+        let timer = Timer(timeInterval: 10, repeats: true) { [weak self] _ in
+            self?.writeSidecarCheckpoint()
+        }
+        timer.tolerance = 2
+        RunLoop.main.add(timer, forMode: .common)
+        sidecarTimer = timer
+    }
+
+    private func stopSidecarTimer() {
+        sidecarTimer?.invalidate()
+        sidecarTimer = nil
+    }
+
+    private var activeSystemSampleRate: Double {
+        guard #available(macOS 14.2, *),
+              let capture = systemCapture as? CoreAudioSystemAudioCapture
+        else { return 0 }
+        return capture.sampleRate
+    }
+
+    private func writeSidecarCheckpoint() {
+        dispatchPrecondition(condition: .onQueue(.main))
+        guard let meetingID, let startedAt else { return }
+        frameCounterLock.lock()
+        let micFrames = micFramesWritten
+        let systemFrames = systemFramesWritten
+        let micRate = micSampleRate
+        frameCounterLock.unlock()
+        let now = Date()
+        let elapsed = max(0, now.timeIntervalSince(startedAt))
+        let systemRate = activeSystemSampleRate
+        let sidecar = MeetingResumeSidecar(
+            meetingID: meetingID,
+            title: sidecarTitle,
+            startedAt: startedAt,
+            updatedAt: now,
+            micTrack: "me.caf",
+            systemTrack: systemSegmentURLs.isEmpty ? nil : "them.caf",
+            micDurationS: micRate > 0 ? Double(micFrames) / micRate : elapsed,
+            systemDurationS: systemRate > 0 ? Double(systemFrames) / systemRate : 0,
+            micFrames: micFrames,
+            systemFrames: systemFrames,
+            segmentCount: max(1, systemSegmentURLs.count),
+            endReason: sidecarEndReason)
+        let directory = AppConfig.meetingsDirectory
+            .appendingPathComponent(meetingID, isDirectory: true)
+        do {
+            try MeetingResumeSidecarStore.write(sidecar, to: directory)
+        } catch {
+            veloraLog(
+                "Velora: meeting resume checkpoint failed: "
+                + error.localizedDescription)
         }
     }
 }

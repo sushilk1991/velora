@@ -364,6 +364,10 @@ final class CoreAudioSystemAudioCapture {
     var onFrames: ((Int) -> Void)?
     var onFailure: ((String) -> Void)?
 
+    /// The tap's sample rate once started (0 before), so the supervising
+    /// capture can turn watchdog/sidecar frame counts into durations.
+    var sampleRate: Double { streamFormat.mSampleRate }
+
     private var tapID = AudioObjectID(kAudioObjectUnknown)
     private var aggregateID = AudioObjectID(kAudioObjectUnknown)
     private var ioProcID: AudioDeviceIOProcID?
