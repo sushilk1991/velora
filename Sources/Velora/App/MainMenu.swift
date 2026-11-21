@@ -111,12 +111,12 @@ enum MainMenu {
     /// The View menu's title; `refreshPaneKeys` finds the menu by it.
     private static let viewTitle = "View"
 
-    /// View › one item per sidebar pane, in sidebar order, on ⌘1…⌘6. Each
-    /// item carries its `MainPane` for `menuShowPane(_:)`. Internal (not
-    /// private) so the selftest can pin the order.
+    /// View › one item per content sidebar pane, in sidebar order, on ⌘1…⌘6.
+    /// Settings stays on ⌘, in the App menu. Each item carries its `MainPane`
+    /// for `menuShowPane(_:)`. Internal so the selftest can pin the order.
     static func viewMenu(target: AnyObject) -> NSMenu {
         let menu = NSMenu(title: viewTitle)
-        for (index, pane) in MainPane.allCases.enumerated() {
+        for (index, pane) in MainPane.contentPanes.enumerated() {
             let paneItem = item(
                 pane.title, #selector(AppDelegate.menuShowPane(_:)),
                 target: target, key: String(index + 1))
@@ -144,7 +144,7 @@ enum MainMenu {
         let taken = Set(hotkeys.compactMap(\.paneDigit))
         for item in menu.items {
             guard let pane = item.representedObject as? MainPane,
-                  let index = MainPane.allCases.firstIndex(of: pane) else { continue }
+                  let index = MainPane.contentPanes.firstIndex(of: pane) else { continue }
             let digit = index + 1
             let isTaken = taken.contains(digit)
             item.keyEquivalent = isTaken ? "" : String(digit)

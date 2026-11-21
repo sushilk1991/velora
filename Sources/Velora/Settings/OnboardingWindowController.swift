@@ -6,7 +6,7 @@ import SwiftUI
 /// the window behaves normally; the accessory policy is restored on close.
 final class OnboardingWindowController: NSWindowController, NSWindowDelegate {
     private let model = OnboardingModel()
-    /// See SettingsWindowController.holdsActivation — isVisible is false for
+    /// See MainWindowController.holdsActivation — isVisible is false for
     /// a miniaturized window, so it can't gate the acquire.
     private var holdsActivation = false
 

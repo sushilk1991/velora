@@ -286,18 +286,15 @@ enum SnapshotRenderer {
     /// faithful — this is the proof the selected state actually draws.
     @MainActor
     private static func renderSidebarRows(into dir: URL) {
-        let selection = SettingsWindowSelection()
-        selection.tab = .dictation  // mid-list, so one selected row is visible
-        let rows = VStack(alignment: .leading, spacing: 2) {
-            ForEach(SettingsTab.allCases) { tab in
-                SettingsSidebarRow(tab: tab, selection: selection)
-            }
-        }
-        .padding(VeloraSpacing.m)
-        .frame(width: 215)
-        .background(VeloraPanel.canvas)
-        let view = NSHostingView(rootView: rows)
-        snapshot(view, size: NSSize(width: 215, height: 240), name: "settings-sidebar-rows", dir: dir)
+        let settingsSelection = MainWindowSelection()
+        settingsSelection.pane = .settings
+        settingsSelection.settingsTab = .dictation  // mid-strip, so one selected tab is visible
+        let strip = SettingsSectionStrip(selection: settingsSelection)
+            .padding(VeloraSpacing.m)
+            .frame(width: 680)
+            .background(VeloraPanel.canvas)
+        let view = NSHostingView(rootView: strip)
+        snapshot(view, size: NSSize(width: 680, height: 64), name: "settings-sidebar-rows", dir: dir)
 
         // The main sidebar's rows with History selected, without and with
         // keyboard focus: grey, then accent, as Finder shows it.
@@ -363,7 +360,7 @@ enum SnapshotRenderer {
             history: history, meetings: meetings,
             meetingCoordinator: coordinator, meetingProcessor: processor,
             actions: MainWindowActions(
-                toggleDictation: {}, startMeeting: {}, openSettings: {},
+                toggleDictation: {}, startMeeting: {}, openSettings: { _ in },
                 openMeetingNotes: { _ in }))
         let mainWindow = shellWindow(root: mainRoot, size: NSSize(width: 1180, height: 760))
         for pane in MainPane.allCases {
@@ -389,14 +386,12 @@ enum SnapshotRenderer {
             model: model, meetings: meetings, coordinator: coordinator,
             processor: processor, into: dir)
 
-        let settingsSelection = SettingsWindowSelection()
-        let settingsRoot = SettingsRootView(
-            model: model, selection: settingsSelection,
-            meetingCoordinator: coordinator, openSetupAssistant: {})
-        let settingsWindow = shellWindow(root: settingsRoot, size: NSSize(width: 780, height: 640))
+        // Settings inside the one main shell, once per SettingsTab.
+        mainWindow.setContentSize(NSSize(width: 1180, height: 760))
+        mainSelection.pane = .settings
         for tab in SettingsTab.allCases {
-            settingsSelection.tab = tab
-            writeShell(settingsWindow, name: "settings-\(tab.rawValue)", into: dir)
+            mainSelection.settingsTab = tab
+            writeShell(mainWindow, name: "settings-\(tab.rawValue)", into: dir)
         }
 
         // Full-height card panes, seeded so the charts render with real
@@ -564,7 +559,7 @@ enum SnapshotRenderer {
             history: store, meetings: meetings,
             meetingCoordinator: coordinator, meetingProcessor: processor,
             actions: MainWindowActions(
-                toggleDictation: {}, startMeeting: {}, openSettings: {},
+                toggleDictation: {}, startMeeting: {}, openSettings: { _ in },
                 openMeetingNotes: { _ in }))
         let window = shellWindow(root: root, size: NSSize(width: 960, height: 620))
         writeShell(window, name: "main-home-min-busy", into: dir)

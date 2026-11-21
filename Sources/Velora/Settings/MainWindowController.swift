@@ -2,10 +2,17 @@ import AppKit
 import Combine
 import SwiftUI
 
-/// The panes of the one "Velora" window, in sidebar order. Settings is not a
-/// pane: it is its own ⌘, window (`SettingsTab`).
+/// The panes of the one "Velora" window, in sidebar order. Settings sits last,
+/// separated by a divider from the content panes, and owns its own horizontal
+/// section strip (`SettingsTab`).
 enum MainPane: String, CaseIterable, Identifiable {
-    case home, history, stats, meetings, dictionary, modes
+    case home, history, stats, meetings, dictionary, modes, settings
+
+    /// The six content panes reachable via View › ⌘1–⌘6. Settings is reached
+    /// via ⌘, in the App menu (and ↑/↓ or click in the sidebar).
+    static let contentPanes: [MainPane] = [
+        .home, .history, .stats, .meetings, .dictionary, .modes,
+    ]
 
     var id: String { rawValue }
 
@@ -17,6 +24,7 @@ enum MainPane: String, CaseIterable, Identifiable {
         case .meetings: return L10n.text("Meetings")
         case .dictionary: return L10n.text("Dictionary")
         case .modes: return L10n.text("Modes")
+        case .settings: return L10n.text("Settings")
         }
     }
 
@@ -29,6 +37,7 @@ enum MainPane: String, CaseIterable, Identifiable {
         case .meetings: return "person.2.wave.2"
         case .dictionary: return "character.book.closed"
         case .modes: return "slider.horizontal.3"
+        case .settings: return "gearshape"
         }
     }
 
@@ -56,14 +65,16 @@ enum MainPane: String, CaseIterable, Identifiable {
 /// stability; `current` resolves nil to Home.
 final class MainWindowSelection: ObservableObject {
     @Published var pane: MainPane? = .home
+    @Published var settingsTab: SettingsTab? = .general
 
     /// The Modes pane's model while it shows. It can hold a switch while
     /// a mode has unsaved edits, and switches once the user answers.
     weak var openModes: ModesViewModel?
 
     var current: MainPane { pane ?? .home }
+    var currentSettingsTab: SettingsTab { settingsTab ?? .general }
 
-    /// Every switch: a sidebar click, ⌘1–⌘6, Open Velora and deep links
+    /// Every switch: a sidebar click, ⌘1–⌘6, ⌘,, Open Velora and deep links
     /// (`MainWindowController.show(selecting:)`). Switches unless the open
     /// pane holds it.
     func request(_ target: MainPane) {
@@ -77,6 +88,23 @@ final class MainWindowSelection: ObservableObject {
 
         pane = target
     }
+
+    /// Switches to the Settings pane and optionally selects an inner section
+    /// tab. Leaving Modes with unsaved edits goes through the same leave guard.
+    func requestSettings(_ tab: SettingsTab? = nil) {
+        if current == .settings {
+            if let tab { settingsTab = tab }
+            return
+        }
+        if let openModes, !openModes.requestLeave({ [weak self] in
+            if let tab { self?.settingsTab = tab }
+            self?.pane = .settings
+        }) {
+            return
+        }
+        if let tab { settingsTab = tab }
+        pane = .settings
+    }
 }
 
 /// App actions the main window triggers but does not own. Injected by the
@@ -87,12 +115,14 @@ struct MainWindowActions {
     var toggleDictation: () -> Void
     /// The same action as the menubar "Start Meeting Notes…".
     var startMeeting: () -> Void
-    /// Opens the ⌘, Settings window.
-    var openSettings: () -> Void
+    /// Selects the Settings pane (optionally deep-linking to a section tab).
+    var openSettings: (SettingsTab?) -> Void = { _ in }
     /// Opens the focused notes window for one meeting.
     var openMeetingNotes: (String) -> Void
     /// Opens Settings › Advanced, where the meeting preferences live.
     var openMeetingSettings: () -> Void = {}
+    /// Opens the first-run setup assistant (Settings › Advanced › Tools).
+    var openSetupAssistant: () -> Void = {}
     /// The dictation phase behind `toggleDictation`, for Home's button.
     var dictation = DictationActivity()
 }
@@ -151,8 +181,10 @@ final class MainWindowController: NSWindowController, NSWindowDelegate {
     private static let frameAutosaveName = "VeloraMain"
     private static let shellToolbarID = NSToolbar.Identifier("VeloraShell")
 
+    private let model: SettingsModel
     private let selection = MainWindowSelection()
     private var paneObserver: AnyCancellable?
+    private var tabObserver: AnyCancellable?
     /// Whether this window currently holds the regular-app activation. An
     /// `isVisible` check would double-acquire when show() reopens a
     /// MINIATURIZED window (isVisible is false there) and the hold would
@@ -168,6 +200,7 @@ final class MainWindowController: NSWindowController, NSWindowDelegate {
         meetingProcessor: MeetingProcessor,
         actions: MainWindowActions
     ) {
+        self.model = model
         let root = MainRootView(
             model: model,
             selection: selection,
@@ -191,6 +224,9 @@ final class MainWindowController: NSWindowController, NSWindowDelegate {
         // The log line makes "clicked a row, nothing happened" diagnosable.
         paneObserver = selection.$pane.sink { pane in
             veloraLog("Velora: main pane → \((pane ?? .home).title)")
+        }
+        tabObserver = selection.$settingsTab.sink { tab in
+            veloraLog("Velora: settings pane → \((tab ?? .general).title)")
         }
     }
 
@@ -269,14 +305,23 @@ final class MainWindowController: NSWindowController, NSWindowDelegate {
     }
 
     /// Shows the window, activating the app so it becomes key. Optionally
-    /// selects a pane (e.g. the HUD's "Open Velora" → Home). While the window
-    /// is open the app runs as a regular app so the menu bar carries the
-    /// Velora menus (user report: no app menu when focused).
-    func show(selecting pane: MainPane? = nil) {
-        if let pane {
+    /// selects a pane (e.g. the HUD's "Open Velora" → Home, or ⌘, → Settings).
+    /// While the window is open the app runs as a regular app so the menu bar
+    /// carries the Velora menus (user report: no app menu when focused).
+    func show(selecting pane: MainPane? = nil, settingsTab: SettingsTab? = nil) {
+        if pane == .settings {
+            selection.requestSettings(settingsTab)
+        } else if let pane {
             selection.request(pane)
+        } else if let settingsTab {
+            selection.requestSettings(settingsTab)
         }
         Self.presentShell(self, holding: &holdsActivation)
+    }
+
+    /// Persists debounced free-text Settings edits immediately (app termination).
+    func flushPendingEdits() {
+        model.flushMeetingNotesPrompt()
     }
 
     /// The mode with unsaved edits, open or parked when the pane closed.
@@ -341,6 +386,7 @@ final class MainWindowController: NSWindowController, NSWindowDelegate {
     }
 
     func windowWillClose(_ notification: Notification) {
+        model.flushMeetingNotesPrompt()
         if holdsActivation {
             holdsActivation = false
             AppActivation.releaseRegular()
@@ -363,10 +409,8 @@ struct MainRootView: View {
     let actions: MainWindowActions
 
     var body: some View {
-        WindowShell {
-            MainSidebar(
-                selection: selection, supervisor: supervisor,
-                openSettings: actions.openSettings)
+        WindowShell(detailEdges: selection.current == .settings ? .formScrolls : .padded) {
+            MainSidebar(selection: selection, supervisor: supervisor)
         } detail: {
             detail(for: selection.current)
         }
@@ -398,6 +442,110 @@ struct MainRootView: View {
             // Draws its own PaneHeader (New Mode, or Save on a mode) and
             // swaps list and editor in place.
             ModesSettingsView(supervisor: supervisor, selection: selection)
+        case .settings:
+            SettingsPane(
+                model: model, selection: selection,
+                meetingCoordinator: meetingCoordinator,
+                openSetupAssistant: actions.openSetupAssistant)
+        }
+    }
+}
+
+/// Settings inside the one Velora window: a horizontal section strip over the
+/// grouped forms, capped at 720 pt so cards never stretch on wide displays.
+struct SettingsPane: View {
+    static let maxContentWidth: CGFloat = 720
+
+    @ObservedObject private var interfaceLocale = InterfaceLocale.shared
+    @ObservedObject var model: SettingsModel
+    @ObservedObject var selection: MainWindowSelection
+    let meetingCoordinator: MeetingCoordinator
+    let openSetupAssistant: () -> Void
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: VeloraSpacing.m) {
+            PaneHeader(title: MainPane.settings.title)
+                .padding(.leading, WindowShellMetrics.formInset)
+            SettingsSectionStrip(selection: selection)
+                .frame(maxWidth: Self.maxContentWidth - WindowShellMetrics.formInset * 2, alignment: .leading)
+                .padding(.horizontal, WindowShellMetrics.formInset)
+            detail(for: selection.currentSettingsTab)
+                .frame(maxWidth: Self.maxContentWidth, maxHeight: .infinity, alignment: .topLeading)
+                .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
+        }
+    }
+
+    @ViewBuilder
+    private func detail(for tab: SettingsTab) -> some View {
+        switch tab {
+        case .general:
+            GeneralSettingsView(model: model)
+        case .dictation:
+            DictationSettingsView(model: model)
+        case .shortcuts:
+            ShortcutsSettingsView(model: model)
+        case .models:
+            ModelSettingsView(model: model)
+        case .advanced:
+            AdvancedSettingsView(
+                model: model, coordinator: meetingCoordinator,
+                openSetupAssistant: openSetupAssistant)
+        }
+    }
+}
+
+/// Horizontal section strip for the Settings pane (`General` … `Advanced`).
+/// Tab/←/→ move between sections; ⌘1–⌘6 stay bound to the main content panes.
+struct SettingsSectionStrip: View {
+    @ObservedObject private var interfaceLocale = InterfaceLocale.shared
+    @ObservedObject var selection: MainWindowSelection
+
+    var body: some View {
+        HStack(spacing: VeloraSpacing.xs) {
+            ForEach(SettingsTab.allCases) { tab in
+                let selected = selection.currentSettingsTab == tab
+                Button {
+                    selection.settingsTab = tab
+                } label: {
+                    HStack(spacing: 6) {
+                        Image(systemName: tab.symbol)
+                            .font(.system(size: 11, weight: .medium))
+                            .foregroundStyle(selected ? .primary : .secondary)
+                        Text(tab.title)
+                            .font(.system(size: 12.5, weight: selected ? .semibold : .regular))
+                            .foregroundStyle(selected ? .primary : .secondary)
+                            .lineLimit(1)
+                    }
+                    .padding(.horizontal, 10)
+                    .padding(.vertical, 6)
+                    .background(
+                        RoundedRectangle(cornerRadius: 7, style: .continuous)
+                            .fill(selected ? Color.primary.opacity(0.09) : Color.clear)
+                    )
+                    .contentShape(RoundedRectangle(cornerRadius: 7, style: .continuous))
+                }
+                .buttonStyle(.plain)
+                .help(tab.title)
+                .accessibilityAddTraits(selected ? [.isSelected] : [])
+            }
+            Spacer(minLength: 0)
+        }
+        .padding(4)
+        .background(
+            RoundedRectangle(cornerRadius: 10, style: .continuous)
+                .fill(Color.primary.opacity(0.04))
+        )
+        .onMoveCommand { direction in
+            let tabs = SettingsTab.allCases
+            guard let index = tabs.firstIndex(of: selection.currentSettingsTab) else { return }
+            switch direction {
+            case .left:
+                selection.settingsTab = tabs[max(index - 1, 0)]
+            case .right:
+                selection.settingsTab = tabs[min(index + 1, tabs.count - 1)]
+            default:
+                break
+            }
         }
     }
 }
@@ -449,36 +597,54 @@ struct StatsPane: View {
     }
 }
 
-/// The main window's glass sidebar: pane rows, a Settings row with the ⌘,
-/// hint, and the engine status line at the bottom.
+/// The main window's glass sidebar: content pane rows, a divided Settings row
+/// with the ⌘, hint, and the engine status line at the bottom.
 struct MainSidebar: View {
     @ObservedObject private var interfaceLocale = InterfaceLocale.shared
     @ObservedObject var selection: MainWindowSelection
     let supervisor: EngineSupervisor?
-    let openSettings: () -> Void
     @FocusState private var listFocused: Bool
     @Environment(\.controlActiveState) private var controlActiveState
 
     var body: some View {
+        let focus = SidebarFocus(listFocused: listFocused, window: controlActiveState)
         FloatingSidebar {
             SidebarTopSpace()
             // Focusable as one list, like Finder's sidebar: Tab lands on it
-            // and ↑/↓ walk the panes through `request`, so Modes can still
-            // hold a switch while it has unsaved edits. Focus shows on the
-            // selected row (`SidebarFocus`), never as a ring round the list.
+            // and ↑/↓ walk every pane including Settings through `request`,
+            // so Modes can still hold a switch while it has unsaved edits.
             VStack(alignment: .leading, spacing: WindowShellMetrics.rowSpacing) {
-                ForEach(MainPane.allCases) { pane in
+                ForEach(MainPane.contentPanes) { pane in
                     Button {
                         selection.request(pane)
                     } label: {
                         SidebarRow(
                             symbol: pane.symbol, title: pane.title,
                             selected: selection.current == pane,
-                            focus: SidebarFocus(
-                                listFocused: listFocused, window: controlActiveState))
+                            focus: focus)
                     }
                     .buttonStyle(.plain)
                 }
+                Spacer(minLength: VeloraSpacing.m)
+                Divider()
+                    .opacity(0.45)
+                    .padding(.horizontal, VeloraSpacing.s)
+                    .padding(.bottom, VeloraSpacing.xs)
+                Button {
+                    selection.request(.settings)
+                } label: {
+                    SidebarRow(
+                        symbol: MainPane.settings.symbol,
+                        title: MainPane.settings.title,
+                        selected: selection.current == .settings,
+                        focus: focus
+                    ) {
+                        Text(L10n.text("⌘,"))
+                            .font(.system(size: 11))
+                            .foregroundStyle(.tertiary)
+                    }
+                }
+                .buttonStyle(.plain)
             }
             .focusable()
             .focused($listFocused)
@@ -486,15 +652,6 @@ struct MainSidebar: View {
             .onMoveCommand { direction in
                 selection.request(selection.current.moved(direction))
             }
-            Spacer(minLength: VeloraSpacing.m)
-            Button(action: openSettings) {
-                SidebarRow(symbol: "gearshape", title: L10n.text("Settings"), selected: false) {
-                    Text(L10n.text("⌘,"))
-                        .font(.system(size: 11))
-                        .foregroundStyle(.tertiary)
-                }
-            }
-            .buttonStyle(.plain)
             EngineStatusLine(supervisor: supervisor)
                 .padding(.horizontal, VeloraSpacing.s)
                 .padding(.vertical, VeloraSpacing.s)

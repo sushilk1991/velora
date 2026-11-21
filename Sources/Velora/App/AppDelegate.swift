@@ -175,7 +175,6 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     private var mainController: MainWindowController?
     /// The dictation phase for Home's Start/Stop button.
     private let dictationActivity = DictationActivity()
-    private var settingsController: SettingsWindowController?
     private var aboutController: AboutWindowController?
     private var meetingNotesController: MeetingNotesWindowController?
     private var onboardingController: OnboardingWindowController?
@@ -907,7 +906,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             after: watchdogDelay, allowMeetingExtension: true)
         // A debounced Settings edit (notes prompt) must not die with the
         // process; windowWillClose is not guaranteed during terminate.
-        settingsController?.flushPendingEdits()
+        mainController?.flushPendingEdits()
         // Stop accepting new long-running work, then wait for meeting audio to
         // finalize and active dictation audio to seal before AppKit tears down
         // the engine and process.
@@ -1028,8 +1027,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     }
 
     /// The one "Velora" window (Home, History, Stats, Meetings, Dictionary,
-    /// Modes). Deep links from the menubar/HUD pick the pane.
-    private func showMain(selecting pane: MainPane? = nil) {
+    /// Modes, Settings). Deep links from the menubar/HUD pick the pane and tab.
+    private func showMain(selecting pane: MainPane? = nil, settingsTab: SettingsTab? = nil) {
         if mainController == nil {
             mainController = MainWindowController(
                 model: sharedSettingsModel(),
@@ -1041,25 +1040,20 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                 actions: MainWindowActions(
                     toggleDictation: { [weak self] in self?.dictation.toggleFromHome() },
                     startMeeting: { [weak self] in self?.meetingCoordinator.startManual() },
-                    openSettings: { [weak self] in self?.showSettings() },
+                    openSettings: { [weak self] tab in self?.showSettings(selecting: tab) },
                     openMeetingNotes: { [weak self] id in self?.showMeetingNotes(meetingID: id) },
                     openMeetingSettings: { [weak self] in self?.showSettings(selecting: .advanced) },
+                    openSetupAssistant: { [weak self] in
+                        guard let self else { return }
+                        self.showOnboarding(startingAt: self.firstMissingPermissionStep)
+                    },
                     dictation: dictationActivity))
         }
-        mainController?.show(selecting: pane)
+        mainController?.show(selecting: pane, settingsTab: settingsTab)
     }
 
     private func showSettings(selecting tab: SettingsTab? = nil) {
-        if settingsController == nil {
-            settingsController = SettingsWindowController(
-                model: sharedSettingsModel(),
-                meetingCoordinator: meetingCoordinator,
-                openSetupAssistant: { [weak self] in
-                    guard let self else { return }
-                    self.showOnboarding(startingAt: self.firstMissingPermissionStep)
-                })
-        }
-        settingsController?.show(selecting: tab)
+        showMain(selecting: .settings, settingsTab: tab)
     }
 
     private func showAbout() {

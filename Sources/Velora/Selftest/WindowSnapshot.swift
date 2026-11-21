@@ -296,7 +296,7 @@ enum WindowSnapshot {
     ) async {
         let selection = MainWindowSelection()
         let actions = MainWindowActions(
-            toggleDictation: {}, startMeeting: {}, openSettings: {},
+            toggleDictation: {}, startMeeting: {}, openSettings: { _ in },
             openMeetingNotes: { _ in })
         let root = MainRootView(
             model: model, selection: selection, supervisor: nil,
@@ -343,14 +343,15 @@ enum WindowSnapshot {
         model: SettingsModel, coordinator: MeetingCoordinator,
         suffix: String, into dir: URL
     ) async {
-        let selection = SettingsWindowSelection()
-        let root = SettingsRootView(
+        let selection = MainWindowSelection()
+        selection.pane = .settings
+        let root = SettingsPane(
             model: model, selection: selection,
             meetingCoordinator: coordinator, openSetupAssistant: {})
         let window = MainWindowController.makeShellWindow(
-            rootView: root, title: "Settings", size: settingsSize, minimumSize: settingsSize)
+            rootView: root, title: "Settings", size: mainSizes[0], minimumSize: mainMinimum)
         for tab in SettingsTab.allCases {
-            selection.tab = tab
+            selection.settingsTab = tab
             await shoot(window, name: "settings-\(tab.rawValue)-\(suffix)", into: dir)
         }
     }

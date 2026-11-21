@@ -13283,26 +13283,46 @@ enum Selftest {
 
     private static func testShellNavigation() {
         expect(
-            MainPane.allCases == [.home, .history, .stats, .meetings, .dictionary, .modes],
-            "the main window sidebar runs Home, History, Stats, Meetings, Dictionary, Modes")
+            MainPane.contentPanes == [.home, .history, .stats, .meetings, .dictionary, .modes],
+            "the content sidebar runs Home, History, Stats, Meetings, Dictionary, Modes")
+        expect(
+            MainPane.allCases == [.home, .history, .stats, .meetings, .dictionary, .modes, .settings],
+            "the unified main window sidebar ends with Settings")
         expect(
             SettingsTab.allCases == [.general, .dictation, .shortcuts, .models, .advanced],
-            "the Settings rail runs General, Dictation, Shortcuts, Models, Advanced")
+            "the Settings section strip runs General, Dictation, Shortcuts, Models, Advanced")
         expect(
             Set(MainPane.allCases.map(\.symbol)).count == MainPane.allCases.count
                 && Set(SettingsTab.allCases.map(\.symbol)).count == SettingsTab.allCases.count,
             "every sidebar row has its own symbol")
-        // One symbol per concept across both windows (DESIGN.md §7): the
-        // Settings rail must not reuse a main-window pane's glyph, filled or
-        // not (Advanced once borrowed Modes' sliders).
+        // Content panes must not reuse a Settings section glyph, filled or not.
         let baseSymbol: (String) -> String = { $0.replacingOccurrences(of: ".fill", with: "") }
         expect(
-            Set(MainPane.allCases.map { baseSymbol($0.symbol) })
+            Set(MainPane.contentPanes.map { baseSymbol($0.symbol) })
                 .isDisjoint(with: SettingsTab.allCases.map { baseSymbol($0.symbol) }),
-            "the Settings rail and the main sidebar share no symbol")
+            "the Settings section strip and the main content sidebar share no symbol")
+        let fresh = MainWindowSelection()
         expect(
-            MainWindowSelection().current == .home && SettingsWindowSelection().current == .general,
-            "fresh windows open on Home and General")
+            fresh.current == .home && fresh.currentSettingsTab == .general,
+            "fresh main window opens on Home with General ready for Settings")
+
+        // V-29: deep-link to Settings › Advanced selects both pane and section tab.
+        fresh.requestSettings(.advanced)
+        expect(
+            fresh.current == .settings && fresh.currentSettingsTab == .advanced,
+            "requestSettings(.advanced) selects both Settings pane and Advanced tab")
+        fresh.requestSettings(.models)
+        expect(
+            fresh.current == .settings && fresh.currentSettingsTab == .models,
+            "requestSettings while already on Settings switches the section tab")
+        fresh.requestSettings(nil)
+        expect(
+            fresh.current == .settings && fresh.currentSettingsTab == .models,
+            "requestSettings(nil) preserves the active section tab")
+        expect(
+            MainPane.modes.moved(.down) == .settings && MainPane.settings.moved(.down) == .settings
+                && MainPane.settings.moved(.up) == .modes,
+            "sidebar ↑/↓ steps between Modes and Settings and stops at the bottom")
     }
 
     // MARK: - Pill visibility
@@ -13519,13 +13539,13 @@ enum Selftest {
             window.close()
         }
 
-        // View › panes: every sidebar pane, in sidebar order, on ⌘1…⌘6
-        // (HIG: frequent destinations get shortcuts).
+        // View › panes: every content sidebar pane, in sidebar order, on ⌘1…⌘6
+        // (HIG: frequent destinations get shortcuts; Settings stays on ⌘,).
         let viewMenu = MainMenu.viewMenu(target: NSObject())
-        expect(viewMenu.items.map { $0.representedObject as? MainPane } == MainPane.allCases,
-               "the View menu lists every pane in sidebar order")
+        expect(viewMenu.items.map { $0.representedObject as? MainPane } == MainPane.contentPanes,
+               "the View menu lists every content pane in sidebar order")
         expect(viewMenu.items.map(\.keyEquivalent)
-                == MainPane.allCases.indices.map { String($0 + 1) },
+                == MainPane.contentPanes.indices.map { String($0 + 1) },
                "View menu panes take ⌘1 onward in sidebar order")
         expect(viewMenu.items.allSatisfy {
                    $0.action == #selector(AppDelegate.menuShowPane(_:))
@@ -15450,7 +15470,7 @@ private final class RecordingOutputVolume: OutputVolumeControlling {
         let selection = MainWindowSelection()
         let window = MainWindowController.makeShellWindow(
             rootView: WindowShell {
-                MainSidebar(selection: selection, supervisor: nil, openSettings: {})
+                MainSidebar(selection: selection, supervisor: nil)
             } detail: {
                 Color.clear
             },
