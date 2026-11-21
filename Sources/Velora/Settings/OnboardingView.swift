@@ -435,6 +435,10 @@ struct OnboardingView: View {
         }
     }
 
+    /// The permission card plus a real check: which device dictation will use
+    /// and why, a device picker, and a level meter that opens the microphone
+    /// only while the user is testing it. A permission prompt alone leaves the
+    /// user guessing whether their input actually reaches the app.
     private var microphoneStep: some View {
         permissionStep(
             title: L10n.text("Allow the microphone"),
@@ -451,7 +455,8 @@ struct OnboardingView: View {
                         model.requestMicrophone()
                     }
                 }),
-            continueEnabled: model.canContinue(from: .microphone))
+            continueEnabled: model.canContinue(from: .microphone),
+            extra: { OnboardingMicCheckCard(granted: model.microphoneGranted) })
     }
 
     private var inputMonitoringStep: some View {
@@ -492,6 +497,19 @@ struct OnboardingView: View {
         title: String, card: PermissionCard, continueEnabled: Bool,
         staleHint: Bool = false
     ) -> some View {
+        permissionStep(
+            title: title, card: card, continueEnabled: continueEnabled,
+            staleHint: staleHint, extra: { EmptyView() })
+    }
+
+    /// The same step with one more block under the card (the microphone step's
+    /// device check). A separate overload rather than a defaulted generic: a
+    /// default `EmptyView` closure cannot be inferred for the other steps.
+    private func permissionStep<Extra: View>(
+        title: String, card: PermissionCard, continueEnabled: Bool,
+        staleHint: Bool = false,
+        @ViewBuilder extra: () -> Extra
+    ) -> some View {
         stepLayout(title: title) {
             card
             // TCC grants are tied to the app's code signature. After an app
@@ -511,6 +529,7 @@ struct OnboardingView: View {
                 .frame(width: 480, alignment: .leading)
                 .padding(.top, VeloraSpacing.xs)
             }
+            extra()
         } button: {
             Button(L10n.text("Continue")) { model.pressContinue(isRepeat: Self.pressIsRepeat) }
                 .buttonStyle(.primaryCapsule)
