@@ -920,8 +920,13 @@ struct MeetingPreferenceRows: View {
     static let footer = "Velora detects calls from local call apps, the microphone, and meeting pages in your browser, never saving meeting addresses, and records only after you choose Start Meeting Notes."
 
     var body: some View {
-        Toggle("Suggest recording when a call is detected", isOn: $model.meetingSuggestions)
-        Toggle("Name meetings from Calendar", isOn: $model.meetingCalendar)
+        SettingsToggleRow(
+            title: "Suggest recording when a call is detected",
+            isOn: $model.meetingSuggestions)
+        GroupDivider()
+        SettingsToggleRow(
+            title: "Name meetings from Calendar",
+            isOn: $model.meetingCalendar)
             .onChange(of: model.meetingCalendar) { _, enabled in
                 if enabled && coordinator.calendarAuthorization != .fullAccess {
                     coordinator.requestCalendarAccess { granted in
@@ -929,22 +934,40 @@ struct MeetingPreferenceRows: View {
                     }
                 }
             }
-        Picker("Calendar lead time", selection: $calendarLeadMinutes) {
-            ForEach([0, 5, 10, 15, 30], id: \.self) { Text("\($0) minutes").tag($0) }
-        }.disabled(!model.meetingCalendar)
-        Picker("When the call ends", selection: $meetingEndBehavior) {
-            ForEach(MeetingPolicy.EndBehavior.allCases) { Text($0.title).tag($0.rawValue) }
-        }
-        Text("Browser and manual recordings always ask before finishing unless you choose to keep recording. Detection never starts a recording.")
-            .font(.caption).foregroundStyle(.secondary)
-        Toggle(isOn: $model.meetingDiarization) {
-            VStack(alignment: .leading, spacing: 2) {
-                Text("Improve remote speech detection")
-                Text("Skips long silences while keeping the transcript honestly labeled Me and Them. Runs on this Mac; downloads two small voice models (~46 MB) on the first meeting.")
-                    .font(.caption)
-                    .foregroundStyle(.secondary)
+        GroupDivider()
+        SettingsRow(title: "Calendar lead time") {
+            Picker("Calendar lead time", selection: $calendarLeadMinutes) {
+                ForEach([0, 5, 10, 15, 30], id: \.self) { Text("\($0) minutes").tag($0) }
             }
+            .labelsHidden()
+            .frame(maxWidth: 150)
         }
+        .disabled(!model.meetingCalendar)
+        .opacity(model.meetingCalendar ? 1 : 0.55)
+        GroupDivider()
+        VStack(alignment: .leading, spacing: 6) {
+            HStack(alignment: .center, spacing: VeloraSpacing.m) {
+                Text(L10n.text("When the call ends"))
+                    .font(.system(size: 13))
+                Spacer(minLength: VeloraSpacing.s)
+                Picker("When the call ends", selection: $meetingEndBehavior) {
+                    ForEach(MeetingPolicy.EndBehavior.allCases) { Text($0.title).tag($0.rawValue) }
+                }
+                .labelsHidden()
+                .fixedSize()
+            }
+            Text(L10n.text("Browser and manual recordings always ask before finishing unless you choose to keep recording. Detection never starts a recording."))
+                .font(.system(size: 11.5))
+                .foregroundStyle(.secondary)
+                .fixedSize(horizontal: false, vertical: true)
+        }
+        .padding(.horizontal, 14)
+        .padding(.vertical, 10)
+        GroupDivider()
+        SettingsToggleRow(
+            title: "Improve remote speech detection",
+            subtitle: "Skips long silences while keeping the transcript honestly labeled Me and Them. Runs on this Mac; downloads two small voice models (~46 MB) on the first meeting.",
+            isOn: $model.meetingDiarization)
     }
 }
 

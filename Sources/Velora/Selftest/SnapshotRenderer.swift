@@ -386,13 +386,19 @@ enum SnapshotRenderer {
             model: model, meetings: meetings, coordinator: coordinator,
             processor: processor, into: dir)
 
-        // Settings inside the one main shell, once per SettingsTab.
+        // Settings inside the one main shell, once per SettingsTab, plus wide
+        // (1440 × 900) and minimum (960 × 620) breakpoint proofs.
         mainWindow.setContentSize(NSSize(width: 1180, height: 760))
         mainSelection.pane = .settings
         for tab in SettingsTab.allCases {
             mainSelection.settingsTab = tab
             writeShell(mainWindow, name: "settings-\(tab.rawValue)", into: dir)
         }
+        mainSelection.settingsTab = .general
+        mainWindow.setContentSize(NSSize(width: 1440, height: 900))
+        writeShell(mainWindow, name: "settings-general-wide", into: dir)
+        mainWindow.setContentSize(NSSize(width: 960, height: 620))
+        writeShell(mainWindow, name: "settings-general-min", into: dir)
 
         // Onboarding's microphone step: the permission card plus the device
         // check, inside the real 640 × 520 onboarding window. The card is new

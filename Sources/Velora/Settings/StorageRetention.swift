@@ -337,25 +337,41 @@ struct RetentionSettingsView: View {
     @State private var message: String?
 
     var body: some View {
-        DisclosureGroup("Storage and retention") {
-            daysPicker("Keep dictation text", value: $policy.dictationDays, forever: true, choices: [7, 30, 90, 180, 365])
-            daysPicker("Keep dictation audio", value: $dictationAudioDays, forever: false, choices: [7, 30, 90, 180, 365])
-            daysPicker("Keep meetings and notes", value: $policy.meetingDays, forever: true, choices: [30, 90, 180, 365])
-            daysPicker("Keep meeting audio", value: $meetingAudioDays, forever: false, choices: [7, 30, 90, 365])
-            Text("Text stays forever unless you choose a limit. Removing a meeting also removes its notes, passages, and recording. Audio can expire while text stays.")
-                .font(.caption).foregroundStyle(.secondary)
-            Button(busy ? "Preparing preview…" : "Preview cleanup…") {
-                busy = true
-                StorageRetention.shared.preview(policy: policy, dictationAudioDays: dictationAudioDays,
-                    meetingAudioDays: meetingAudioDays) { result in
-                    busy = false
-                    switch result {
-                    case .success(let value): preview = value
-                    case .failure(let error): message = error.localizedDescription
+        VStack(alignment: .leading, spacing: 0) {
+            retentionRow("Keep dictation text", value: $policy.dictationDays, forever: true, choices: [7, 30, 90, 180, 365])
+            GroupDivider()
+            retentionRow("Keep dictation audio", value: $dictationAudioDays, forever: false, choices: [7, 30, 90, 180, 365])
+            GroupDivider()
+            retentionRow("Keep meetings and notes", value: $policy.meetingDays, forever: true, choices: [30, 90, 180, 365])
+            GroupDivider()
+            retentionRow("Keep meeting audio", value: $meetingAudioDays, forever: false, choices: [7, 30, 90, 365])
+            GroupDivider()
+            SettingsRow(
+                title: "Clean up expired items",
+                subtitle: "Text stays forever unless you choose a limit. Audio can expire while text stays."
+            ) {
+                Button(busy ? "Preparing…" : "Preview cleanup…") {
+                    busy = true
+                    StorageRetention.shared.preview(policy: policy, dictationAudioDays: dictationAudioDays,
+                        meetingAudioDays: meetingAudioDays) { result in
+                        busy = false
+                        switch result {
+                        case .success(let value): preview = value
+                        case .failure(let error): message = error.localizedDescription
+                        }
                     }
                 }
-            }.disabled(busy)
-            if let message { Text(message).font(.caption).foregroundStyle(.secondary).textSelection(.enabled) }
+                .buttonStyle(.settingsChip)
+                .disabled(busy)
+            }
+            if let message {
+                Text(message)
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+                    .textSelection(.enabled)
+                    .padding(.horizontal, 14)
+                    .padding(.bottom, 10)
+            }
         }
         .onAppear {
             policy = StorageRetention.shared.policy
@@ -387,11 +403,15 @@ struct RetentionSettingsView: View {
         }
     }
 
-    private func daysPicker(_ title: String, value: Binding<Int>, forever: Bool, choices: [Int]) -> some View {
-        Picker(title, selection: value) {
-            if forever { Text("Forever").tag(0) }
-            ForEach(choices, id: \.self) { days in Text("\(days) days").tag(days) }
-            if value.wrappedValue > 0 && !choices.contains(value.wrappedValue) { Text("\(value.wrappedValue) days").tag(value.wrappedValue) }
+    private func retentionRow(_ title: String, value: Binding<Int>, forever: Bool, choices: [Int]) -> some View {
+        SettingsRow(title: title) {
+            Picker(title, selection: value) {
+                if forever { Text("Forever").tag(0) }
+                ForEach(choices, id: \.self) { days in Text("\(days) days").tag(days) }
+                if value.wrappedValue > 0 && !choices.contains(value.wrappedValue) { Text("\(value.wrappedValue) days").tag(value.wrappedValue) }
+            }
+            .labelsHidden()
+            .frame(maxWidth: 140)
         }
     }
 }

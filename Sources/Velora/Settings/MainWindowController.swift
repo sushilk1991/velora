@@ -409,7 +409,7 @@ struct MainRootView: View {
     let actions: MainWindowActions
 
     var body: some View {
-        WindowShell(detailEdges: selection.current == .settings ? .formScrolls : .padded) {
+        WindowShell(detailEdges: .padded) {
             MainSidebar(selection: selection, supervisor: supervisor)
         } detail: {
             detail(for: selection.current)
@@ -451,11 +451,10 @@ struct MainRootView: View {
     }
 }
 
-/// Settings inside the one Velora window: a horizontal section strip over the
-/// grouped forms, capped at 720 pt so cards never stretch on wide displays.
+/// Settings inside the one Velora window: `PaneHeader` carries the snug
+/// segmented section picker in its trailing slot (matching Home and History),
+/// over a full-width responsive canvas with zero dead right-hand void.
 struct SettingsPane: View {
-    static let maxContentWidth: CGFloat = 720
-
     @ObservedObject private var interfaceLocale = InterfaceLocale.shared
     @ObservedObject var model: SettingsModel
     @ObservedObject var selection: MainWindowSelection
@@ -463,14 +462,11 @@ struct SettingsPane: View {
     let openSetupAssistant: () -> Void
 
     var body: some View {
-        VStack(alignment: .leading, spacing: VeloraSpacing.m) {
-            PaneHeader(title: MainPane.settings.title)
-                .padding(.leading, WindowShellMetrics.formInset)
-            SettingsSectionStrip(selection: selection)
-                .frame(maxWidth: Self.maxContentWidth - WindowShellMetrics.formInset * 2, alignment: .leading)
-                .padding(.horizontal, WindowShellMetrics.formInset)
+        VStack(alignment: .leading, spacing: VeloraSpacing.l) {
+            PaneHeader(title: MainPane.settings.title) {
+                SettingsSectionStrip(selection: selection)
+            }
             detail(for: selection.currentSettingsTab)
-                .frame(maxWidth: Self.maxContentWidth, maxHeight: .infinity, alignment: .topLeading)
                 .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
         }
     }
@@ -494,14 +490,14 @@ struct SettingsPane: View {
     }
 }
 
-/// Horizontal section strip for the Settings pane (`General` … `Advanced`).
+/// Snug segmented section strip for the Settings header (`General` … `Advanced`).
 /// Tab/←/→ move between sections; ⌘1–⌘6 stay bound to the main content panes.
 struct SettingsSectionStrip: View {
     @ObservedObject private var interfaceLocale = InterfaceLocale.shared
     @ObservedObject var selection: MainWindowSelection
 
     var body: some View {
-        HStack(spacing: VeloraSpacing.xs) {
+        HStack(spacing: 2) {
             ForEach(SettingsTab.allCases) { tab in
                 let selected = selection.currentSettingsTab == tab
                 Button {
@@ -509,18 +505,22 @@ struct SettingsSectionStrip: View {
                 } label: {
                     HStack(spacing: 6) {
                         Image(systemName: tab.symbol)
-                            .font(.system(size: 11, weight: .medium))
-                            .foregroundStyle(selected ? .primary : .secondary)
+                            .font(.system(size: 11.5, weight: .medium))
+                            .foregroundStyle(selected ? AnyShapeStyle(VeloraBrand.accent) : AnyShapeStyle(.secondary))
                         Text(tab.title)
-                            .font(.system(size: 12.5, weight: selected ? .semibold : .regular))
+                            .font(.system(size: 12.5, weight: selected ? .semibold : .medium))
                             .foregroundStyle(selected ? .primary : .secondary)
                             .lineLimit(1)
                     }
-                    .padding(.horizontal, 10)
+                    .padding(.horizontal, 11)
                     .padding(.vertical, 6)
                     .background(
                         RoundedRectangle(cornerRadius: 7, style: .continuous)
-                            .fill(selected ? Color.primary.opacity(0.09) : Color.clear)
+                            .fill(selected ? VeloraPanel.raised : Color.clear)
+                    )
+                    .overlay(
+                        RoundedRectangle(cornerRadius: 7, style: .continuous)
+                            .strokeBorder(selected ? VeloraPanel.hairline : Color.clear, lineWidth: 1)
                     )
                     .contentShape(RoundedRectangle(cornerRadius: 7, style: .continuous))
                 }
@@ -528,12 +528,16 @@ struct SettingsSectionStrip: View {
                 .help(tab.title)
                 .accessibilityAddTraits(selected ? [.isSelected] : [])
             }
-            Spacer(minLength: 0)
         }
-        .padding(4)
+        .padding(3)
+        .fixedSize(horizontal: true, vertical: false)
         .background(
             RoundedRectangle(cornerRadius: 10, style: .continuous)
-                .fill(Color.primary.opacity(0.04))
+                .fill(VeloraPanel.card)
+        )
+        .overlay(
+            RoundedRectangle(cornerRadius: 10, style: .continuous)
+                .strokeBorder(VeloraPanel.hairline, lineWidth: 1)
         )
         .onMoveCommand { direction in
             let tabs = SettingsTab.allCases
