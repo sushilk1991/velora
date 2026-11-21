@@ -31,6 +31,7 @@ from typing import Any, Protocol
 import numpy as np
 
 from .media import quietest_cut
+from .preview_agreement import StreamingLocalAgreement
 from .vad import NeuralSilenceTracker, VadFactory
 
 log = logging.getLogger("velora.stt")
@@ -70,6 +71,13 @@ _HARD_CUT_QUIET_S = 0.2
 # decode time). Parakeet runs about 110x real time (p50 over the owner's
 # clips), so a 10 s open span costs about 0.1 s.
 _PARAKEET_PREVIEW_INTERVAL_S = 0.5
+# CPU budget for the preview lane: previews are display-only, so once their
+# cumulative decode time passes this share of the take's audio duration the
+# cadence floor backs off for the rest of the take. The share is only judged
+# once the take is long enough for the ratio to mean anything.
+_PARAKEET_PREVIEW_BACKOFF_INTERVAL_S = 0.8
+_PARAKEET_PREVIEW_CPU_BUDGET_RATIO = 0.15
+_PARAKEET_PREVIEW_BUDGET_MIN_TAKE_S = 2.0
 PARAKEET_SPAN_CAP_S = 90.0
 _PARAKEET_SEAM_SEARCH_S = 15.0
 
@@ -590,6 +598,13 @@ class ParakeetBackend:
         self._preview_had_new_speech = False
         self._preview_interval_s = _PARAKEET_PREVIEW_INTERVAL_S
         self._pending_preview: WhisperPreviewRequest | None = None
+        # LocalAgreement over the open-span preview text (committed segments
+        # always pass through verbatim ahead of it), keyed to the committed
+        # prefix its windows belong to — a new commit restarts agreement.
+        self._preview_agreement = StreamingLocalAgreement()
+        self._preview_agreement_committed: tuple[str, ...] = ()
+        self._preview_decode_total_s = 0.0
+        self._preview_backed_off = False
         self._segment_decode_failed = False
 
     def take_new_segments(self) -> list[str]:
@@ -751,7 +766,13 @@ class ParakeetBackend:
 
     def decode_preview(self, request: WhisperPreviewRequest) -> str | None:
         """Decode one display-only snapshot: committed segments plus the open
-        span. The next preview waits for at least 1.5x this decode's time."""
+        span. The next preview waits for at least 1.5x this decode's time.
+
+        The open span passes the LocalAgreement gate so its volatile tail
+        does not flicker between ticks; committed segments stay verbatim.
+        Preview decodes also charge a CPU budget: past 15% of the take's
+        audio duration (judged once the take reaches 2 s) the cadence floor
+        backs off from 0.5 s to 0.8 s for the rest of the take."""
         started = time.perf_counter()
         try:
             text = self._transcribe(request.audio)
@@ -760,13 +781,31 @@ class ParakeetBackend:
             return None
         finally:
             elapsed = time.perf_counter() - started
+            self._preview_decode_total_s += elapsed
+            take_s = self._samples / SAMPLE_RATE
+            if (
+                take_s >= _PARAKEET_PREVIEW_BUDGET_MIN_TAKE_S
+                and self._preview_decode_total_s
+                > _PARAKEET_PREVIEW_CPU_BUDGET_RATIO * take_s
+            ):
+                self._preview_backed_off = True
+            floor = (
+                _PARAKEET_PREVIEW_BACKOFF_INTERVAL_S
+                if self._preview_backed_off
+                else _PARAKEET_PREVIEW_INTERVAL_S
+            )
             self._preview_interval_s = min(
                 PREVIEW_MAX_INTERVAL_S,
-                max(_PARAKEET_PREVIEW_INTERVAL_S, elapsed * PREVIEW_BACKOFF),
+                max(floor, elapsed * PREVIEW_BACKOFF),
             )
         if not text:
             return None
-        return " ".join((*request.committed_segments, text))
+        if request.committed_segments != self._preview_agreement_committed:
+            self._preview_agreement.reset()
+            self._preview_agreement_committed = request.committed_segments
+        display = self._preview_agreement.display_update(text)
+        parts = [*request.committed_segments, *([display] if display else [])]
+        return " ".join(parts) if parts else None
 
     def _audio_span(self, start_sample: int, end_sample: int) -> np.ndarray:
         return _chunk_span(self._chunks, start_sample, end_sample)
@@ -891,6 +930,10 @@ class ParakeetBackend:
         self._preview_had_new_speech = False
         self._preview_interval_s = _PARAKEET_PREVIEW_INTERVAL_S
         self._pending_preview = None
+        self._preview_agreement.reset()
+        self._preview_agreement_committed = ()
+        self._preview_decode_total_s = 0.0
+        self._preview_backed_off = False
         self._segment_decode_failed = False
         # initial_prompt / segments_used_for_final / final_tail survive a reset:
         # the server reads the finalize flags after finalize() has reset.
@@ -1371,6 +1414,11 @@ class WhisperBackend:
         self._preview_had_new_speech = False
         self._preview_interval_s = PREVIEW_BASE_INTERVAL_S
         self._pending_preview: WhisperPreviewRequest | None = None
+        # Same LocalAgreement gate as Parakeet's preview lane, keyed to the
+        # committed prefix so a new segment restarts agreement (see
+        # ParakeetBackend). The 1.5 s Whisper cadence is unchanged.
+        self._preview_agreement = StreamingLocalAgreement()
+        self._preview_agreement_committed: tuple[str, ...] = ()
         # Sticky per-session kill switch: one failed segment decode degrades
         # the whole session to today's batch path (never raise into the feed).
         self._segment_decode_failed = False
@@ -1783,7 +1831,11 @@ class WhisperBackend:
         self._pending_preview = None
 
     def decode_preview(self, request: WhisperPreviewRequest) -> str | None:
-        """Decode one immutable HUD request without touching final STT state."""
+        """Decode one immutable HUD request without touching final STT state.
+
+        Like Parakeet's lane, the open span passes the LocalAgreement gate
+        (committed segments verbatim ahead of it); the Whisper cadence floor
+        stays at PREVIEW_BASE_INTERVAL_S."""
         started = time.perf_counter()
         try:
             # Previews are queued only after the tracker heard new speech, but
@@ -1808,7 +1860,12 @@ class WhisperBackend:
             int(len(request.audio) / SAMPLE_RATE * 1000),
             int(self._preview_interval_s * 1000),
         )
-        return " ".join((*request.committed_segments, text)).strip()
+        if request.committed_segments != self._preview_agreement_committed:
+            self._preview_agreement.reset()
+            self._preview_agreement_committed = request.committed_segments
+        display = self._preview_agreement.display_update(text)
+        parts = [*request.committed_segments, *([display] if display else [])]
+        return " ".join(parts).strip() or None
 
     def take_new_segments(self) -> list[str]:
         out = self._new_segments
@@ -1916,6 +1973,8 @@ class WhisperBackend:
         self._preview_had_new_speech = False
         self._preview_interval_s = PREVIEW_BASE_INTERVAL_S
         self._pending_preview = None
+        self._preview_agreement.reset()
+        self._preview_agreement_committed = ()
         # NOTE: initial_prompt / segments_used_for_final / final_tail survive a
         # reset on purpose — the server sets the prompt per session and reads
         # the finalize flags right after finalize() has reset the audio state.
