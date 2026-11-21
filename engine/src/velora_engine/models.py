@@ -25,33 +25,66 @@ TRANSCRIBE_CPP_Q8_SHA256 = "d5e65f2b0828802ae2c231673d31982cebe3a778c95d9494a9f3
 # SHA-256s verified against the pinned revision (2026-11-03).
 WHISPER_CPP_REPO = "ggerganov/whisper.cpp"
 WHISPER_CPP_REVISION = "5359861c739e955e79d9a303bcbc70fb988958b1"
+WHISPER_CPP_TINY_EN = "ggerganov/whisper.cpp:ggml-tiny.en"
 WHISPER_CPP_BASE_EN = "ggerganov/whisper.cpp:ggml-base.en"
+WHISPER_CPP_BASE = "ggerganov/whisper.cpp:ggml-base"
 WHISPER_CPP_SMALL_EN = "ggerganov/whisper.cpp:ggml-small.en"
+WHISPER_CPP_TINY_EN_SHA256 = "921e4cf8686fdd993dcd081a5da5b6c365bfde1162e72b08d75ac75289920b1f"
 WHISPER_CPP_BASE_EN_SHA256 = "a03779c86df3323075f5e796cb2ce5029f00ec8869eee3fdfb897afe36c6d002"
+WHISPER_CPP_BASE_SHA256 = "60ed5bc3dd14eea856493d334349b405782ddcaf0028d4b5df4088345fba2efe"
 WHISPER_CPP_SMALL_EN_SHA256 = "c6138d6d58ecc8322097e0f987c32f1be8bb0a18532a3f88f734d1bbf9c41e5d"
 # Registry sizes are decimal gigabytes of download (Hub byte counts).
 _BYTES_PER_GB = 10**9
 _SINGLE_FILE_MODELS = {
     TRANSCRIBE_CPP_Q8_MODEL: "whisper-large-v3-turbo-Q8_0.gguf",
+    WHISPER_CPP_TINY_EN: "ggml-tiny.en.bin",
     WHISPER_CPP_BASE_EN: "ggml-base.en.bin",
+    WHISPER_CPP_BASE: "ggml-base.bin",
     WHISPER_CPP_SMALL_EN: "ggml-small.en.bin",
 }
 # Model ids that are not themselves Hub repo ids (a colon selects one file
 # out of a many-model repository); ensure_downloaded downloads from here.
 _SINGLE_FILE_REPOS = {
+    WHISPER_CPP_TINY_EN: WHISPER_CPP_REPO,
     WHISPER_CPP_BASE_EN: WHISPER_CPP_REPO,
+    WHISPER_CPP_BASE: WHISPER_CPP_REPO,
     WHISPER_CPP_SMALL_EN: WHISPER_CPP_REPO,
 }
 _SINGLE_FILE_REVISIONS = {
     TRANSCRIBE_CPP_Q8_MODEL: TRANSCRIBE_CPP_Q8_REVISION,
+    WHISPER_CPP_TINY_EN: WHISPER_CPP_REVISION,
     WHISPER_CPP_BASE_EN: WHISPER_CPP_REVISION,
+    WHISPER_CPP_BASE: WHISPER_CPP_REVISION,
     WHISPER_CPP_SMALL_EN: WHISPER_CPP_REVISION,
 }
 _SINGLE_FILE_SHA256 = {
     TRANSCRIBE_CPP_Q8_MODEL: TRANSCRIBE_CPP_Q8_SHA256,
+    WHISPER_CPP_TINY_EN: WHISPER_CPP_TINY_EN_SHA256,
     WHISPER_CPP_BASE_EN: WHISPER_CPP_BASE_EN_SHA256,
+    WHISPER_CPP_BASE: WHISPER_CPP_BASE_SHA256,
     WHISPER_CPP_SMALL_EN: WHISPER_CPP_SMALL_EN_SHA256,
 }
+
+# whisper.cpp weights that decode English only. The `.en` models carry one
+# language and must be told so: asking whisper.cpp for auto/hi/... makes it warn
+# per window, and some builds mis-decode. Membership is by catalog id, and the
+# file-name form covers a resolved path as well.
+_ENGLISH_ONLY_WHISPER_CPP = frozenset({
+    WHISPER_CPP_TINY_EN,
+    WHISPER_CPP_BASE_EN,
+    WHISPER_CPP_SMALL_EN,
+})
+
+
+def is_english_only_whisper_cpp(model_id: str) -> bool:
+    """True when these whisper.cpp weights decode English and nothing else.
+
+    `WHISPER_CPP_BASE` is the multilingual file and returns False: it is the
+    small download for someone who dictates more than one language.
+    """
+    if model_id in _ENGLISH_ONLY_WHISPER_CPP:
+        return True
+    return Path(model_id).name.lower().endswith(".en.bin")
 
 # Dictation language scopes. "multilingual" keeps the historical default
 # (Whisper Turbo: 99 languages). "english" is the lightweight tier: the
@@ -152,6 +185,17 @@ REGISTRY: list[ModelInfo] = [
         description="Fastest for English. English only.",
     ),
     ModelInfo(
+        id=WHISPER_CPP_TINY_EN,
+        name="Whisper Tiny (English)",
+        kind="stt",
+        backend="transcribe-cpp",
+        size="0.08 GB",
+        description=(
+            "The smallest download of all, for English dictation only. Loads "
+            "instantly; the least accurate on noise and accents."
+        ),
+    ),
+    ModelInfo(
         id=WHISPER_CPP_BASE_EN,
         name="Whisper Base (English)",
         kind="stt",
@@ -160,6 +204,17 @@ REGISTRY: list[ModelInfo] = [
         description=(
             "Smallest download for English dictation. Instant to load, "
             "less accurate on noise and accents."
+        ),
+    ),
+    ModelInfo(
+        id=WHISPER_CPP_BASE,
+        name="Whisper Base (Multilingual)",
+        kind="stt",
+        backend="transcribe-cpp",
+        size="0.15 GB",
+        description=(
+            "Smallest download that understands 99 languages. Less accurate "
+            "than Whisper Turbo on noise and accents."
         ),
     ),
     ModelInfo(

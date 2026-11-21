@@ -9,7 +9,12 @@ from velora_engine import download_worker as worker, models
 from velora_engine.download_cache import _Cache, _File, _Manifest, _check_manifest
 from velora_engine.downloads import DownloadCoordinator
 
-IDS = (models.WHISPER_CPP_BASE_EN, models.WHISPER_CPP_SMALL_EN)
+IDS = (
+    models.WHISPER_CPP_TINY_EN,
+    models.WHISPER_CPP_BASE_EN,
+    models.WHISPER_CPP_BASE,
+    models.WHISPER_CPP_SMALL_EN,
+)
 
 
 @pytest.mark.parametrize("model", IDS)

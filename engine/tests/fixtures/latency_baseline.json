@@ -1,0 +1,13 @@
+{
+  "baselines": {
+    "fake": {
+      "cleanup_p95_ms": 0.888,
+      "max_ms": 0.995,
+      "p50_ms": 0.694,
+      "p95_ms": 0.902,
+      "stt_p95_ms": 0.014,
+      "takes": 8
+    }
+  },
+  "format": 1
+}

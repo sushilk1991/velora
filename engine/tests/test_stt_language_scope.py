@@ -16,8 +16,11 @@ from velora_engine import quant_cache
 from velora_engine.config import Config
 from velora_engine.models import (
     LANGUAGE_SCOPES,
+    WHISPER_CPP_BASE,
     WHISPER_CPP_BASE_EN,
     WHISPER_CPP_SMALL_EN,
+    WHISPER_CPP_TINY_EN,
+    is_english_only_whisper_cpp,
     lookup,
     parakeet_quant_bits,
     recommended_stt_model,
@@ -70,6 +73,51 @@ def test_english_whisper_registry_entries_exist():
         models_mod.WHISPER_CPP_REVISION)
     assert models_mod._SINGLE_FILE_SHA256[WHISPER_CPP_SMALL_EN] == (
         models_mod.WHISPER_CPP_SMALL_EN_SHA256)
+
+
+def test_cheap_ggml_tiers_are_registered_with_pinned_identity():
+    """Tiny (English) and Base (multilingual) are the smallest downloads; each
+    is a single-file selector with a pinned revision and digest."""
+    from velora_engine import models as models_mod
+
+    tiny = lookup(WHISPER_CPP_TINY_EN)
+    base = lookup(WHISPER_CPP_BASE)
+    assert tiny is not None and tiny.backend == "transcribe-cpp" and tiny.kind == "stt"
+    assert base is not None and base.backend == "transcribe-cpp" and base.kind == "stt"
+    assert tiny.size == "0.08 GB" and base.size == "0.15 GB"
+    assert "smallest download" in tiny.description.lower()
+    assert "smallest download" in base.description.lower()
+    for model_id, filename in (
+        (WHISPER_CPP_TINY_EN, "ggml-tiny.en.bin"),
+        (WHISPER_CPP_BASE, "ggml-base.bin"),
+    ):
+        assert models_mod._SINGLE_FILE_MODELS[model_id] == filename
+        assert models_mod._SINGLE_FILE_REPOS[model_id] == "ggerganov/whisper.cpp"
+        assert models_mod._SINGLE_FILE_REVISIONS[model_id] == models_mod.WHISPER_CPP_REVISION
+        assert len(models_mod._SINGLE_FILE_SHA256[model_id]) == 64
+    assert models_mod.WHISPER_CPP_TINY_EN_SHA256.startswith("921e4cf8")
+    assert models_mod.WHISPER_CPP_BASE_SHA256.startswith("60ed5bc3")
+
+
+def test_english_only_helper_separates_tiny_en_from_multilingual_base():
+    assert is_english_only_whisper_cpp(WHISPER_CPP_TINY_EN)
+    assert is_english_only_whisper_cpp(WHISPER_CPP_BASE_EN)
+    assert is_english_only_whisper_cpp(WHISPER_CPP_SMALL_EN)
+    # ggml-base is the multilingual file: the small download for someone who
+    # dictates more than one language must NOT be forced to English.
+    assert not is_english_only_whisper_cpp(WHISPER_CPP_BASE)
+    assert not is_english_only_whisper_cpp("mlx-community/whisper-large-v3-turbo")
+    # A resolved path names the file rather than the catalog id.
+    assert is_english_only_whisper_cpp("/cache/models--ggml-tiny.en.bin")
+    assert not is_english_only_whisper_cpp("/cache/models--ggml-base.bin")
+
+
+def test_cheap_tiers_never_become_the_onboarding_default():
+    """V-15 adds options, not a new recommendation: RAM tiers are unchanged."""
+    cheap = {WHISPER_CPP_TINY_EN, WHISPER_CPP_BASE, WHISPER_CPP_BASE_EN, WHISPER_CPP_SMALL_EN}
+    for scope in LANGUAGE_SCOPES:
+        for ram in (4, 8, 16, 36, 128):
+            assert recommended_stt_model(scope, ram) not in cheap, (scope, ram)
 
 
 def test_single_file_valid_rejects_wrong_sha(tmp_path: Path):
