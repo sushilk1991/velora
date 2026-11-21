@@ -665,31 +665,7 @@ final class HUDPanel: NSObject {
         // the mic straight from the pill, e.g. keep the MacBook mic while
         // AirPods are connected).
         let mic = NSMenuItem(title: "Microphone", action: nil, keyEquivalent: "")
-        let micMenu = NSMenu()
-        let chosenUID = AppConfig.shared.inputDeviceUID
-        let systemDefault = NSMenuItem(
-            title: "System Default", action: #selector(selectMicrophone(_:)), keyEquivalent: "")
-        systemDefault.target = self
-        systemDefault.state = chosenUID == nil ? .on : .off
-        micMenu.addItem(systemDefault)
-        let devices = AudioInputDevices.displayList()
-        if !devices.isEmpty { micMenu.addItem(.separator()) }
-        for device in devices {
-            let item = NSMenuItem(
-                title: device.name, action: #selector(selectMicrophone(_:)), keyEquivalent: "")
-            item.target = self
-            item.representedObject = device.uid
-            item.state = chosenUID == device.uid ? .on : .off
-            micMenu.addItem(item)
-        }
-        if let chosenUID, !devices.contains(where: { $0.uid == chosenUID }) {
-            let missing = NSMenuItem(
-                title: "Chosen Microphone (Not Connected)", action: nil, keyEquivalent: "")
-            missing.isEnabled = false
-            missing.state = .on
-            micMenu.addItem(missing)
-        }
-        mic.submenu = micMenu
+        mic.submenu = microphoneSubmenu()
         menu.addItem(mic)
 
         // Recent transcriptions live in a single hover submenu, not five inline
@@ -789,10 +765,111 @@ final class HUDPanel: NSObject {
         NotificationCenter.default.post(name: .veloraHUDPrefsChanged, object: nil)
     }
 
+    /// The Microphone submenu: System Default, every connected device, the
+    /// active device's Exclude action, and the Excluded Microphones group.
+    /// The shape comes from `HUDMicrophoneMenuBuilder`, so it can be pinned by a
+    /// test with no hardware and no running panel.
+    private func microphoneSubmenu() -> NSMenu {
+        let config = AppConfig.shared
+        let devices = AudioInputDevices.displayList()
+        let chosenUID = config.inputDeviceUID
+        let excludedUIDs = config.excludedInputDeviceUIDs
+        let resolvedUID = MicrophoneSelection.resolve(MicrophoneSelection.Ladder(
+            chosenUID: chosenUID,
+            systemDefaultUID: AudioInputDevices.systemDefaultUID(),
+            lastUsedUID: config.inputDeviceLastUID,
+            recentUIDs: config.recentInputDeviceUIDs,
+            excludedUIDs: excludedUIDs,
+            connectedUIDs: devices.map(\.uid)))?.uid
+        let plan = HUDMicrophoneMenuBuilder.plan(
+            devices: devices, chosenUID: chosenUID,
+            excludedUIDs: excludedUIDs, resolvedUID: resolvedUID)
+
+        let submenu = NSMenu()
+        submenu.autoenablesItems = false
+        for row in plan.rows {
+            if row.kind == .excludedGroup {
+                let parent = microphoneMenuItem(for: row)
+                let children = NSMenu()
+                children.autoenablesItems = false
+                for child in plan.excludedRows {
+                    children.addItem(microphoneMenuItem(for: child))
+                }
+                parent.submenu = children
+                submenu.addItem(parent)
+                continue
+            }
+            submenu.addItem(microphoneMenuItem(for: row))
+        }
+        return submenu
+    }
+
+    private func microphoneMenuItem(for row: HUDMicrophoneRow) -> NSMenuItem {
+        if case .separator = row.kind { return .separator() }
+
+        let action: Selector?
+        switch row.kind {
+        case .systemDefault, .device:
+            action = #selector(selectMicrophone(_:))
+        case .exclude:
+            action = #selector(excludeMicrophone(_:))
+        case .reenable:
+            action = #selector(reenableMicrophone(_:))
+        case .excludedGroup, .missingChosen, .separator:
+            action = nil
+        }
+
+        let item = NSMenuItem(title: row.title, action: action, keyEquivalent: "")
+        if action != nil { item.target = self }
+        item.state = row.state ? .on : .off
+        // A parent row has no action of its own; it must stay enabled so its
+        // submenu can open. Disabled rows come from the builder instead.
+        item.isEnabled = row.enabled
+        switch row.kind {
+        case .device(let uid), .exclude(let uid), .reenable(let uid),
+             .missingChosen(let uid):
+            item.representedObject = uid
+        case .systemDefault, .excludedGroup, .separator:
+            break
+        }
+        if case .reenable = row.kind {
+            item.toolTip = "Click to allow this microphone again"
+        }
+        return item
+    }
+
     /// representedObject is the device UID; nil (the System Default item)
     /// clears the pin. Applies at the next capture start.
     @objc private func selectMicrophone(_ sender: NSMenuItem) {
         AppConfig.shared.inputDeviceUID = sender.representedObject as? String
+        NotificationCenter.default.post(name: .veloraHUDPrefsChanged, object: nil)
+    }
+
+    /// Stop auto-selecting this device. Excluding the microphone the user had
+    /// explicitly picked also clears that pick, so it falls back to the ladder
+    /// instead of staying pinned to a device it will no longer open.
+    @objc private func excludeMicrophone(_ sender: NSMenuItem) {
+        guard let uid = sender.representedObject as? String else { return }
+        let config = AppConfig.shared
+        let next = HUDMicrophoneExclusion.excluding(uid, from: HUDMicrophoneExclusion.State(
+            chosenUID: config.inputDeviceUID,
+            excludedUIDs: config.excludedInputDeviceUIDs))
+        config.excludedInputDeviceUIDs = next.excludedUIDs
+        if config.inputDeviceUID != next.chosenUID {
+            config.inputDeviceUID = next.chosenUID
+        }
+        veloraLog("Velora: excluded microphone \(uid) from the pill menu")
+        NotificationCenter.default.post(name: .veloraHUDPrefsChanged, object: nil)
+    }
+
+    @objc private func reenableMicrophone(_ sender: NSMenuItem) {
+        guard let uid = sender.representedObject as? String else { return }
+        let config = AppConfig.shared
+        config.excludedInputDeviceUIDs = HUDMicrophoneExclusion.reenabling(
+            uid, from: HUDMicrophoneExclusion.State(
+                chosenUID: config.inputDeviceUID,
+                excludedUIDs: config.excludedInputDeviceUIDs)).excludedUIDs
+        veloraLog("Velora: allowed microphone \(uid) again from the pill menu")
         NotificationCenter.default.post(name: .veloraHUDPrefsChanged, object: nil)
     }
 
@@ -899,5 +976,147 @@ private final class HUDHostingView<Content: View>: NSHostingView<Content> {
     override func rightMouseDown(with event: NSEvent) {
         guard let menu = menuProvider?() else { return }
         NSMenu.popUpContextMenu(menu, with: event, for: self)
+    }
+}
+
+// MARK: - Microphone submenu shape
+
+/// One row of the pill's Microphone submenu, described without AppKit so the
+/// shape can be pinned by a test with no hardware and no running panel.
+struct HUDMicrophoneRow: Equatable {
+    enum Kind: Equatable {
+        case systemDefault
+        case device(uid: String)
+        /// The chosen device is not connected: shown, checked, not clickable.
+        case missingChosen(uid: String)
+        /// Stop auto-selecting this device.
+        case exclude(uid: String)
+        /// The parent row of the excluded group.
+        case excludedGroup
+        /// Allow an excluded device again.
+        case reenable(uid: String)
+        case separator
+    }
+
+    let kind: Kind
+    let title: String
+    let state: Bool
+    let enabled: Bool
+
+    static let separator = HUDMicrophoneRow(
+        kind: .separator, title: "", state: false, enabled: false)
+}
+
+/// The Microphone submenu's contents, as data.
+///
+/// The excluded list is a group rather than a per-device toggle because a
+/// toggle on every row doubles the menu; one group keeps the common case
+/// (picking a microphone) unchanged and makes an exclusion reversible in one
+/// click.
+enum HUDMicrophoneMenuBuilder {
+    static let excludedGroupTitle = "Excluded Microphones"
+
+    struct Plan: Equatable {
+        var rows: [HUDMicrophoneRow] = []
+        /// Children of the `.excludedGroup` row; empty when nothing is excluded.
+        var excludedRows: [HUDMicrophoneRow] = []
+    }
+
+    static func plan(
+        devices: [AudioInputDevices.Device],
+        chosenUID: String?,
+        excludedUIDs: [String],
+        resolvedUID: String?
+    ) -> Plan {
+        let excluded = Set(excludedUIDs)
+        var rows: [HUDMicrophoneRow] = [
+            HUDMicrophoneRow(
+                kind: .systemDefault, title: "System Default",
+                state: chosenUID == nil, enabled: true)
+        ]
+        // An excluded device is not offered as a pick: selecting it would pin a
+        // microphone the ladder refuses to open. It lives in the Excluded
+        // Microphones group instead, where one click allows it again.
+        let selectable = devices.filter { !excluded.contains($0.uid) }
+        if !selectable.isEmpty { rows.append(.separator) }
+        for device in selectable {
+            rows.append(HUDMicrophoneRow(
+                kind: .device(uid: device.uid), title: device.name,
+                state: chosenUID == device.uid, enabled: true))
+        }
+        if let chosenUID, !devices.contains(where: { $0.uid == chosenUID }) {
+            rows.append(HUDMicrophoneRow(
+                kind: .missingChosen(uid: chosenUID),
+                title: "Chosen Microphone (Not Connected)",
+                state: true, enabled: false))
+        }
+
+        if let active = excludableDevice(
+            devices: devices, chosenUID: chosenUID,
+            resolvedUID: resolvedUID, excluded: excluded) {
+            rows.append(.separator)
+            rows.append(HUDMicrophoneRow(
+                kind: .exclude(uid: active.uid), title: "Exclude \(active.name)",
+                state: false, enabled: true))
+        }
+
+        var excludedRows: [HUDMicrophoneRow] = []
+        if !excludedUIDs.isEmpty {
+            excludedRows = excludedUIDs.map { uid in
+                let name = devices.first(where: { $0.uid == uid })?.name
+                return HUDMicrophoneRow(
+                    kind: .reenable(uid: uid),
+                    title: name ?? "Not Connected Microphone",
+                    state: true, enabled: true)
+            }
+            rows.append(HUDMicrophoneRow(
+                kind: .excludedGroup, title: excludedGroupTitle,
+                state: false, enabled: true))
+        }
+        return Plan(rows: rows, excludedRows: excludedRows)
+    }
+
+    /// The device "Exclude …" applies to: the one dictation would open, when it
+    /// is connected and not already excluded. Nothing is offered when it is the
+    /// only microphone left, because excluding it would leave nothing to open.
+    static func excludableDevice(
+        devices: [AudioInputDevices.Device],
+        chosenUID: String?,
+        resolvedUID: String?,
+        excluded: Set<String>
+    ) -> AudioInputDevices.Device? {
+        let available = devices.filter { !excluded.contains($0.uid) }
+        guard available.count > 1 else { return nil }
+        if let resolvedUID, let match = available.first(where: { $0.uid == resolvedUID }) {
+            return match
+        }
+        if let chosenUID, let match = available.first(where: { $0.uid == chosenUID }) {
+            return match
+        }
+        return nil
+    }
+}
+
+/// The settings change behind Exclude and Allow, as a pure transform so the
+/// rule is testable without writing anyone's settings.
+enum HUDMicrophoneExclusion {
+    struct State: Equatable {
+        var chosenUID: String?
+        var excludedUIDs: [String]
+    }
+
+    static func excluding(_ uid: String, from state: State) -> State {
+        guard let uid = MicrophoneSelection.Ladder.identity(uid) else { return state }
+        var excluded = state.excludedUIDs
+        if !excluded.contains(uid) { excluded.append(uid) }
+        // A pick that can no longer be opened is not a preference any more.
+        let chosen = state.chosenUID == uid ? nil : state.chosenUID
+        return State(chosenUID: chosen, excludedUIDs: excluded)
+    }
+
+    static func reenabling(_ uid: String, from state: State) -> State {
+        State(
+            chosenUID: state.chosenUID,
+            excludedUIDs: state.excludedUIDs.filter { $0 != uid })
     }
 }

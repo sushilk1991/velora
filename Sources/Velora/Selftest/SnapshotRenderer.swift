@@ -394,6 +394,34 @@ enum SnapshotRenderer {
             writeShell(mainWindow, name: "settings-\(tab.rawValue)", into: dir)
         }
 
+        // Onboarding's microphone step: the permission card plus the device
+        // check, inside the real 640 × 520 onboarding window. The card is new
+        // UI, so it gets the same "does it fit" check as the shell panes.
+        // Both states: the denied step is the first thing a new user sees, and
+        // the ready step carries the longest diagnostic ("Using … (system
+        // default)") that must still fit one line.
+        for granted in [false, true] {
+            let micStep = VStack(spacing: VeloraSpacing.xl) {
+                PermissionCard(
+                    symbol: "mic.fill",
+                    title: L10n.text("Microphone"),
+                    explanation: L10n.text(
+                        "Velora turns your voice into text on this Mac. The audio goes nowhere else."),
+                    granted: granted,
+                    buttonTitle: granted ? L10n.text("Granted") : L10n.text("Allow Access"),
+                    action: {})
+                OnboardingMicCheckCard(granted: granted)
+            }
+            .padding(.horizontal, 24)  // OnboardingLayout.sideMargin, private to its view
+            .frame(width: 640, height: 520)
+            .background(VeloraPanel.canvas.ignoresSafeArea())
+            let micWindow = shellWindow(root: micStep, size: NSSize(width: 640, height: 520))
+            writeShell(
+                micWindow,
+                name: granted ? "onboarding-microphone-ready" : "onboarding-microphone",
+                into: dir)
+        }
+
         // Full-height card panes, seeded so the charts render with real
         // shapes (the windowed pane snapshots above cut below the fold and
         // draw from the live — possibly empty — history).
