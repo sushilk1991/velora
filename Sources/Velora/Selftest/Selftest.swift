@@ -318,6 +318,8 @@ enum Selftest {
         testMeetingRetentionOrphans()
         testRetentionFeedbackRollback()
         testStorageCleanupRetry()
+        MeetingReliabilitySelftest.run()
+        MicSurfaceSelftest.run()
         testScratchPreferenceCheck()
         testSelftestIsolation(preferencesBaseline: preferencesBaseline)
         testNothingLeftOnScreen()
