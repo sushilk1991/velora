@@ -1,8 +1,15 @@
 """Audio clip archive: persist session PCM for later reprocessing.
 
-Clips live in ``~/.velora/audio/<session_id>.<ext>`` — FLAC via ``soundfile``
-(lossless, roughly 5x smaller than 16-bit WAV for speech, so reprocessing keeps
-full fidelity) with a stdlib 16-bit-WAV fallback when libsndfile is missing.
+Clips live in ``~/.velora/audio/<session_id>.<ext>``. Finalized clips are
+encoded as Ogg Opus via ``soundfile`` — roughly a third of the FLAC size and a
+ninth of 16-bit WAV for speech, which is what keeps months of archive cheap —
+with FLAC when libsndfile has no Opus encoder and a stdlib 16-bit WAV when
+libsndfile is missing. The live dictation spool stays raw PCM16 so a crash
+never loses audio to an encoder.
+
+Every container written by an earlier release (``.flac``, ``.wav``) stays
+readable, seekable and prunable here: names are accepted, spans map 1:1 onto
+the source samples, and retention sweeps all three extensions.
 
 Retention is enforced on engine start and after each save: clips older than
 ``retention_days`` are deleted, then a total-size cap evicts oldest-first. The
@@ -34,8 +41,13 @@ _ARCHIVE_BLOCK_SAMPLES = 60 * SAMPLE_RATE
 # A basename we are willing to read/write: our own session ids (uuid4 or the
 # client-supplied session string) plus the extension. Anything with a path
 # separator or "." traversal is rejected before it touches the filesystem.
-_SAFE_NAME_RE = re.compile(r"^[A-Za-z0-9._-]+\.(flac|wav)$")
+_SAFE_NAME_RE = re.compile(r"^[A-Za-z0-9._-]+\.(ogg|flac|wav)$")
 _ACTIVE_NAME_RE = re.compile(r"^([A-Za-z0-9_-]+)\.pcm16\.part$")
+
+#: Archive containers, best first: (libsndfile format, subtype, extension).
+_CODEC_OPUS = ("OGG", "OPUS", "ogg")
+_CODEC_FLAC = ("FLAC", "PCM_16", "flac")
+_CLIP_SUFFIXES = frozenset({".ogg", ".flac", ".wav"})
 
 
 @dataclass(frozen=True)
@@ -73,10 +85,22 @@ class ClipReader:
     """Read one saved clip span without materializing its full duration."""
 
     def __init__(self, path: Path, sf) -> None:
-        self._soundfile = sf.SoundFile(str(path)) if path.suffix == ".flac" else None
-        self._wave = wave.open(str(path), "rb") if self._soundfile is None else None
-        handle = self._soundfile or self._wave
-        self.sample_count = len(handle) if self._soundfile is not None else handle.getnframes()
+        # libsndfile decodes every container we archive (.ogg/.flac); the stdlib
+        # wave reader covers .wav and installs that lost libsndfile.
+        self._soundfile = None
+        self._wave = None
+        if sf is not None and path.suffix != ".wav":
+            self._soundfile = sf.SoundFile(str(path))
+            # libsndfile reports the Opus granule length, so the codec priming
+            # and tail padding are already trimmed: len() is the exact number of
+            # samples that went in, and span offsets stay aligned with the PCM
+            # the clip was written from (verified sample-exact for OGG/OPUS).
+            self.sample_count = len(self._soundfile)
+        else:
+            if sf is None and path.suffix != ".wav":
+                raise ValueError(f"{path.suffix} clip needs libsndfile")
+            self._wave = wave.open(str(path), "rb")
+            self.sample_count = self._wave.getnframes()
 
     def __enter__(self) -> ClipReader:
         return self
@@ -110,11 +134,30 @@ def _soundfile():
         return None
 
 
+def _archive_codec(sf) -> tuple[str, str, str] | None:
+    """Container/subtype/extension for finalized clips; None → stdlib WAV.
+
+    Opus in Ogg (16 kHz mono) is the default because stored dictation is
+    replayed by the speech model and occasionally by the user, not remastered:
+    it costs a third of FLAC and reads back seekably on-device. FLAC is the
+    fallback for a libsndfile built without an Opus encoder.
+    """
+    if sf is None:
+        return None
+    try:
+        if "OPUS" in sf.available_subtypes("OGG"):
+            return _CODEC_OPUS
+    except Exception:  # noqa: BLE001 — older/stub libsndfile cannot answer
+        log.debug("libsndfile cannot report OGG subtypes", exc_info=True)
+    return _CODEC_FLAC
+
+
 class AudioStore:
     def __init__(self, audio_dir: Path) -> None:
         self.dir = audio_dir
         self._sf = _soundfile()
-        self.ext = "flac" if self._sf is not None else "wav"
+        self._codec = _archive_codec(self._sf)
+        self.ext = self._codec[2] if self._codec is not None else "wav"
 
     def _ensure_dir(self) -> None:
         self.dir.mkdir(mode=0o700, parents=True, exist_ok=True)
@@ -209,10 +252,11 @@ class AudioStore:
         temporary = target.with_name(f".{name}.{uuid.uuid4().hex}.tmp")
         try:
             with source.open("rb") as spool:
-                if self._sf is not None:
+                if self._sf is not None and self._codec is not None:
+                    fmt, subtype, _ext = self._codec
                     with self._sf.SoundFile(
                         str(temporary), mode="w", samplerate=SAMPLE_RATE,
-                        channels=1, subtype="PCM_16", format="FLAC",
+                        channels=1, subtype=subtype, format=fmt,
                     ) as output:
                         while data := spool.read(_ARCHIVE_BLOCK_SAMPLES * 2):
                             usable = len(data) - len(data) % 2
@@ -248,7 +292,7 @@ class AudioStore:
         return self.dir / name
 
     def open_clip(self, name: str) -> ClipReader:
-        """Open a saved WAV or FLAC for planner-window reads."""
+        """Open a saved Ogg Opus, FLAC or WAV clip for planner-window reads."""
         path = self.path_for(name)
         if path is None or not path.is_file():
             raise FileNotFoundError(name)
@@ -273,15 +317,14 @@ class AudioStore:
         try:
             samples = np.asarray(pcm, dtype=np.float32)
             samples = np.clip(np.nan_to_num(samples), -1.0, 1.0)
-            if self._sf is not None:
-                # PCM_16 subtype: 16-bit is ample for 16kHz speech and halves
-                # the FLAC size versus 24-bit.
+            if self._sf is not None and self._codec is not None:
+                fmt, subtype, _ext = self._codec
                 self._sf.write(
                     str(temporary),
                     samples,
                     SAMPLE_RATE,
-                    subtype="PCM_16",
-                    format="FLAC",
+                    subtype=subtype,
+                    format=fmt,
                 )
             else:
                 self._write_wav(temporary, samples)
@@ -339,7 +382,7 @@ class AudioStore:
         if not self.dir.exists():
             return 0
         try:
-            clips = [p for p in self.dir.iterdir() if p.suffix.lstrip(".") in ("flac", "wav")]
+            clips = [p for p in self.dir.iterdir() if p.suffix in _CLIP_SUFFIXES]
         except OSError:
             return 0
         deleted = 0

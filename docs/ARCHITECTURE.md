@@ -203,7 +203,7 @@ engine → app  {"event":"transcript","session":"...","raw":"...","ms":412}
 engine → app  {"event":"final","session":"...","text":"...","raw":"...","mode":"chat",
                "cleanup_ms":389,"cleanup_wall_ms":402,"cleanup_applied":true,
                "total_ms":811,
-               "audio":"uuid.flac"}   # audio present when archived
+               "audio":"uuid.ogg"}   # audio present when archived (.ogg/.flac/.wav)
 ```
 Other commands: `cancel`, `ping`, `status`, `reload_config` (modes/vocab changed), `set_model`, `reprocess`.
 
@@ -535,16 +535,22 @@ The UI fetches meeting metadata in pages and loads a full transcript only for th
 Stop consumes only a completed glossary; it never waits. Stop, cancel, errors, and new sessions invalidate late readers. Secure input, denied AX permission, a different WindowServer window, and a changed focused window fail closed; a window the user merely moved or resized does not. External listening and Action recording remain excluded. Context is neither logged nor stored in history/dictionary state or shared model-prefix caches. Screen context has no in-app off switch; old opt-outs are ignored. Accessibility reads continue without Screen Recording permission, which gates only the local OCR fallback. The optional Screen Recording grant is requested only through Settings > Dictation > Allow Local Screen Text Recognition. Pin-stage refusals always log their reason code, and the wait when the reader polled; `VELORA_CONTEXT_DIAGNOSTICS=1` adds the remaining stage and refusal metadata (counts and reasons, never screen text). Details and paired validation: `docs/plans/2026-09-16-context-glossary-design.md`.
 
 **Audio archive + reprocess.** When `save_audio` is on (default), each session's
-raw PCM is written to `~/.velora/audio/<session>.flac` (FLAC via libsndfile,
-~5× smaller than 16-bit WAV; 0600). The `final` event then carries `audio` (the
-clip basename), which the app stores in history. Retention runs on engine start
-and after each save: clips older than `audio_retention_days` (default 180) are
-deleted, then a total-size cap (`audio_max_mb`, default 4096) evicts oldest-first.
+raw PCM is written to `~/.velora/audio/<session>.ogg` — Ogg Opus at 16 kHz mono
+via libsndfile, ~3× smaller than FLAC and ~9× smaller than 16-bit WAV for
+speech; 0600. FLAC is written instead when libsndfile has no Opus encoder and a
+stdlib WAV when libsndfile is missing, and clips in every container (`.ogg`,
+`.flac`, `.wav`) from earlier releases stay readable, seekable for reprocess
+windows, and prunable. The live dictation spool stays raw PCM
+(`.active/<session>.pcm16.part`) so a crash never loses audio to an encoder. The
+`final` event then carries `audio` (the clip basename), which the app stores in
+history. Retention runs on engine start and after each save: clips older than
+`audio_retention_days` (default 180) are deleted, then a total-size cap
+(`audio_max_mb`, default 4096) evicts oldest-first.
 Reprocessing re-transcribes a saved clip, optionally with a different model:
 ```
-app → engine  {"cmd":"reprocess","audio":"uuid.flac","id":42,
+app → engine  {"cmd":"reprocess","audio":"uuid.ogg","id":42,
                "stt_model":"mlx-community/whisper-large-v3-mlx","mode":null,"language":"hi"}
-engine → app  {"event":"reprocessed","id":42,"audio":"uuid.flac","raw":"...","text":"...",
+engine → app  {"event":"reprocessed","id":42,"audio":"uuid.ogg","raw":"...","text":"...",
                "mode":"Default","stt_model":"...","stt_ms":1830,"cleanup_ms":0,
                "cleanup_wall_ms":4,"cleanup_applied":false}
 ```

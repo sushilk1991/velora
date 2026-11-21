@@ -82,7 +82,7 @@ struct PendingStorageCleanup: Codable {
     var meetings: Set<String> = []
     static func validClipName(_ name: String) -> Bool {
         name == URL(fileURLWithPath: name).lastPathComponent
-            && ["flac", "wav"].contains(URL(fileURLWithPath: name).pathExtension)
+            && AppConfig.archivedAudioExtensions.contains(URL(fileURLWithPath: name).pathExtension)
             && name.unicodeScalars.allSatisfy { CharacterSet.alphanumerics.union(CharacterSet(charactersIn: "._-")).contains($0) }
     }
 }
@@ -217,7 +217,7 @@ final class StorageRetention {
                 && ($0.micPath != nil || $0.systemPath != nil) }
             let children = (try? FileManager.default.contentsOfDirectory(at: archive, includingPropertiesForKeys: nil)) ?? []
             var expiredClips = children.compactMap { url -> RetentionPreview.Audio? in
-                guard ["flac", "wav"].contains(url.pathExtension), !protected.contains(url.lastPathComponent),
+                guard AppConfig.archivedAudioExtensions.contains(url.pathExtension), !protected.contains(url.lastPathComponent),
                       let stamp = RetentionAudioStamp.read(url), stamp.modified < cutoff(dictationAudioDays) else { return nil }
                 return RetentionPreview.Audio(url: url, stamp: stamp)
             }
@@ -229,7 +229,7 @@ final class StorageRetention {
             var urls = expiredClips.map(\.url)
             urls += historyRows.compactMap { row in
                 guard let name = row.audioPath, name == URL(fileURLWithPath: name).lastPathComponent,
-                      ["flac", "wav"].contains(URL(fileURLWithPath: name).pathExtension) else { return nil }
+                      AppConfig.archivedAudioExtensions.contains(URL(fileURLWithPath: name).pathExtension) else { return nil }
                 return archive.appendingPathComponent(name)
             }
             let dictationAudio = Set(urls).map { RetentionPreview.Audio(url: $0, stamp: RetentionAudioStamp.read($0)) }

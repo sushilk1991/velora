@@ -168,6 +168,7 @@ enum Selftest {
             testIntelligencePerformance100K()
         }
         testQualityObservationMetrics()
+        testArchivedClipPlayback()
         testMeetingStore()
         testMeetingProcessingPipeline()
         testMeetingTrackIssues()
@@ -5957,11 +5958,64 @@ enum Selftest {
 
     // MARK: - Private meeting memory
 
+    /// History playback picks a decoder per archive container: the engine now
+    /// archives Ogg Opus, which `AVAudioPlayer` opens but refuses to play.
+    private static func testArchivedClipPlayback() {
+        expect(ArchivedClipPlayer.route(forExtension: "ogg") == .engine
+               && ArchivedClipPlayer.route(forExtension: "OGG") == .engine
+               && ArchivedClipPlayer.route(forExtension: "flac") == .avPlayer
+               && ArchivedClipPlayer.route(forExtension: "wav") == .avPlayer,
+               "Ogg clips route to AVAudioEngine, FLAC and WAV to AVAudioPlayer")
+
+        let root = FileManager.default.temporaryDirectory
+            .appendingPathComponent("velora-clip-playback-\(UUID().uuidString)", isDirectory: true)
+        defer { try? FileManager.default.removeItem(at: root) }
+        try? FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+        let wav = root.appendingPathComponent("clip.wav")
+        let quarterSecond: AVAudioFrameCount = 4_000
+        if let format = AVAudioFormat(standardFormatWithSampleRate: 16_000, channels: 1),
+           let buffer = AVAudioPCMBuffer(pcmFormat: format, frameCapacity: quarterSecond) {
+            buffer.frameLength = quarterSecond
+            if let samples = buffer.floatChannelData?[0] {
+                for index in 0..<Int(buffer.frameLength) {
+                    samples[index] = sin(Float(index) * 0.05) * 0.2
+                }
+            }
+            if let file = try? AVAudioFile(forWriting: wav, settings: format.settings) {
+                try? file.write(from: buffer)
+            }
+        }
+
+        let direct = ArchivedClipPlayer(url: wav)
+        expect(direct?.route == .avPlayer && abs((direct?.duration ?? 0) - 0.25) < 0.01,
+               "a WAV clip plays through AVAudioPlayer at its real duration, got \(String(describing: direct?.duration))")
+        direct?.play()
+        direct?.stop()
+
+        // The engine path Ogg clips take. macOS reads Ogg Opus but cannot write
+        // it, so the selftest feeds the same player a WAV: what differs for a
+        // real clip is only what AVAudioFile hands the decoder.
+        let streamed = StreamedClipPlayer(url: wav)
+        expect(streamed != nil && abs((streamed?.duration ?? 0) - 0.25) < 0.01,
+               "the streamed player measures a clip from its decoded frames, got \(String(describing: streamed?.duration))")
+        streamed?.play()
+        streamed?.stop()
+
+        let garbage = root.appendingPathComponent("not-audio.ogg")
+        FileManager.default.createFile(atPath: garbage.path, contents: Data("nope".utf8))
+        expect(ArchivedClipPlayer(url: garbage) == nil,
+               "a corrupt clip yields no player instead of a stuck play button")
+    }
+
     private static func testMeetingStore() {
-        expect(AppConfig.archivedAudioURL(name: "session-1.flac") != nil
+        expect(AppConfig.archivedAudioURL(name: "session-1.ogg") != nil
+               && AppConfig.archivedAudioURL(name: "session-1.flac") != nil
+               && AppConfig.archivedAudioURL(name: "session-1.wav") != nil
                && AppConfig.archivedAudioURL(name: "../outside.wav") == nil
-               && AppConfig.archivedAudioURL(name: "session-1.m4a") == nil,
-               "dictation archive paths accept only engine-owned FLAC/WAV basenames")
+               && AppConfig.archivedAudioURL(name: "../outside.ogg") == nil
+               && AppConfig.archivedAudioURL(name: "session-1.m4a") == nil
+               && AppConfig.archivedAudioURL(name: "session-1") == nil,
+               "dictation archive paths accept only engine-owned OGG/FLAC/WAV basenames")
         let root = FileManager.default.temporaryDirectory
             .appendingPathComponent("velora-meetings-\(UUID().uuidString)", isDirectory: true)
         let db = root.appendingPathComponent("meetings.sqlite3")
