@@ -117,6 +117,9 @@ final class MeetingCoordinator: ObservableObject {
         capture.onSystemAudioFailure = { [weak self] message in
             self?.systemAudioDidFail(message)
         }
+        capture.onSystemAudioStatus = { [weak self] status in
+            self?.systemAudioStatusDidChange(status)
+        }
         capture.onMicrophoneFailure = { [weak self] message in
             self?.microphoneDidFail(message)
         }
@@ -127,6 +130,16 @@ final class MeetingCoordinator: ObservableObject {
 
     func start() {
         guard !terminating else { return }
+        // Crash checkpoints the store's launch recovery did not consume
+        // belong to captures with no surviving row; name them in the log
+        // rather than silently sweeping a resumable recording.
+        let pendingResume = MeetingResumeSidecarStore.pendingSidecars(
+            in: AppConfig.meetingsDirectory)
+        if !pendingResume.isEmpty {
+            veloraLog(
+                "Velora: \(pendingResume.count) interrupted meeting "
+                + "checkpoint(s) pending resume reconciliation")
+        }
         store.pruneAudio(olderThanDays: config.meetingAudioRetentionDays)
         // First launch must stay focused on permissions/onboarding, and a
         // suggestion is useless until capture can actually use the mic.
@@ -162,7 +175,14 @@ final class MeetingCoordinator: ObservableObject {
     }
 
     func stopRecording() {
-        finishActiveRecording(enqueue: true, completion: nil)
+        stopRecording(reason: .user)
+    }
+
+    /// Ends the active recording for `reason`. A user stop (`.user`) always
+    /// wins immediately — it never waits for an end-detection hold.
+    func stopRecording(reason: MeetingEndReason) {
+        if reason == .user { _ = endWatch.confirmUserStop() }
+        finishActiveRecording(enqueue: true, reason: reason, completion: nil)
     }
 
     /// Finalizes an active recording before app teardown. Graceful quit must
@@ -218,7 +238,8 @@ final class MeetingCoordinator: ObservableObject {
         }
         if state.isRecording {
             veloraLog("Velora: termination finalizing active meeting recording")
-            finishActiveRecording(enqueue: false, completion: completion)
+            finishActiveRecording(
+                enqueue: false, reason: .appTermination, completion: completion)
             return
         }
         guard capture.isCapturing else { completion(); return }
@@ -236,12 +257,15 @@ final class MeetingCoordinator: ObservableObject {
 
     private func finishActiveRecording(
         enqueue: Bool,
+        reason: MeetingEndReason = .user,
         completion: (() -> Void)?
     ) {
         guard case .recording(let id, let title, _, _, _) = state else {
             completion?()
             return
         }
+        capture.noteEndReason(reason)
+        store.setEndReason(meetingID: id, reason: reason)
         settleEndWatch()
         if let completion { finishCallbacks.append(completion) }
         finishingMeetingID = id
@@ -276,7 +300,8 @@ final class MeetingCoordinator: ObservableObject {
                     calendarEventID: metadata?.calendarID,
                     status: .processing,
                     micPath: files.micRelativePath,
-                    systemPath: files.systemRelativePath)
+                    systemPath: files.systemRelativePath,
+                    endReason: reason)
                 self.store.insertProcessing(record)
                 veloraLog(
                     "Velora: meeting \(id) recording stopped after "
@@ -446,18 +471,48 @@ final class MeetingCoordinator: ObservableObject {
         case .recording(
             let id, let title, let startedAt, let systemAudio, let endDetected
         ):
+            // A different mic-backed call matters only once the bound call
+            // is missing (holding, or already asking): then it is a call
+            // switch to rebind to, not unrelated noise to sustain the watch.
+            let otherCall = present ? nil : presences.first {
+                $0.micBacked && !watchScope.matches($0)
+                    && MeetingWatchScope.callKey(for: $0) != nil
+            }
             if endDetected {
-                guard present else { return }
-                // The call is back (rejoined, or a flaky poll) — withdraw the
-                // HUD question rather than let it stop a live meeting.
-                _ = endWatch.observe(present: true)
-                state = .recording(
-                    id: id, title: title, startedAt: startedAt,
-                    systemAudio: systemAudio, endDetected: false)
+                if present {
+                    // The call is back (rejoined, or a flaky poll) — withdraw
+                    // the HUD question rather than let it stop a live meeting.
+                    _ = endWatch.observe(presence: .present(
+                        callID: relevant.first
+                            .flatMap(MeetingWatchScope.callKey(for:))))
+                    state = .recording(
+                        id: id, title: title, startedAt: startedAt,
+                        systemAudio: systemAudio, endDetected: false)
+                } else if let otherCall {
+                    rebindWatch(to: otherCall)
+                    state = .recording(
+                        id: id, title: title, startedAt: startedAt,
+                        systemAudio: systemAudio, endDetected: false)
+                }
                 return
             }
-            if case .ended = endWatch.observe(present: present) {
+            let observation: MeetingEndWatch.PresenceObservation
+            if present {
+                observation = .present(callID: relevant.first
+                    .flatMap(MeetingWatchScope.callKey(for:)))
+            } else if endWatch.isHoldingEnd, let otherCall {
+                observation = .differentCall(
+                    callID: MeetingWatchScope.callKey(for: otherCall))
+            } else {
+                observation = .absent
+            }
+            switch endWatch.observe(presence: observation) {
+            case .ended:
                 meetingLikelyEnded()
+            case .callSwitched:
+                if let otherCall { rebindScope(to: otherCall) }
+            case .none, .holding, .holdCancelled:
+                break
             }
         case .idle, .preparing:
             break
@@ -476,7 +531,7 @@ final class MeetingCoordinator: ObservableObject {
         if MeetingPolicy.automaticallyFinishes(
             behavior: behavior, microphoneEvidence: recordingMicEvidence, scope: watchScope) {
             veloraLog("Velora: native call released its microphone — stopping and creating notes")
-            stopRecording()
+            stopRecording(reason: .mic)
             return
         }
         veloraLog("Velora: meeting end is not attributable enough to auto-stop — asking in HUD")
@@ -487,7 +542,9 @@ final class MeetingCoordinator: ObservableObject {
 
     func confirmMeetingEnded() {
         guard case .recording(_, _, _, _, true) = state else { return }
-        stopRecording()
+        // The user affirmed the detected end in the HUD: a user stop, and
+        // like every user stop it does not wait for any hold.
+        stopRecording(reason: .user)
     }
 
     func keepMeetingRecording() {
@@ -508,10 +565,31 @@ final class MeetingCoordinator: ObservableObject {
     ) {
         watchScope = .forChannel(channel)
         recordingMicEvidence = micBacked && watchScope != .unknown
+        // Held end confirmation (V-24): at least the default 3 consecutive
+        // absent polls, keeping longer streaks for browser/manual scopes.
         endWatch = MeetingEndWatch(
-            threshold: watchScope.endThreshold,
-            confirmed: callConfirmed)
+            holdThreshold: max(
+                MeetingEndWatch.defaultHoldThreshold, watchScope.endThreshold),
+            confirmed: callConfirmed,
+            boundCallID: watchScope.callKey)
         detector.setEndWatch(true)
+    }
+
+    /// The bound call dropped but a different identified call is live:
+    /// rebind scope + watch to it and cancel the hold (V-24), instead of
+    /// ending a meeting that merely moved calls.
+    private func rebindWatch(to presence: MeetingPresence) {
+        _ = endWatch.observe(presence: .differentCall(
+            callID: MeetingWatchScope.callKey(for: presence)))
+        rebindScope(to: presence)
+    }
+
+    private func rebindScope(to presence: MeetingPresence) {
+        watchScope = .forChannel(presence.channel)
+        recordingMicEvidence = presence.micBacked && watchScope != .unknown
+        veloraLog(
+            "Velora: meeting call switched to \(presence.source) — "
+            + "end hold cancelled, watch rebound")
     }
 
     /// Disarms watching and withdraws any open destructive confirmation.
@@ -561,7 +639,9 @@ final class MeetingCoordinator: ObservableObject {
             micPath: "\(id)/me.caf",
             systemPath: MeetingSystemAudioPolicy.relativePath(meetingID: id)))
         state = .preparing(title: title)
-        capture.start(meetingID: id, livePreview: livePreview.enabled) { [weak self] result in
+        capture.start(
+            meetingID: id, title: title, livePreview: livePreview.enabled
+        ) { [weak self] result in
             guard let self else { return }
             guard !self.terminating else {
                 if self.capture.isCapturing {
@@ -661,6 +741,7 @@ final class MeetingCoordinator: ObservableObject {
 
     private func discardActiveCapture() {
         guard case .recording(let id, let title, _, _, _) = state else { return }
+        capture.noteEndReason(.user)
         settleEndWatch()
         discardingMeetingID = id
         state = .preparing(title: "Discarding \(title)…")
@@ -679,6 +760,30 @@ final class MeetingCoordinator: ObservableObject {
                 self.finishCallbacks.removeAll()
                 callbacks.forEach { $0() }
             }
+        }
+    }
+
+    /// Watchdog status surfacing (V-23): a reconnect flips the recording
+    /// back to "Mic + Mac audio"; loss is logged here and also arrives via
+    /// `systemAudioDidFail`, which owns the state flip and error sound.
+    private func systemAudioStatusDidChange(_ status: SystemAudioWatchdog.State) {
+        switch status {
+        case .restarting(let attempt):
+            veloraLog("Velora: computer audio reconnecting (attempt \(attempt))")
+        case .reconnected(let attemptsUsed):
+            veloraLog(
+                "Velora: computer audio reconnected after "
+                + "\(attemptsUsed) attempt(s)")
+            guard case .recording(
+                let id, let title, let startedAt, false, let endDetected
+            ) = state else { return }
+            state = .recording(
+                id: id, title: title, startedAt: startedAt,
+                systemAudio: true, endDetected: endDetected)
+        case .lost:
+            veloraLog("Velora: computer audio lost — continuing mic only")
+        case .healthy:
+            break
         }
     }
 
@@ -717,7 +822,7 @@ final class MeetingCoordinator: ObservableObject {
         // A meeting without a reliable local track should not keep appearing
         // healthy. Stop immediately, retain whatever was captured, and tell
         // the user exactly what happened.
-        stopRecording()
+        stopRecording(reason: .error)
         let alert = NSAlert()
         alert.alertStyle = .critical
         alert.messageText = "Microphone recording stopped"
