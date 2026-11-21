@@ -64,7 +64,14 @@ from .media import (
     plan_meeting_slices, split_for_batch,
     sweep_meeting_failures, sweep_meeting_temp,
 )
-from .meeting_notes import chunk_transcript, merge_notes, parse_notes_json
+from .meeting_notes import (
+    chunk_transcript,
+    compose_condensed_transcript,
+    merge_notes,
+    parse_notes_json,
+    split_head_middle_tail,
+    with_omission_note,
+)
 from .meeting_intelligence import chapters_in_chunk, prepare_passages, validate_chapters
 from .stt import (
     SAMPLE_RATE,
@@ -328,6 +335,19 @@ MEETING_NOTES_CHUNK_CHARS = 4_000
 MEETING_NOTES_RETRY_CHUNK_CHARS = 2_000
 MEETING_NOTES_MAP_MAX_TOKENS = 384
 MEETING_NOTES_REDUCE_MAX_TOKENS = 512
+# Transcript a notes pass reads without condensing. The reducer keeps only
+# 8 notes items and 4,000 summary characters after merging, so past roughly
+# five map sections its bounded merge drops whatever came last — usually the
+# closing decisions and action items. Beyond this budget the middle is
+# condensed instead; a meeting inside it keeps the exact chunk/map/reduce
+# path it had before.
+MEETING_NOTES_SINGLE_PASS_CHARS = 5 * MEETING_NOTES_CHUNK_CHARS
+# One middle digest is a short paragraph, not notes.
+MEETING_NOTES_CONDENSE_MAX_TOKENS = 320
+# Consecutive middle sections that fail to condense before the rest are
+# omitted outright. Each attempt can cost a full timeout, and a model that
+# just timed out twice will not recover on the 40th section of a 2h meeting.
+MEETING_NOTES_MAX_CONDENSE_FAILURES = 2
 # A section whose first attempt times out costs that timeout plus its split
 # retry. After this many sections in a row time out on their first attempt,
 # each later section gets one attempt and no split retry, so a slow model
@@ -7280,6 +7300,18 @@ class Engine:
             + "Keep the summary to 3-6 concise sentences and each array to at most 8 "
             + f"concise items. {schema_clause}"
         )
+        # Middle sections of a long meeting reach the model as digests, so the
+        # prompt asks for what notes must be able to cite later: decisions,
+        # owners, deadlines, and open questions, each as stated.
+        condense_prompt = (
+            "Compress this middle section of a meeting transcript into a compact "
+            "factual digest. Keep every explicit decision, action item, owner, "
+            "deadline, number, and open question as it was stated, and keep "
+            "tentative suggestions tentative. Do not invent owners, deadlines, "
+            "decisions, or facts. Me and Them are audio channels, not verified "
+            "identities, so never name who a speaker is. Reply with plain prose "
+            "only: no JSON, no headings, at most 120 words."
+        )
 
         async def fail(error: str, code: str = "failed") -> None:
             await self._send({
@@ -7287,9 +7319,14 @@ class Engine:
                 "meeting_id": meeting_id, "code": code, "error": error,
             })
 
-        async def generate(
+        async def generate_text(
             user_text: str, prompt: str, max_tokens: int
-        ) -> tuple[dict[str, Any] | None, str | None, _NotesFailure | None]:
+        ) -> tuple[str | None, str | None, _NotesFailure | None]:
+            """Raw model text for free-form work (middle-section digests).
+
+            The notes schema is enforced by ``generate`` below; a digest is
+            prose, so it must not be parsed as notes.
+            """
             # Callers check cancel and shutdown right after every call, so
             # those returns carry no failure kind.
             while not self._meeting_notes_cancel:
@@ -7380,20 +7417,83 @@ class Engine:
                         f"local notes generation failed ({reason})",
                         failure,
                     )
-                parsed = parse_notes_json(result.text)
-                if parsed is None:
-                    return (
-                        None,
-                        "the local notes model returned malformed notes",
-                        _NotesFailure.section_retryable,
-                    )
-                if "chapters" in parsed:
-                    parsed["chapters"] = chapters_in_chunk(parsed["chapters"], user_text)
-                return parsed, None, None
+                return result.text, None, None
             return None, "cancelled", None
+
+        async def generate(
+            user_text: str, prompt: str, max_tokens: int
+        ) -> tuple[dict[str, Any] | None, str | None, _NotesFailure | None]:
+            text, error, failure = await generate_text(user_text, prompt, max_tokens)
+            if text is None:
+                return None, error, failure
+            parsed = parse_notes_json(text)
+            if parsed is None:
+                return (
+                    None,
+                    "the local notes model returned malformed notes",
+                    _NotesFailure.section_retryable,
+                )
+            if "chapters" in parsed:
+                parsed["chapters"] = chapters_in_chunk(parsed["chapters"], user_text)
+            return parsed, None, None
 
         self._begin_batch_job(lower_priority=False)
         try:
+            middle_note: str | None = None
+            # Passages carry chapter keys the model has to cite verbatim, so
+            # that path never condenses its middle.
+            if not passages:
+                plan = split_head_middle_tail(
+                    transcript, MEETING_NOTES_SINGLE_PASS_CHARS,
+                    middle_chunk_chars=MEETING_NOTES_CHUNK_CHARS)
+                if plan.truncated:
+                    digests: list[str | None] = []
+                    failures = 0
+                    for middle_chunk in plan.middle_chunks:
+                        if self.shutdown.is_set():
+                            await fail("engine shutting down", "engine_shutdown")
+                            return
+                        if self._meeting_notes_cancel:
+                            await fail("cancelled", "cancelled")
+                            return
+                        if failures >= MEETING_NOTES_MAX_CONDENSE_FAILURES:
+                            # The remaining sections stay uncondensed and are
+                            # reported in the summary note below.
+                            digests.append(None)
+                            continue
+                        digest, middle_error, middle_failure = await generate_text(
+                            middle_chunk, condense_prompt,
+                            MEETING_NOTES_CONDENSE_MAX_TOKENS)
+                        if self.shutdown.is_set():
+                            await fail("engine shutting down", "engine_shutdown")
+                            return
+                        if self._meeting_notes_cancel:
+                            await fail("cancelled", "cancelled")
+                            return
+                        digests.append(digest)
+                        if digest is not None:
+                            failures = 0
+                            continue
+                        failures += 1
+                        log.warning(
+                            "meeting notes could not condense section %d/%d of %s: %s",
+                            len(digests), len(plan.middle_chunks), meeting_id,
+                            middle_error or "empty digest",
+                        )
+                        if middle_failure is _NotesFailure.model:
+                            # Every later section would fail the same way; the
+                            # map stage below reports the lost model.
+                            digests.extend(
+                                [None] * (len(plan.middle_chunks) - len(digests)))
+                            break
+                    condensed = compose_condensed_transcript(plan, digests)
+                    transcript = condensed.text
+                    middle_note = condensed.note
+                    if condensed.omitted_spans:
+                        log.warning(
+                            "meeting notes for %s omit %d middle section(s)",
+                            meeting_id, len(condensed.omitted_spans),
+                        )
             chunks = chunk_transcript(
                 transcript, max_chars=MEETING_NOTES_CHUNK_CHARS)
             partials: list[dict[str, Any]] = []
@@ -7552,10 +7652,18 @@ class Engine:
             if self._meeting_notes_cancel:
                 await fail("cancelled", "cancelled")
                 return
+            if middle_note:
+                # Appended after the reducer, so no later model call can drop
+                # the one sentence that keeps the summary honest.
+                merged = {
+                    **merged,
+                    "summary": with_omission_note(
+                        str(merged.get("summary") or ""), middle_note),
+                }
             await self._send({
                 "event": "meeting_notes_ready", "id": job_id,
                 "meeting_id": meeting_id, **merged,
-                "partial": skipped_chunks > 0,
+                "partial": skipped_chunks > 0 or middle_note is not None,
                 "chapters": chapters,
             })
             self._restart_if_cleanup_unhealthy()
