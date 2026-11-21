@@ -3,6 +3,7 @@
 # Source this file from zsh scripts; it intentionally performs no work itself.
 
 VELORA_BUNDLE_ID="com.sushil.velora"
+VELORA_DEV_BUNDLE_ID="com.sushil.velora.dev"
 VELORA_TEAM_ID="JZFVKGDPU4"
 VELORA_ICLOUD_CONTAINER="iCloud.com.velora.app"
 

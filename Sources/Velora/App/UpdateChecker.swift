@@ -125,10 +125,11 @@ final class UpdateChecker {
         available = restored.available
     }
 
-    /// Only app bundles participate in updates. Bare binaries embed version
-    /// metadata for CLI/MCP, but the installer cannot replace them.
+    /// Only release app bundles participate in updates. Bare binaries and
+    /// `Velora Dev.app` cannot be replaced by the release self-updater.
     static var currentVersion: String? {
-        guard Bundle.main.bundleURL.pathExtension == "app" else { return nil }
+        guard Bundle.main.bundleURL.pathExtension == "app",
+              !AppIdentity.isDevBuild else { return nil }
         return Bundle.main.object(forInfoDictionaryKey: "CFBundleShortVersionString") as? String
     }
 
@@ -177,7 +178,8 @@ final class UpdateChecker {
     ) {
         dispatchPrecondition(condition: .onQueue(.main))
         guard let current = Self.currentVersion else {
-            completion(.failed("Open Velora.app to check for and install updates."))
+            completion(.failed(AppIdentity.updatesDisabledMessage(
+                bundleIdentifier: Bundle.main.bundleIdentifier)))
             return
         }
         guard let apiURL = Self.apiURL else {

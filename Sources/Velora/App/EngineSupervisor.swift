@@ -496,6 +496,9 @@ final class EngineSupervisor: NSObject, EngineClientDelegate {
         proc.currentDirectoryURL = engine.directory
 
         var env = ProcessInfo.processInfo.environment
+        if env["VELORA_HOME"] == nil {
+            env["VELORA_HOME"] = AppConfig.veloraDirectory.path
+        }
         let extraPaths = ["/opt/homebrew/bin", "/usr/local/bin",
                           "\(NSHomeDirectory())/.local/bin"]
         env["PATH"] = (extraPaths + [(env["PATH"] ?? "/usr/bin:/bin")]).joined(separator: ":")

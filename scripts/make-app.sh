@@ -102,8 +102,21 @@ swift build "${SWIFT_BUILD_ARGS[@]}"
 
 BIN=".build/$CONFIG/Velora"
 SHIPPED_BIN=".build/$CONFIG/Velora-stripped"
-APP="build/Velora.app"
-DSYM="build/Velora.app.dSYM"
+IS_DEV_BUNDLE=0
+if [[ "$CONFIG" == "debug" && "${VELORA_DISTRIBUTION:-0}" != "1" ]]; then
+  IS_DEV_BUNDLE=1
+fi
+if (( IS_DEV_BUNDLE )); then
+  APP="build/Velora Dev.app"
+  DSYM="build/Velora Dev.app.dSYM"
+  APP_BUNDLE_ID="$VELORA_DEV_BUNDLE_ID"
+  APP_DISPLAY_NAME="Velora Dev"
+else
+  APP="build/Velora.app"
+  DSYM="build/Velora.app.dSYM"
+  APP_BUNDLE_ID="$VELORA_BUNDLE_ID"
+  APP_DISPLAY_NAME="Velora"
+fi
 
 # Ship a stripped executable and keep its symbols in a dSYM beside the bundle
 # (make-dmg.sh archives it next to the DMG) so crash reports stay
@@ -217,6 +230,11 @@ fi
   || /usr/libexec/PlistBuddy -c "Add :CFBundleShortVersionString string $VERSION" "$APP/Contents/Info.plist"
 /usr/libexec/PlistBuddy -c "Set :CFBundleVersion $BUILD_NUM" "$APP/Contents/Info.plist" 2>/dev/null \
   || /usr/libexec/PlistBuddy -c "Add :CFBundleVersion string $BUILD_NUM" "$APP/Contents/Info.plist"
+if (( IS_DEV_BUNDLE )); then
+  /usr/libexec/PlistBuddy -c "Set :CFBundleIdentifier $APP_BUNDLE_ID" "$APP/Contents/Info.plist"
+  /usr/libexec/PlistBuddy -c "Set :CFBundleName $APP_DISPLAY_NAME" "$APP/Contents/Info.plist"
+  /usr/libexec/PlistBuddy -c "Set :CFBundleDisplayName $APP_DISPLAY_NAME" "$APP/Contents/Info.plist"
+fi
 
 # Bundle the engine project (sources + lockfile; no venv/tests/caches) so the
 # .app is self-contained. ResourceLocator syncs this to Application Support
@@ -284,7 +302,7 @@ fi
 if [[ -x "$APP/Contents/Resources/bin/uv" ]]; then
   codesign "${SIGN_ARGS[@]}" "$APP/Contents/Resources/bin/uv"
 fi
-codesign "${SIGN_ARGS[@]}" "${APP_SIGN_ARGS[@]}" --identifier "$VELORA_BUNDLE_ID" "$APP"
+codesign "${SIGN_ARGS[@]}" "${APP_SIGN_ARGS[@]}" --identifier "$APP_BUNDLE_ID" "$APP"
 codesign --verify --deep --strict --verbose=2 "$APP"
 if [[ "${VELORA_DISTRIBUTION:-0}" == "1" ]]; then
   SIGNED_ENTITLEMENTS="$(mktemp "${TMPDIR:-/tmp}/velora-signed-entitlements.XXXXXX")"

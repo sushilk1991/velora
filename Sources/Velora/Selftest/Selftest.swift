@@ -243,6 +243,7 @@ enum Selftest {
         testMicrophoneSwapAndRouteStamp()
         testDefaultInputHotSwap()
         testPlaybackPolicy()
+        testAppIdentity()
         testDeadInputRescue()
         testMicrophonePreferencePersistence()
         testAudioCaptureRequiresPCM()
@@ -19667,6 +19668,31 @@ private static func testLiveSystemWriterIsolation() {
                "preview storage failure cannot fail or truncate the full system recording")
     } catch { expect(false, "live system writer proof: \(error)") }
 }
+
+    private static func testAppIdentity() {
+        expect(!AppIdentity.isDevBundle(bundleIdentifier: AppIdentity.releaseBundleID),
+               "release bundle ID is not a dev bundle")
+        expect(!AppIdentity.isDevBundle(bundleIdentifier: nil),
+               "nil bundle ID defaults to release identity")
+        expect(AppIdentity.isDevBundle(bundleIdentifier: AppIdentity.devBundleID),
+               "dev bundle ID identifies Velora Dev")
+        expect(AppIdentity.displayName(bundleIdentifier: AppIdentity.releaseBundleID) == "Velora",
+               "release display name is Velora")
+        expect(AppIdentity.displayName(bundleIdentifier: AppIdentity.devBundleID) == "Velora Dev",
+               "dev display name is Velora Dev")
+        expect(AppIdentity.dataDirectoryName(bundleIdentifier: AppIdentity.releaseBundleID) == ".velora",
+               "release data dir is .velora")
+        expect(AppIdentity.dataDirectoryName(bundleIdentifier: AppIdentity.devBundleID) == ".velora-dev",
+               "dev data dir is .velora-dev")
+        expect(AppIdentity.applicationSupportName(bundleIdentifier: AppIdentity.releaseBundleID) == "Velora",
+               "release Application Support dir is Velora")
+        expect(AppIdentity.applicationSupportName(bundleIdentifier: AppIdentity.devBundleID) == "Velora Dev",
+               "dev Application Support dir is Velora Dev")
+        expect(AppIdentity.updatesDisabledMessage(bundleIdentifier: AppIdentity.devBundleID).contains("Velora Dev"),
+               "dev bundle explains why updates are disabled")
+        expect(AppIdentity.updatesDisabledMessage(bundleIdentifier: nil) == "Open Velora.app to check for and install updates.",
+               "bare binary keeps the Open Velora.app update hint")
+    }
 
 }
 

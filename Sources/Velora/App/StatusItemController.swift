@@ -61,7 +61,7 @@ final class StatusItemController: NSObject, NSMenuDelegate {
     var setupStatus: String? {
         didSet {
             guard setupStatus != oldValue else { return }
-            statusItem?.button?.toolTip = setupStatus ?? "Velora"
+            statusItem?.button?.toolTip = setupStatus ?? AppIdentity.displayName
             // Menus only rebuild on open — tick the row live if it's showing
             // (a first-run user plausibly sits watching this exact line).
             if let setupMenuItem, let setupStatus {

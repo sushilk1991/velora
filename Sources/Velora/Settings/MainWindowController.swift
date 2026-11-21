@@ -179,7 +179,7 @@ final class MainWindowController: NSWindowController, NSWindowDelegate {
             actions: actions)
 
         let window = Self.makeShellWindow(
-            rootView: LocalizedInterface { root }, title: "Velora", size: Self.contentSize, minimumSize: Self.minimumSize)
+            rootView: LocalizedInterface { root }, title: AppIdentity.displayName, size: Self.contentSize, minimumSize: Self.minimumSize)
         // Reopens at the size and place the user left it: AppKit restores
         // the saved frame here and saves each move or resize. Not in
         // makeShellWindow, so selftest and harness windows never save one.

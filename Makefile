@@ -19,10 +19,11 @@ dmg:
 verify-dmg:
 	./scripts/verify-dmg.sh "$(DMG)"
 
-# Run the signed bundle so permissions, icon, version, and updates use the app.
+# Run the signed dev bundle (Velora Dev.app) so permissions, sockets, and data
+# stay isolated from an installed release /Applications/Velora.app.
 run:
 	./scripts/make-app.sh debug none
-	build/Velora.app/Contents/MacOS/Velora
+	"build/Velora Dev.app/Contents/MacOS/Velora"
 
 sounds:
 	./scripts/make-sounds.sh

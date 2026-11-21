@@ -178,9 +178,12 @@ final class AppConfig {
     private(set) var preservesSetupModelChoice: Bool = false
     private static let engineConfigLock = NSLock()
 
-    /// `~/.velora` — shared home for socket, config, modes, history.
+    /// `~/.velora` (or `~/.velora-dev` in `Velora Dev.app`) — shared home for
+    /// socket, config, modes, history.
     static var veloraDirectory: URL {
-        FileManager.default.homeDirectoryForCurrentUser.appendingPathComponent(".velora", isDirectory: true)
+        FileManager.default.homeDirectoryForCurrentUser.appendingPathComponent(
+            AppIdentity.dataDirectoryName(bundleIdentifier: Bundle.main.bundleIdentifier),
+            isDirectory: true)
     }
 
     static var socketPath: String {

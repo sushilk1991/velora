@@ -55,11 +55,13 @@ enum ResourceLocator {
         var refreshed = false
     }
 
-    /// `~/Library/Application Support/Velora` — home for the synced engine
-    /// project, its venv, and uv's caches in bundled (distribution) runs.
+    /// `~/Library/Application Support/Velora` (or `Velora Dev` in debug
+    /// bundles) — home for the synced engine project, its venv, and uv caches.
     static var applicationSupportDirectory: URL {
         FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask)[0]
-            .appendingPathComponent("Velora", isDirectory: true)
+            .appendingPathComponent(
+                AppIdentity.applicationSupportName(bundleIdentifier: Bundle.main.bundleIdentifier),
+                isDirectory: true)
     }
 
     /// The uv binary shipped inside the bundle (`Contents/Resources/bin/uv`),

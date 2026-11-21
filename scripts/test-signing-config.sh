@@ -271,5 +271,9 @@ fi
 grep -q 'VELORA_PROVISIONING_PROFILE' "$TMP_DIR/missing-profile.log"
 [[ "$(shasum VERSION Resources/Info.plist)" == "$VERSION_HASH" ]]
 
+grep -Fq 'APP="build/Velora Dev.app"' scripts/make-app.sh
+grep -Fq 'APP_BUNDLE_ID="$VELORA_DEV_BUNDLE_ID"' scripts/make-app.sh
+[[ "$VELORA_DEV_BUNDLE_ID" == "com.sushil.velora.dev" ]]
+
 plutil -lint Resources/Info.plist Resources/Velora.entitlements >/dev/null
 echo "signing config tests OK"
