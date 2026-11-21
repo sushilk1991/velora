@@ -234,6 +234,10 @@ final class AppConfig {
         veloraDirectory.appendingPathComponent("audio", isDirectory: true)
     }
 
+    /// Container extensions the engine may write into the archive: Ogg Opus
+    /// today, FLAC and WAV from earlier releases. Old clips must stay legible.
+    static let archivedAudioExtensions: Set<String> = ["ogg", "flac", "wav"]
+
     /// Resolves only engine-owned archive basenames. History is a local file,
     /// but a corrupted or manually edited row must never turn playback,
     /// reprocessing, or deletion into a path traversal outside the archive.
@@ -245,7 +249,7 @@ final class AppConfig {
                       .union(CharacterSet(charactersIn: "._-"))
                       .contains($0)
               }),
-              name.hasSuffix(".flac") || name.hasSuffix(".wav")
+              archivedAudioExtensions.contains(URL(fileURLWithPath: name).pathExtension)
         else { return nil }
         let root = audioDirectory.standardizedFileURL.resolvingSymlinksInPath()
         let candidate = root.appendingPathComponent(name)

@@ -45,7 +45,7 @@ final class HistoryViewModel: ObservableObject {
     private var reprocessSnapshots: [Int64: DictationRecord] = [:]
     private var reprocessObserver: NSObjectProtocol?
     private var searchObserver: AnyCancellable?
-    private var player: AVAudioPlayer?
+    private var player: ArchivedClipPlayer?
     /// Per-row reprocess generation: a later request invalidates an earlier
     /// request's timeout so it can't clear the fresh in-flight state.
     private var reprocessGen: [Int64: Int] = [:]
@@ -420,12 +420,12 @@ final class HistoryViewModel: ObservableObject {
               let url = AppConfig.archivedAudioURL(name: name) else { return }
         if playing == name { stopPlayback(); return }
         stopPlayback()
-        guard let player = try? AVAudioPlayer(contentsOf: url) else { return }
+        guard let player = ArchivedClipPlayer(url: url) else { return }
         self.player = player
         playing = name
         player.play()
-        // Poll for natural end (AVAudioPlayerDelegate needs @objc conformance;
-        // a lightweight timer keeps this file self-contained). Capture the
+        // Poll for natural end (a delegate would need @objc conformance on the
+        // model; a lightweight timer keeps this file self-contained). Capture the
         // playback generation so a stale timer can't stop a later replay — even
         // of the same clip basename.
         playGeneration += 1
