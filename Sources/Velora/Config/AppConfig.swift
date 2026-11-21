@@ -68,9 +68,19 @@ struct STTModel: Identifiable, Equatable {
             size: "2.5 GB", speed: "Fastest (live streaming)", languages: "English only"
         ),
         STTModel(
+            id: "ggerganov/whisper.cpp:ggml-tiny.en",
+            displayName: "Whisper Tiny (English)",
+            size: "0.08 GB", speed: "Fast", languages: "English only, smallest download"
+        ),
+        STTModel(
             id: "ggerganov/whisper.cpp:ggml-base.en",
             displayName: "Whisper Base (English)",
-            size: "0.15 GB", speed: "Fast", languages: "English only, smallest download"
+            size: "0.15 GB", speed: "Fast", languages: "English only, small download"
+        ),
+        STTModel(
+            id: "ggerganov/whisper.cpp:ggml-base",
+            displayName: "Whisper Base (Multilingual)",
+            size: "0.15 GB", speed: "Fast", languages: "99 languages, smallest download"
         ),
         STTModel(
             id: "ggerganov/whisper.cpp:ggml-small.en",
