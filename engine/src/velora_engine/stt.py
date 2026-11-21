@@ -2101,9 +2101,9 @@ class TranscribeCppWhisperBackend(WhisperBackend):
         # for auto/hi/… would make whisper.cpp log a warning per window and
         # some builds mis-decode. "en" is the only language the model has.
         language = whisper_language(self.language)
-        from .models import WHISPER_CPP_BASE_EN, WHISPER_CPP_SMALL_EN
-        if (self.model_id in (WHISPER_CPP_BASE_EN, WHISPER_CPP_SMALL_EN)
-                or Path(str(self._model_path)).name.lower().endswith(".en.bin")):
+        from .models import is_english_only_whisper_cpp
+        if (is_english_only_whisper_cpp(self.model_id)
+                or is_english_only_whisper_cpp(str(self._model_path))):
             language = "en"
         result = self._native_session.run(
             np.ascontiguousarray(audio, dtype=np.float32),
