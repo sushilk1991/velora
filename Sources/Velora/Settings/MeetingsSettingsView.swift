@@ -935,34 +935,38 @@ struct MeetingPreferenceRows: View {
                 }
             }
         GroupDivider()
-        SettingsRow(title: "Calendar lead time") {
-            Picker("Calendar lead time", selection: $calendarLeadMinutes) {
+        GroupRow(label: L10n.text("Calendar lead time")) {
+            HeaderMenu(
+                L10n.text("Calendar lead time"),
+                value: "\(calendarLeadMinutes) minutes",
+                selection: $calendarLeadMinutes
+            ) {
                 ForEach([0, 5, 10, 15, 30], id: \.self) { Text("\($0) minutes").tag($0) }
             }
-            .labelsHidden()
-            .frame(maxWidth: 150)
         }
         .disabled(!model.meetingCalendar)
-        .opacity(model.meetingCalendar ? 1 : 0.55)
+        .opacity(model.meetingCalendar ? 1 : 0.5)
         GroupDivider()
         VStack(alignment: .leading, spacing: 6) {
             HStack(alignment: .center, spacing: VeloraSpacing.m) {
                 Text(L10n.text("When the call ends"))
                     .font(.system(size: 13))
                 Spacer(minLength: VeloraSpacing.s)
-                Picker("When the call ends", selection: $meetingEndBehavior) {
+                HeaderMenu(
+                    L10n.text("When the call ends"),
+                    value: MeetingPolicy.EndBehavior(rawValue: meetingEndBehavior)?.title ?? meetingEndBehavior,
+                    selection: $meetingEndBehavior
+                ) {
                     ForEach(MeetingPolicy.EndBehavior.allCases) { Text($0.title).tag($0.rawValue) }
                 }
-                .labelsHidden()
-                .fixedSize()
             }
             Text(L10n.text("Browser and manual recordings always ask before finishing unless you choose to keep recording. Detection never starts a recording."))
-                .font(.system(size: 11.5))
+                .font(.system(size: 11))
                 .foregroundStyle(.secondary)
                 .fixedSize(horizontal: false, vertical: true)
         }
         .padding(.horizontal, 14)
-        .padding(.vertical, 10)
+        .padding(.vertical, VeloraSpacing.s)
         GroupDivider()
         SettingsToggleRow(
             title: "Improve remote speech detection",

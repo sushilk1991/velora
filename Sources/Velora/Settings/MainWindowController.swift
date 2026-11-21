@@ -490,67 +490,32 @@ struct SettingsPane: View {
     }
 }
 
-/// Snug segmented section strip for the Settings header (`General` … `Advanced`).
-/// Tab/←/→ move between sections; ⌘1–⌘6 stay bound to the main content panes.
+/// Segmented section picker for the Settings header (`General` … `Advanced`),
+/// matching `StatsHeaderControls` (`Today | 7 Days | 30 Days | All Time`).
+/// ⌘1–⌘6 stay bound to the main content panes.
 struct SettingsSectionStrip: View {
     @ObservedObject private var interfaceLocale = InterfaceLocale.shared
     @ObservedObject var selection: MainWindowSelection
 
+    private var tabBinding: Binding<SettingsTab> {
+        Binding(
+            get: { selection.currentSettingsTab },
+            set: { selection.settingsTab = $0 }
+        )
+    }
+
     var body: some View {
-        HStack(spacing: 2) {
+        Picker(L10n.text("Settings section"), selection: tabBinding) {
             ForEach(SettingsTab.allCases) { tab in
-                let selected = selection.currentSettingsTab == tab
-                Button {
-                    selection.settingsTab = tab
-                } label: {
-                    HStack(spacing: 6) {
-                        Image(systemName: tab.symbol)
-                            .font(.system(size: 11.5, weight: .medium))
-                            .foregroundStyle(selected ? AnyShapeStyle(VeloraBrand.accent) : AnyShapeStyle(.secondary))
-                        Text(tab.title)
-                            .font(.system(size: 12.5, weight: selected ? .semibold : .medium))
-                            .foregroundStyle(selected ? .primary : .secondary)
-                            .lineLimit(1)
-                    }
-                    .padding(.horizontal, 11)
-                    .padding(.vertical, 6)
-                    .background(
-                        RoundedRectangle(cornerRadius: 7, style: .continuous)
-                            .fill(selected ? VeloraPanel.raised : Color.clear)
-                    )
-                    .overlay(
-                        RoundedRectangle(cornerRadius: 7, style: .continuous)
-                            .strokeBorder(selected ? VeloraPanel.hairline : Color.clear, lineWidth: 1)
-                    )
-                    .contentShape(RoundedRectangle(cornerRadius: 7, style: .continuous))
-                }
-                .buttonStyle(.plain)
-                .help(tab.title)
-                .accessibilityAddTraits(selected ? [.isSelected] : [])
+                Text(tab.title).tag(tab)
             }
         }
-        .padding(3)
-        .fixedSize(horizontal: true, vertical: false)
-        .background(
-            RoundedRectangle(cornerRadius: 10, style: .continuous)
-                .fill(VeloraPanel.card)
-        )
-        .overlay(
-            RoundedRectangle(cornerRadius: 10, style: .continuous)
-                .strokeBorder(VeloraPanel.hairline, lineWidth: 1)
-        )
-        .onMoveCommand { direction in
-            let tabs = SettingsTab.allCases
-            guard let index = tabs.firstIndex(of: selection.currentSettingsTab) else { return }
-            switch direction {
-            case .left:
-                selection.settingsTab = tabs[max(index - 1, 0)]
-            case .right:
-                selection.settingsTab = tabs[min(index + 1, tabs.count - 1)]
-            default:
-                break
-            }
-        }
+        .pickerStyle(.segmented)
+        .labelsHidden()
+        // Large (30 pt) matches Stats' header segmented control and the
+        // 28 pt capsules across the rest of the window.
+        .controlSize(.large)
+        .fixedSize()
     }
 }
 

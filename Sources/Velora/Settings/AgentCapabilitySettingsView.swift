@@ -3,17 +3,22 @@ import SwiftUI
 struct AgentCapabilitySettingsView: View {
     let enabled: Bool
     @State private var revision = 0
+
     var body: some View {
-        DisclosureGroup("Local-agent permissions") {
-            VStack(alignment: .leading, spacing: 10) {
+        SettingsDisclosureRow(title: "Local-agent permissions") {
+            VStack(alignment: .leading, spacing: VeloraSpacing.m) {
                 ForEach(AgentCapability.allCases) { capability in
                     HStack(alignment: .center, spacing: VeloraSpacing.m) {
                         VStack(alignment: .leading, spacing: 2) {
-                            Text(capability.title).font(.system(size: 12.5))
-                            Text(capability.detail).font(.caption).foregroundStyle(.secondary)
+                            Text(capability.title)
+                                .font(.system(size: 13))
+                            Text(capability.detail)
+                                .font(.system(size: 11))
+                                .foregroundStyle(.secondary)
+                                .fixedSize(horizontal: false, vertical: true)
                         }
-                        Spacer()
-                        Toggle("", isOn: Binding(
+                        Spacer(minLength: 0)
+                        Toggle(capability.title, isOn: Binding(
                             get: { _ = revision; return AgentAccessPolicy.shared.allows(capability) },
                             set: { AgentAccessPolicy.shared.setAllowed($0, for: capability); revision += 1 }
                         ))
@@ -23,11 +28,9 @@ struct AgentCapabilitySettingsView: View {
                     }
                 }
             }
-            .padding(.top, 8)
             .disabled(!enabled)
+            .opacity(enabled ? 1 : 0.5)
         }
-        .padding(.horizontal, 14)
-        .padding(.vertical, 10)
         .onReceive(NotificationCenter.default.publisher(for: .veloraAgentCapabilitiesChanged)) { _ in revision += 1 }
     }
 }

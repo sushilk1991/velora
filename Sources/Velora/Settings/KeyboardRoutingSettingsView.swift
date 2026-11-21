@@ -2,15 +2,14 @@ import SwiftUI
 
 /// Rules are edited in place; recording snapshots the current rule once.
 struct KeyboardRoutingSettingsView: View {
+    @ObservedObject private var interfaceLocale = InterfaceLocale.shared
     @ObservedObject var model: SettingsModel
     @State private var source = KeyboardLanguageRouting.currentInputSource()
     @State private var cachedModels: Set<String> = []
 
     var body: some View {
-        SettingsCard(
-            title: "Keyboard language rules",
-            symbol: "globe",
-            tint: VeloraBrand.accent,
+        GroupCard(
+            header: L10n.text("Keyboard language rules"),
             footer: "Add a rule for each keyboard you use. Your selected speech model remains the manual fallback. Rules take effect on the next recording and never start a download; install a model in Models first. Turn this off to use the language above."
         ) {
             SettingsToggleRow(
@@ -19,17 +18,19 @@ struct KeyboardRoutingSettingsView: View {
             if model.followKeyboardLanguage {
                 if let source {
                     GroupDivider()
-                    SettingsRow(title: "Current keyboard", subtitle: source.name) {
+                    GroupRow(label: L10n.text("Current keyboard"), sub: source.name) {
                         if model.keyboardSpeechRoutes[source.id] == nil {
-                            Button("Add rule") {
+                            Button(L10n.text("Add rule")) {
                                 let language = KeyboardLanguageRouting.languages.contains(where: { $0.0 == source.language })
                                     ? source.language : "auto"
                                 model.keyboardSpeechRoutes[source.id] = KeyboardSpeechRoute(
                                     language: language, model: model.sttModel)
                             }
-                            .buttonStyle(.settingsChip)
+                            .buttonStyle(.capsule)
                         } else {
-                            SettingsStatusPill(text: "Configured", tint: VeloraStatus.success)
+                            Text(L10n.text("Configured"))
+                                .font(.system(size: 12))
+                                .foregroundStyle(.secondary)
                         }
                     }
                 }
@@ -38,55 +39,60 @@ struct KeyboardRoutingSettingsView: View {
                     VStack(alignment: .leading, spacing: VeloraSpacing.s) {
                         HStack {
                             Text(source?.id == id ? (source?.name ?? id) : id)
-                                .font(.system(size: 12, weight: .semibold))
+                                .font(.system(size: 13, weight: .medium))
                                 .lineLimit(2)
                             Spacer()
-                            Button("Remove", role: .destructive) {
+                            Button(L10n.text("Remove"), role: .destructive) {
                                 model.keyboardSpeechRoutes.removeValue(forKey: id)
                             }
-                            .buttonStyle(.settingsChip)
+                            .buttonStyle(.capsule)
                         }
                         HStack(spacing: VeloraSpacing.m) {
-                            Text("Language").font(.system(size: 12.5)).foregroundStyle(.secondary)
+                            Text(L10n.text("Language"))
+                                .font(.system(size: 12))
+                                .foregroundStyle(.secondary)
                             Spacer()
-                            Picker("Language", selection: languageBinding(id)) {
+                            HeaderMenu(
+                                L10n.text("Language"),
+                                value: languageTitle(for: id),
+                                selection: languageBinding(id)
+                            ) {
                                 ForEach(KeyboardLanguageRouting.languages, id: \.0) { Text($0.1).tag($0.0) }
                                 if let selected = model.keyboardSpeechRoutes[id]?.language,
                                    !KeyboardLanguageRouting.languages.contains(where: { $0.0 == selected }) {
                                     Text(selected).tag(selected)
                                 }
                             }
-                            .labelsHidden()
-                            .frame(maxWidth: 200)
                         }
                         HStack(spacing: VeloraSpacing.m) {
-                            Text("Speech model").font(.system(size: 12.5)).foregroundStyle(.secondary)
+                            Text(L10n.text("Speech model"))
+                                .font(.system(size: 12))
+                                .foregroundStyle(.secondary)
                             Spacer()
-                            Picker("Speech model", selection: modelBinding(id)) {
+                            HeaderMenu(
+                                L10n.text("Speech model"),
+                                value: modelTitle(for: id),
+                                selection: modelBinding(id)
+                            ) {
                                 ForEach(speechModels, id: \.id) { Text($0.name).tag($0.id) }
                                 if let selected = model.keyboardSpeechRoutes[id]?.model,
                                    !speechModels.contains(where: { $0.id == selected }) {
                                     Text(selected + " (not installed)").tag(selected)
                                 }
                             }
-                            .labelsHidden()
-                            .frame(maxWidth: 220)
                         }
                     }
                     .padding(.horizontal, 14)
-                    .padding(.vertical, 10)
+                    .padding(.vertical, VeloraSpacing.m)
                 }
                 GroupDivider()
-                HStack {
-                    Button("Refresh keyboards and installed models") {
+                GroupRow(label: L10n.text("Keyboards and installed models")) {
+                    Button(L10n.text("Refresh")) {
                         source = KeyboardLanguageRouting.currentInputSource()
                         Task { cachedModels = Set(await ModelStorage.scan().map(\.id)) }
                     }
-                    .buttonStyle(.settingsChip)
-                    Spacer()
+                    .buttonStyle(.capsule)
                 }
-                .padding(.horizontal, 14)
-                .padding(.vertical, 10)
             }
         }
         .task { cachedModels = Set(await ModelStorage.scan().map(\.id)) }
@@ -101,6 +107,16 @@ struct KeyboardRoutingSettingsView: View {
         return STTModel.all.filter { installed.contains($0.id) }.map { ($0.id, $0.displayName) }
     }
 
+    private func languageTitle(for id: String) -> String {
+        let code = model.keyboardSpeechRoutes[id]?.language ?? "auto"
+        return KeyboardLanguageRouting.languages.first(where: { $0.0 == code })?.1 ?? code
+    }
+
+    private func modelTitle(for id: String) -> String {
+        let selected = model.keyboardSpeechRoutes[id]?.model ?? model.sttModel
+        return speechModels.first(where: { $0.id == selected })?.name ?? selected
+    }
+
     private func languageBinding(_ id: String) -> Binding<String> {
         Binding(get: { model.keyboardSpeechRoutes[id]?.language ?? "auto" }, set: { value in
             guard var route = model.keyboardSpeechRoutes[id] else { return }
@@ -108,6 +124,7 @@ struct KeyboardRoutingSettingsView: View {
             model.keyboardSpeechRoutes[id] = route
         })
     }
+
     private func modelBinding(_ id: String) -> Binding<String> {
         Binding(get: { model.keyboardSpeechRoutes[id]?.model ?? model.sttModel }, set: { value in
             guard var route = model.keyboardSpeechRoutes[id] else { return }

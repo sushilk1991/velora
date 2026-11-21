@@ -1,242 +1,168 @@
 import SwiftUI
 
-/// Full-width scrollable container for Settings tabs. The ScrollView spans the
-/// entire detail column so the macOS scrollbar always hugs the window edge,
-/// while inner grids adapt seamlessly between 1 column (≤ 760 pt) and 2 columns
-/// (wide windows) with zero wasted right-hand void.
-struct SettingsCanvas<Content: View>: View {
-    private let content: (Bool) -> Content
-
-    init(@ViewBuilder content: @escaping (_ isWide: Bool) -> Content) {
-        self.content = content
-    }
-
-    var body: some View {
-        GeometryReader { proxy in
-            let isWide = proxy.size.width >= 760
-            ScrollView(.vertical) {
-                VStack(alignment: .leading, spacing: VeloraSpacing.l) {
-                    content(isWide)
-                }
-                .padding(.top, VeloraSpacing.xs)
-                .padding(.bottom, VeloraSpacing.xl)
-                .frame(maxWidth: .infinity, alignment: .topLeading)
-            }
-            .scrollIndicators(.automatic)
-        }
-    }
+enum SettingsLayoutMetrics {
+    static let sectionSpacing: CGFloat = 18
 }
 
-/// Two balanced columns on wide windows, collapsing cleanly to one column at
-/// narrow window widths (960 pt minimum or narrow standalone snapshots).
-struct SettingsAdaptiveColumns<Left: View, Right: View>: View {
-    let isWide: Bool
-    var spacing: CGFloat = VeloraSpacing.l
-    @ViewBuilder var left: () -> Left
-    @ViewBuilder var right: () -> Right
-
-    var body: some View {
-        if isWide {
-            HStack(alignment: .top, spacing: spacing) {
-                VStack(alignment: .leading, spacing: VeloraSpacing.l) {
-                    left()
-                }
-                .frame(maxWidth: .infinity, alignment: .topLeading)
-
-                VStack(alignment: .leading, spacing: VeloraSpacing.l) {
-                    right()
-                }
-                .frame(maxWidth: .infinity, alignment: .topLeading)
-            }
-        } else {
-            VStack(alignment: .leading, spacing: VeloraSpacing.l) {
-                left()
-                right()
-            }
-        }
-    }
-}
-
-/// Elevated Settings card built strictly from Velora's design tokens
-/// (`VeloraPanel.card`, `VeloraPanel.hairline`, `VeloraRadius.card`), with an
-/// optional icon-badged header, trailing pill/caption, hairline-separated rows,
-/// and left-aligned footer.
-struct SettingsCard<HeaderTrailing: View, Content: View>: View {
-    private let title: String?
-    private let symbol: String?
-    private let tint: Color
-    private let footer: String?
-    private let headerTrailing: HeaderTrailing
+/// Scrollable vertical canvas for every Settings tab. Matches `Home`, `Stats`,
+/// `Dictionary`, and `Modes`: plain scroll container on `WindowShell`'s canvas
+/// with consistent 18 pt section spacing and 20 pt bottom breathing room.
+struct SettingsScrollCanvas<Content: View>: View {
     private let content: Content
 
-    init(
-        title: String? = nil,
-        symbol: String? = nil,
-        tint: Color = VeloraBrand.accent,
-        footer: String? = nil,
-        @ViewBuilder headerTrailing: () -> HeaderTrailing,
-        @ViewBuilder content: () -> Content
-    ) {
-        self.title = title
-        self.symbol = symbol
-        self.tint = tint
-        self.footer = footer
-        self.headerTrailing = headerTrailing()
+    init(@ViewBuilder content: () -> Content) {
         self.content = content()
     }
 
     var body: some View {
-        VStack(alignment: .leading, spacing: VeloraSpacing.s) {
-            if let title {
-                HStack(alignment: .center, spacing: VeloraSpacing.s) {
-                    if let symbol {
-                        Image(systemName: symbol)
-                            .font(.system(size: 11.5, weight: .semibold))
-                            .foregroundStyle(tint)
-                            .frame(width: 20, height: 20)
-                            .background(
-                                RoundedRectangle(cornerRadius: 6, style: .continuous)
-                                    .fill(tint.opacity(0.14)))
-                            .accessibilityHidden(true)
-                    }
-                    Text(L10n.text(title))
-                        .font(.system(size: 13, weight: .semibold))
-                        .foregroundStyle(.primary)
-                    Spacer(minLength: VeloraSpacing.s)
-                    headerTrailing
-                }
-                .padding(.horizontal, 4)
-            }
-
-            VStack(alignment: .leading, spacing: 0) {
+        ScrollView(.vertical) {
+            VStack(alignment: .leading, spacing: SettingsLayoutMetrics.sectionSpacing) {
                 content
             }
             .frame(maxWidth: .infinity, alignment: .leading)
-            .background(
-                RoundedRectangle(cornerRadius: VeloraRadius.card, style: .continuous)
-                    .fill(VeloraPanel.card))
-            .overlay(
-                RoundedRectangle(cornerRadius: VeloraRadius.card, style: .continuous)
-                    .strokeBorder(VeloraPanel.hairline, lineWidth: 1))
-
-            if let footer, !footer.isEmpty {
-                SettingsFooter(footer)
-                    .padding(.horizontal, 4)
-            }
+            .padding(.bottom, VeloraSpacing.xl)
         }
     }
 }
 
-extension SettingsCard where HeaderTrailing == EmptyView {
-    init(
-        title: String? = nil,
-        symbol: String? = nil,
-        tint: Color = VeloraBrand.accent,
-        footer: String? = nil,
-        @ViewBuilder content: () -> Content
+/// Two equal-width columns that stack cleanly into one column when each column
+/// would fall below `minimumColumnWidth`. Uses SwiftUI's `Layout` protocol
+/// (mirroring `HomeColumns` in `HomeView.swift`) so columns measure at their
+/// natural height inside a `ScrollView` without `GeometryReader` hacks.
+struct SettingsColumns: Layout {
+    var spacing: CGFloat = VeloraSpacing.l
+    var stackSpacing: CGFloat = SettingsLayoutMetrics.sectionSpacing
+    var minimumColumnWidth: CGFloat = 420
+
+    func sizeThatFits(proposal: ProposedViewSize, subviews: Subviews, cache: inout ()) -> CGSize {
+        let width = proposal.width
+            ?? subviews.map { $0.sizeThatFits(.unspecified).width }.reduce(spacing, +)
+        let height = frames(forWidth: width, subviews: subviews).map(\.maxY).max() ?? 0
+        return CGSize(width: width, height: height)
+    }
+
+    func placeSubviews(
+        in bounds: CGRect, proposal: ProposedViewSize, subviews: Subviews, cache: inout ()
     ) {
-        self.init(
-            title: title, symbol: symbol, tint: tint, footer: footer,
-            headerTrailing: { EmptyView() }, content: content)
+        for (subview, frame) in zip(subviews, frames(forWidth: bounds.width, subviews: subviews)) {
+            subview.place(
+                at: CGPoint(x: bounds.minX + frame.minX, y: bounds.minY + frame.minY),
+                proposal: ProposedViewSize(width: frame.width, height: frame.height))
+        }
+    }
+
+    private func frames(forWidth width: CGFloat, subviews: Subviews) -> [CGRect] {
+        guard subviews.count == 2 else {
+            return stackedFrames(forWidth: width, subviews: subviews)
+        }
+        let available = max(width - spacing, 0)
+        let columnWidth = (available / 2).rounded(.down)
+        guard columnWidth >= minimumColumnWidth else {
+            return stackedFrames(forWidth: width, subviews: subviews)
+        }
+        let trailingWidth = available - columnWidth
+        let leftHeight = subviews[0].sizeThatFits(ProposedViewSize(width: columnWidth, height: nil)).height
+        let rightHeight = subviews[1].sizeThatFits(ProposedViewSize(width: trailingWidth, height: nil)).height
+        return [
+            CGRect(x: 0, y: 0, width: columnWidth, height: leftHeight),
+            CGRect(x: columnWidth + spacing, y: 0, width: trailingWidth, height: rightHeight),
+        ]
+    }
+
+    private func stackedFrames(forWidth width: CGFloat, subviews: Subviews) -> [CGRect] {
+        var y: CGFloat = 0
+        return subviews.map { subview in
+            let height = subview.sizeThatFits(ProposedViewSize(width: width, height: nil)).height
+            defer { y += height + stackSpacing }
+            return CGRect(x: 0, y: y, width: width, height: height)
+        }
     }
 }
 
-/// Standard Settings row inside `SettingsCard`: crisp 13 pt label, optional
-/// 11.5 pt secondary caption, and trailing control.
-struct SettingsRow<Trailing: View>: View {
-    let title: String
-    var subtitle: String? = nil
-    @ViewBuilder var trailing: () -> Trailing
+/// Convenience pair of left/right column stacks fed into `SettingsColumns`.
+struct SettingsColumnPair<Left: View, Right: View>: View {
+    private let left: Left
+    private let right: Right
+
+    init(@ViewBuilder left: () -> Left, @ViewBuilder right: () -> Right) {
+        self.left = left()
+        self.right = right()
+    }
 
     var body: some View {
-        HStack(alignment: .center, spacing: VeloraSpacing.m) {
-            VStack(alignment: .leading, spacing: 2) {
-                Text(L10n.text(title))
-                    .font(.system(size: 13))
-                    .foregroundStyle(.primary)
-                if let subtitle, !subtitle.isEmpty {
-                    Text(L10n.text(subtitle))
-                        .font(.system(size: 11.5))
-                        .foregroundStyle(.secondary)
-                        .fixedSize(horizontal: false, vertical: true)
-                }
+        SettingsColumns {
+            VStack(alignment: .leading, spacing: SettingsLayoutMetrics.sectionSpacing) {
+                left
             }
-            Spacer(minLength: VeloraSpacing.m)
-            trailing()
+            VStack(alignment: .leading, spacing: SettingsLayoutMetrics.sectionSpacing) {
+                right
+            }
         }
-        .padding(.horizontal, 14)
-        .padding(.vertical, 10)
-        .frame(maxWidth: .infinity, minHeight: 42, alignment: .leading)
     }
 }
 
-/// Toggle row inside `SettingsCard` with switch style and optional subtitle.
+/// Toggle row built on `GroupRow`, matching Dictionary's `Learning` card
+/// (13 pt label, 11 pt sub-caption, small macOS switch, 42 pt minHeight).
 struct SettingsToggleRow: View {
+    @ObservedObject private var interfaceLocale = InterfaceLocale.shared
     let title: String
-    var subtitle: String? = nil
+    var subtitle: String?
     @Binding var isOn: Bool
     var disabled: Bool = false
 
     var body: some View {
-        SettingsRow(title: title, subtitle: subtitle) {
-            Toggle("", isOn: $isOn)
-                .labelsHidden()
+        GroupRow(label: L10n.text(title), sub: subtitle.map { L10n.text($0) }) {
+            Toggle(L10n.text(title), isOn: $isOn)
                 .toggleStyle(.switch)
+                .labelsHidden()
                 .controlSize(.small)
-                .accessibilityLabel(L10n.text(title))
         }
         .disabled(disabled)
-        .opacity(disabled ? 0.55 : 1)
+        .opacity(disabled ? 0.5 : 1)
     }
 }
 
-/// Compact pill badge used in Settings headers and model/status rows.
-struct SettingsStatusPill: View {
-    let text: String
-    var tint: Color = .secondary
-    var dot: Bool = false
+/// Expandable row inside a `GroupCard` that keeps `GroupRow`'s exact 14 pt
+/// inset, 42 pt minimum height, and typography instead of SwiftUI's misaligned
+/// default `DisclosureGroup` chrome.
+struct SettingsDisclosureRow<Content: View>: View {
+    @ObservedObject private var interfaceLocale = InterfaceLocale.shared
+    let title: String
+    var subtitle: String?
+    private let content: Content
+    @State private var isExpanded = false
+
+    init(title: String, subtitle: String? = nil, @ViewBuilder content: () -> Content) {
+        self.title = title
+        self.subtitle = subtitle
+        self.content = content()
+    }
 
     var body: some View {
-        HStack(spacing: 5) {
-            if dot {
-                Circle()
-                    .fill(tint)
-                    .frame(width: 6, height: 6)
+        VStack(alignment: .leading, spacing: 0) {
+            Button {
+                withAnimation(VeloraMotion.quick) {
+                    isExpanded.toggle()
+                }
+            } label: {
+                GroupRow(label: L10n.text(title), sub: subtitle.map { L10n.text($0) }) {
+                    Image(systemName: "chevron.right")
+                        .font(.system(size: 11, weight: .semibold))
+                        .foregroundStyle(.tertiary)
+                        .rotationEffect(.degrees(isExpanded ? 90 : 0))
+                        .accessibilityHidden(true)
+                }
+                .contentShape(Rectangle())
             }
-            Text(L10n.text(text))
-                .font(.system(size: 11, weight: .medium))
-                .monospacedDigit()
-                .foregroundStyle(tint == .secondary ? AnyShapeStyle(.secondary) : AnyShapeStyle(tint))
+            .buttonStyle(.plain)
+            .accessibilityValue(isExpanded ? L10n.text("Expanded") : L10n.text("Collapsed"))
+
+            if isExpanded {
+                GroupDivider()
+                content
+                    .padding(.horizontal, 14)
+                    .padding(.vertical, VeloraSpacing.m)
+            }
         }
-        .padding(.horizontal, 8)
-        .padding(.vertical, 3)
-        .background(
-            Capsule()
-                .fill(tint == .secondary ? Color.primary.opacity(0.06) : tint.opacity(0.14)))
     }
-}
-
-/// Compact pill button for secondary actions inside Settings cards (sound
-/// previews, Change…, Show in Finder, Edit…).
-struct SettingsChipButtonStyle: ButtonStyle {
-    @Environment(\.isEnabled) private var isEnabled
-
-    func makeBody(configuration: Configuration) -> some View {
-        configuration.label
-            .font(.system(size: 11.5, weight: .medium))
-            .padding(.horizontal, 10)
-            .padding(.vertical, 5)
-            .background(
-                RoundedRectangle(cornerRadius: 7, style: .continuous)
-                    .fill(Color.primary.opacity(configuration.isPressed ? 0.14 : 0.08)))
-            .overlay(
-                RoundedRectangle(cornerRadius: 7, style: .continuous)
-                    .strokeBorder(VeloraPanel.hairline, lineWidth: 1))
-            .opacity(isEnabled ? 1 : 0.45)
-            .contentShape(RoundedRectangle(cornerRadius: 7, style: .continuous))
-    }
-}
-
-extension ButtonStyle where Self == SettingsChipButtonStyle {
-    static var settingsChip: SettingsChipButtonStyle { SettingsChipButtonStyle() }
 }

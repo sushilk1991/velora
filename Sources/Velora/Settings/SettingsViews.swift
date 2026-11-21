@@ -148,8 +148,8 @@ struct GeneralSettingsView: View {
     @State private var previewSounds = SoundPlayer()
 
     var body: some View {
-        SettingsCanvas { isWide in
-            SettingsAdaptiveColumns(isWide: isWide) {
+        SettingsScrollCanvas {
+            SettingsColumnPair {
                 appearanceCard
                 soundsCard
             } right: {
@@ -160,8 +160,8 @@ struct GeneralSettingsView: View {
     }
 
     private var appearanceCard: some View {
-        SettingsCard(title: "Appearance", symbol: "paintbrush", tint: VeloraBrand.accent) {
-            SettingsRow(title: "Theme") {
+        GroupCard(header: L10n.text("Appearance")) {
+            GroupRow(label: L10n.text("Theme")) {
                 Picker(L10n.text("Appearance"), selection: $model.appearance) {
                     Text(L10n.text("System")).tag("system")
                     Text(L10n.text("Light")).tag("light")
@@ -169,20 +169,22 @@ struct GeneralSettingsView: View {
                 }
                 .labelsHidden()
                 .pickerStyle(.segmented)
-                .frame(width: 210)
+                .fixedSize()
             }
             GroupDivider()
-            SettingsRow(
-                title: "Interface language",
-                subtitle: "Changes menus and settings. Dictation language is set separately."
+            GroupRow(
+                label: L10n.text("Interface language"),
+                sub: L10n.text("Changes menus and settings. Dictation language is set separately.")
             ) {
-                Picker(L10n.text("Interface language"), selection: $model.interfaceLanguage) {
+                HeaderMenu(
+                    L10n.text("Interface language"),
+                    value: model.interfaceLanguage.title,
+                    selection: $model.interfaceLanguage
+                ) {
                     ForEach(InterfaceLanguage.allCases) { language in
                         Text(language.title).tag(language)
                     }
                 }
-                .labelsHidden()
-                .frame(maxWidth: 150)
             }
             GroupDivider()
             SettingsToggleRow(
@@ -193,56 +195,55 @@ struct GeneralSettingsView: View {
     }
 
     private var pillCard: some View {
-        SettingsCard(
-            title: "Dictation Pill",
-            symbol: "capsule.inset.filled",
-            tint: VeloraBrand.warm,
+        GroupCard(
+            header: L10n.text("Dictation pill"),
             footer: "You can also hide it from its right-click menu."
         ) {
-            SettingsRow(title: "Show pill") {
-                Picker(L10n.text("Show pill"), selection: pillVisibility) {
+            GroupRow(label: L10n.text("Show pill")) {
+                HeaderMenu(
+                    L10n.text("Show pill"),
+                    value: L10n.text(pillVisibility.wrappedValue.title),
+                    selection: pillVisibility
+                ) {
                     ForEach(PillVisibility.allCases) { choice in
                         Text(L10n.text(choice.title)).tag(choice)
                     }
                 }
-                .labelsHidden()
-                .frame(maxWidth: 170)
             }
             GroupDivider()
-            DisclosureGroup(L10n.text("Preview the pill")) {
+            SettingsDisclosureRow(title: "Preview the pill") {
                 HUDPreviewView(model: model)
-                    .padding(.top, VeloraSpacing.s)
             }
-            .padding(.horizontal, 14)
-            .padding(.vertical, 10)
         }
     }
 
     private var soundsCard: some View {
-        SettingsCard(title: "Sound & Feedback", symbol: "speaker.wave.2", tint: VeloraBrand.accent) {
+        GroupCard(header: L10n.text("Sound and feedback")) {
             SettingsToggleRow(
                 title: "Play sounds",
                 subtitle: "Subtle cues for recording start, release, completion, and errors.",
                 isOn: $model.soundsEnabled)
             if model.soundsEnabled {
                 GroupDivider()
-                SettingsRow(title: "Sound set") {
-                    Picker(L10n.text("Sound set"), selection: $model.soundSet) {
+                GroupRow(label: L10n.text("Sound set")) {
+                    HeaderMenu(
+                        L10n.text("Sound set"),
+                        value: model.soundSet.title,
+                        selection: $model.soundSet
+                    ) {
                         ForEach(SoundSet.allCases) { soundSet in
                             Text(soundSet.title).tag(soundSet)
                         }
                     }
-                    .labelsHidden()
-                    .frame(maxWidth: 150)
                 }
                 GroupDivider()
-                SettingsRow(title: "Sound volume") {
+                GroupRow(label: L10n.text("Sound volume")) {
                     HStack(spacing: VeloraSpacing.s) {
                         Slider(value: $model.soundVolume, in: 0...100)
-                            .frame(width: 150)
+                            .frame(width: 140)
                             .accessibilityLabel(L10n.text("Sound volume"))
                         Text("\(Int(model.soundVolume.rounded()))%")
-                            .font(.system(size: 11.5).monospacedDigit())
+                            .font(.system(size: 12).monospacedDigit())
                             .foregroundStyle(.secondary)
                             .frame(width: 34, alignment: .trailing)
                     }
@@ -250,8 +251,7 @@ struct GeneralSettingsView: View {
                 GroupDivider()
                 VStack(alignment: .leading, spacing: VeloraSpacing.s) {
                     Text(L10n.text("Preview cues"))
-                        .font(.system(size: 11.5, weight: .medium))
-                        .foregroundStyle(.secondary)
+                        .font(.system(size: 13))
                     HStack(spacing: VeloraSpacing.xs) {
                         Button(L10n.text("Start")) { previewSounds.play(.start, preview: true) }
                         Button(L10n.text("Release")) { previewSounds.play(.preStop, preview: true) }
@@ -259,43 +259,26 @@ struct GeneralSettingsView: View {
                         Button(L10n.text("No speech")) { previewSounds.play(.noResult, preview: true) }
                         Button(L10n.text("Error")) { previewSounds.play(.error, preview: true) }
                     }
-                    .buttonStyle(.settingsChip)
+                    .buttonStyle(.capsule)
                 }
                 .padding(.horizontal, 14)
-                .padding(.vertical, 10)
+                .padding(.vertical, VeloraSpacing.m)
             }
         }
     }
 
     private var updatesCard: some View {
-        SettingsCard(
-            title: "Updates",
-            symbol: "arrow.down.circle",
-            tint: VeloraStatus.success,
+        GroupCard(
+            header: L10n.text("Updates"),
             footer: "Checks GitHub once a day and sends nothing about you or what you dictate. Before installing an update, Velora checks Apple's signature and notarization."
         ) {
-            HStack(alignment: .center, spacing: VeloraSpacing.m) {
-                Image(nsImage: VeloraAppInfo.icon)
-                    .resizable()
-                    .interpolation(.high)
-                    .frame(width: 36, height: 36)
-                    .shadow(color: .black.opacity(0.18), radius: 4, y: 2)
-                VStack(alignment: .leading, spacing: 2) {
-                    Text(L10n.format("Version %@", VeloraAppInfo.shortVersion))
-                        .font(.system(size: 13.5, weight: .semibold))
-                    if let status = model.updateCheckStatus {
-                        Text(status)
-                            .font(.system(size: 11.5))
-                            .foregroundStyle(.secondary)
-                            .fixedSize(horizontal: false, vertical: true)
-                    }
-                }
-                Spacer(minLength: VeloraSpacing.s)
+            GroupRow(
+                label: L10n.format("Version %@", VeloraAppInfo.shortVersion),
+                sub: model.updateCheckStatus
+            ) {
                 UpdateActionRow(model: model, checkStatusPlacement: .caller)
-                    .buttonStyle(.settingsChip)
+                    .buttonStyle(.capsule)
             }
-            .padding(.horizontal, 14)
-            .padding(.vertical, 12)
             GroupDivider()
             SettingsToggleRow(
                 title: "Check for updates automatically",
@@ -306,9 +289,9 @@ struct GeneralSettingsView: View {
                 isOn: $model.autoInstallUpdates,
                 disabled: !model.updateChecks)
             GroupDivider()
-            SettingsRow(title: "Release notes") {
+            GroupRow(label: L10n.text("Release notes")) {
                 Button(L10n.text("View Release History…")) { model.openReleaseHistory() }
-                    .buttonStyle(.settingsChip)
+                    .buttonStyle(.capsule)
             }
         }
     }
@@ -435,8 +418,8 @@ struct DictationSettingsView: View {
     ]
 
     var body: some View {
-        SettingsCanvas { isWide in
-            SettingsAdaptiveColumns(isWide: isWide) {
+        SettingsScrollCanvas {
+            SettingsColumnPair {
                 inputCard
                 KeyboardRoutingSettingsView(model: model)
                 deliveryCard
@@ -456,15 +439,28 @@ struct DictationSettingsView: View {
         }
     }
 
+    private var selectedMicrophoneName: String {
+        guard let uid = model.inputDeviceUID else { return L10n.text("System Default") }
+        return inputDevices.first(where: { $0.uid == uid })?.name
+            ?? L10n.text("Chosen Microphone (Not Connected)")
+    }
+
+    private var selectedLanguageName: String {
+        let match = Self.languages.first(where: { $0.0 == model.language })?.1 ?? model.language
+        return L10n.text(match)
+    }
+
     private var inputCard: some View {
-        SettingsCard(
-            title: "Microphone & Audio",
-            symbol: "mic",
-            tint: VeloraBrand.accent,
+        GroupCard(
+            header: L10n.text("Microphone and audio"),
             footer: "Velora keeps using a chosen microphone when AirPods or another input connect."
         ) {
-            SettingsRow(title: "Microphone") {
-                Picker(L10n.text("Microphone"), selection: $model.inputDeviceUID) {
+            GroupRow(label: L10n.text("Microphone")) {
+                HeaderMenu(
+                    L10n.text("Microphone"),
+                    value: selectedMicrophoneName,
+                    selection: $model.inputDeviceUID
+                ) {
                     Text(L10n.text("System Default")).tag(String?.none)
                     ForEach(inputDevices, id: \.uid) { device in
                         Text(device.name).tag(String?.some(device.uid))
@@ -474,18 +470,18 @@ struct DictationSettingsView: View {
                         Text(L10n.text("Chosen Microphone (Not Connected)")).tag(String?.some(uid))
                     }
                 }
-                .labelsHidden()
-                .frame(maxWidth: 220)
             }
             GroupDivider()
-            SettingsRow(title: "Language") {
-                Picker(L10n.text("Language"), selection: $model.language) {
+            GroupRow(label: L10n.text("Language")) {
+                HeaderMenu(
+                    L10n.text("Language"),
+                    value: selectedLanguageName,
+                    selection: $model.language
+                ) {
                     ForEach(Self.languages, id: \.0) { code, name in
                         Text(L10n.text(name)).tag(code)
                     }
                 }
-                .labelsHidden()
-                .frame(maxWidth: 180)
             }
             GroupDivider()
             SettingsToggleRow(
@@ -496,23 +492,29 @@ struct DictationSettingsView: View {
     }
 
     private var deliveryCard: some View {
-        SettingsCard(
-            title: "Delivery",
-            symbol: "text.insert",
-            tint: VeloraBrand.warm
-        ) {
-            SettingsRow(
-                title: "Result",
-                subtitle: "If insertion is blocked, your words stay on the clipboard. A copy you make during delivery always wins."
-            ) {
-                Picker(L10n.text("Result"), selection: $model.dictationDelivery) {
-                    ForEach(DictationDelivery.allCases) { choice in
-                        Text(L10n.text(choice.title)).tag(choice)
+        GroupCard(header: L10n.text("Delivery")) {
+            VStack(alignment: .leading, spacing: 6) {
+                HStack(alignment: .center, spacing: VeloraSpacing.m) {
+                    Text(L10n.text("Result"))
+                        .font(.system(size: 13))
+                    Spacer(minLength: VeloraSpacing.s)
+                    HeaderMenu(
+                        L10n.text("Result"),
+                        value: L10n.text(model.dictationDelivery.title),
+                        selection: $model.dictationDelivery
+                    ) {
+                        ForEach(DictationDelivery.allCases) { choice in
+                            Text(L10n.text(choice.title)).tag(choice)
+                        }
                     }
                 }
-                .labelsHidden()
-                .frame(maxWidth: 220)
+                Text(L10n.text("If insertion is blocked, your words stay on the clipboard. A copy you make during delivery always wins."))
+                    .font(.system(size: 11))
+                    .foregroundStyle(.secondary)
+                    .fixedSize(horizontal: false, vertical: true)
             }
+            .padding(.horizontal, 14)
+            .padding(.vertical, VeloraSpacing.s)
             GroupDivider()
             SettingsToggleRow(
                 title: "Show provisional words while speaking",
@@ -522,11 +524,7 @@ struct DictationSettingsView: View {
     }
 
     private var writingCard: some View {
-        SettingsCard(
-            title: "Writing & Cleanup",
-            symbol: "wand.and.stars",
-            tint: Color.purple
-        ) {
+        GroupCard(header: L10n.text("Writing and cleanup")) {
             SettingsToggleRow(
                 title: "Fast dictation",
                 subtitle: "Skip AI rewriting and the writing-model download at startup. Voice Edit and Action Mode need a writing model.",
@@ -557,35 +555,27 @@ struct DictationSettingsView: View {
     }
 
     private var screenContextCard: some View {
-        SettingsCard(
-            title: "Screen Context",
-            symbol: "text.viewfinder",
-            tint: VeloraBrand.accent,
+        GroupCard(
+            header: L10n.text("Screen context"),
             footer: "While you dictate, Velora reads text near the cursor to spell names and terms right, and has no switch to turn this off. Nothing it reads is saved, password fields are skipped, and Screen Recording only adds on-device reading of text in images."
         ) {
-            SettingsRow(
-                title: "On-device screen text recognition",
-                subtitle: "Helps spell names and technical terms visible on screen."
+            GroupRow(
+                label: L10n.text("On-device screen text recognition"),
+                sub: L10n.text("Helps spell names and technical terms visible on screen.")
             ) {
                 Button(L10n.text("Allow Access…")) {
                     Permissions.requestScreenText()
                 }
-                .buttonStyle(.settingsChip)
+                .buttonStyle(.capsule)
             }
         }
     }
 
     private var recordingsCard: some View {
-        SettingsCard(
-            title: "Audio Archive",
-            symbol: "waveform.circle",
-            tint: VeloraStatus.success,
-            footer: recordingsFooter,
-            headerTrailing: {
-                if archiveSize != "…" {
-                    SettingsStatusPill(text: archiveSize, tint: .secondary)
-                }
-            }
+        GroupCard(
+            header: L10n.text("Audio archive"),
+            headerCaption: archiveSize == "…" ? nil : archiveSize,
+            footer: recordingsFooter
         ) {
             SettingsToggleRow(
                 title: "Keep audio recordings",
@@ -713,8 +703,8 @@ struct ModelSettingsView: View {
     }
 
     var body: some View {
-        SettingsCanvas { isWide in
-            SettingsAdaptiveColumns(isWide: isWide) {
+        SettingsScrollCanvas {
+            SettingsColumnPair {
                 speechModelCard
                 storageCard
             } right: {
@@ -744,63 +734,67 @@ struct ModelSettingsView: View {
             }
     }
 
+    private var languageScopeTitle: String {
+        model.languageScope == "english"
+            ? L10n.text("English only")
+            : L10n.text("English and other languages")
+    }
+
+    private var modelSortTitle: String {
+        switch modelSort {
+        case "name": return L10n.text("Name")
+        case "size": return L10n.text("Download size")
+        default: return L10n.text("Recommended")
+        }
+    }
+
     private var speechModelCard: some View {
         let active = speechChoices.first { $0.id == speechBinding.wrappedValue }
-        return SettingsCard(
-            title: "Speech to Text",
-            symbol: "waveform",
-            tint: VeloraBrand.accent,
-            footer: "Changing the language choice re-selects the recommended speech model for it. Models download once, then run on this Mac.",
-            headerTrailing: {
-                if let size = active?.size, !size.isEmpty {
-                    SettingsStatusPill(text: size, tint: VeloraBrand.accent)
-                }
-            }
+        return GroupCard(
+            header: L10n.text("Speech to text"),
+            headerCaption: active?.size.isEmpty == false ? active?.size : nil,
+            footer: "Changing the language choice re-selects the recommended speech model for it. Models download once, then run on this Mac."
         ) {
-            SettingsRow(title: "Languages you dictate") {
-                Picker(L10n.text("Languages you dictate"), selection: $model.languageScope) {
+            GroupRow(label: L10n.text("Languages you dictate")) {
+                HeaderMenu(
+                    L10n.text("Languages you dictate"),
+                    value: languageScopeTitle,
+                    selection: $model.languageScope
+                ) {
                     Text(L10n.text("English only")).tag("english")
                     Text(L10n.text("English and other languages")).tag("multilingual")
                 }
-                .labelsHidden()
-                .frame(maxWidth: 210)
             }
             GroupDivider()
             slotRow(
                 title: "Active model", slot: .speech, choices: speechChoices,
                 selection: speechBinding)
             GroupDivider()
-            SettingsRow(
-                title: "Custom Whisper weights",
-                subtitle: "Use a local .bin or .gguf file in place without copying."
+            GroupRow(
+                label: L10n.text("Custom Whisper weights"),
+                sub: L10n.text("Use a local .bin or .gguf file in place without copying.")
             ) {
                 Button(L10n.text("Choose File…")) { chooseWhisperModel() }
-                    .buttonStyle(.settingsChip)
+                    .buttonStyle(.capsule)
             }
         }
     }
 
     private var writingModelCard: some View {
         let active = cleanupChoices.first { $0.id == cleanupBinding.wrappedValue }
-        let loaded = model.cleanupLoaded
-        return SettingsCard(
-            title: "Writing & Cleanup",
-            symbol: "sparkles",
-            tint: VeloraBrand.warm,
-            footer: "Automatic uses Velora's memory policy. Save memory releases the writing model while idle; speech models stay ready.",
-            headerTrailing: {
-                SettingsStatusPill(
-                    text: loaded ? "Loaded" : "Standby",
-                    tint: loaded ? VeloraStatus.success : .secondary,
-                    dot: true)
-            }
+        return GroupCard(
+            header: L10n.text("Writing and cleanup"),
+            headerCaption: L10n.text(model.cleanupLoaded ? "Loaded" : "Standby"),
+            footer: "Automatic uses Velora's memory policy. Save memory releases the writing model while idle; speech models stay ready."
         ) {
             if model.nativeCleanupEnabled {
-                SettingsRow(
-                    title: "Writing model",
-                    subtitle: "Turn off LFM3 Native to use or change the saved writing model."
+                GroupRow(
+                    label: L10n.text("Writing model"),
+                    sub: L10n.text("Turn off LFM3 Native to use or change the saved writing model.")
                 ) {
-                    SettingsStatusPill(text: "LFM3 Native", tint: VeloraBrand.warm)
+                    Text("LFM3 Native")
+                        .font(.system(size: 12))
+                        .foregroundStyle(.secondary)
                 }
                 if !cleanupChoices.isEmpty { GroupDivider() }
             }
@@ -810,30 +804,34 @@ struct ModelSettingsView: View {
                     slot: .cleanup, choices: cleanupChoices,
                     selection: cleanupBinding)
                     .disabled(model.nativeCleanupEnabled || model.nativeCleanupSwitching)
-                    .opacity((model.nativeCleanupEnabled || model.nativeCleanupSwitching) ? 0.55 : 1)
+                    .opacity((model.nativeCleanupEnabled || model.nativeCleanupSwitching) ? 0.5 : 1)
                 GroupDivider()
             } else if !model.nativeCleanupEnabled {
                 let fallback = model.cleanupModel.isEmpty
-                    ? "Automatic (on-device)"
+                    ? L10n.text("Automatic (on-device)")
                     : shortName(model.cleanupModel)
-                SettingsRow(
-                    title: "Active model",
-                    subtitle: active?.name ?? fallback
+                GroupRow(
+                    label: L10n.text("Active model"),
+                    sub: active?.name ?? fallback
                 ) {
-                    SettingsStatusPill(text: "On-device", tint: .secondary)
+                    Text(L10n.text("On-device"))
+                        .font(.system(size: 12))
+                        .foregroundStyle(.secondary)
                 }
                 GroupDivider()
             }
-            SettingsRow(title: "Idle memory policy") {
-                Picker(L10n.text("Writing model readiness"), selection: $model.cleanupMemoryPolicy) {
+            GroupRow(label: L10n.text("Idle memory policy")) {
+                HeaderMenu(
+                    L10n.text("Writing model readiness"),
+                    value: model.cleanupMemoryPolicy.title,
+                    selection: $model.cleanupMemoryPolicy
+                ) {
                     ForEach(CleanupMemoryPolicy.allCases) { policy in Text(policy.title).tag(policy) }
                 }
-                .labelsHidden()
-                .frame(maxWidth: 165)
             }
             if model.cleanupMemoryPolicy == .saveMemory {
                 GroupDivider()
-                SettingsRow(title: "Release after idle") {
+                GroupRow(label: L10n.text("Release after idle")) {
                     Stepper("\(Int(model.cleanupIdleMinutes)) min",
                             value: $model.cleanupIdleMinutes, in: 1...120, step: 1)
                         .monospacedDigit()
@@ -843,11 +841,7 @@ struct ModelSettingsView: View {
     }
 
     private var downloadStatusCard: some View {
-        SettingsCard(
-            title: "Engine & Downloads",
-            symbol: "arrow.down.circle.dotted",
-            tint: VeloraBrand.accent
-        ) {
+        GroupCard(header: L10n.text("Engine and downloads")) {
             VStack(alignment: .leading, spacing: VeloraSpacing.s) {
                 DownloadRecoveryView(state: model.downloads)
                 if let pending = model.downloads.pending[.stt] {
@@ -869,43 +863,41 @@ struct ModelSettingsView: View {
                     .font(.caption).foregroundStyle(.secondary)
             }
             .padding(.horizontal, 14)
-            .padding(.vertical, 12)
+            .padding(.vertical, VeloraSpacing.m)
         }
     }
 
     private var storageCard: some View {
-        SettingsCard(
-            title: "On-Disk Storage",
-            symbol: "internaldrive",
-            tint: Color.secondary,
-            footer: "Sizes include downloaded weights and prepared caches, but not the app bundle. Removal never deletes shared Hub files, included resources, or imported models.",
-            headerTrailing: {
-                SettingsStatusPill(text: storageUsed, tint: .secondary)
-            }
+        GroupCard(
+            header: L10n.text("On-disk storage"),
+            headerCaption: storageUsed,
+            footer: "Sizes include downloaded weights and prepared caches, but not the app bundle. Removal never deletes shared Hub files, included resources, or imported models."
         ) {
-            SettingsRow(title: "Model cache folder") {
+            GroupRow(label: L10n.text("Model cache folder")) {
                 Button(L10n.text("Show in Finder")) {
                     NSWorkspace.shared.activateFileViewerSelecting([ModelStorage.hubURL])
                 }
-                .buttonStyle(.settingsChip)
+                .buttonStyle(.capsule)
             }
             ForEach(cachedModels) { item in
                 GroupDivider()
-                SettingsRow(
-                    title: shortName(item.id),
-                    subtitle: ByteCountFormatter.string(fromByteCount: item.bytes, countStyle: .file)
+                GroupRow(
+                    label: shortName(item.id),
+                    sub: ByteCountFormatter.string(fromByteCount: item.bytes, countStyle: .file)
                 ) {
                     if ModelStorage.canRemove(item, protected: activeModelIDs) {
                         Button(L10n.text("Remove…")) { removalCandidate = item.id }
-                            .buttonStyle(.settingsChip)
+                            .buttonStyle(.capsule)
                             .disabled(!model.downloads.isCurrent)
                     } else if activeModelIDs.contains(item.id) {
-                        SettingsStatusPill(
-                            text: model.nativeCleanupEnabled && item.id == model.cleanupModel
-                                ? "Saved choice" : "In use",
-                            tint: VeloraStatus.success)
+                        Text(L10n.text(model.nativeCleanupEnabled && item.id == model.cleanupModel
+                            ? "Saved choice" : "In use"))
+                            .font(.system(size: 12))
+                            .foregroundStyle(.secondary)
                     } else {
-                        SettingsStatusPill(text: "Shared", tint: .secondary)
+                        Text(L10n.text("Shared"))
+                            .font(.system(size: 12))
+                            .foregroundStyle(.secondary)
                     }
                 }
             }
@@ -915,7 +907,7 @@ struct ModelSettingsView: View {
                     .font(.caption)
                     .foregroundStyle(VeloraStatus.warningText)
                     .padding(.horizontal, 14)
-                    .padding(.vertical, 8)
+                    .padding(.vertical, VeloraSpacing.s)
             }
         }
     }
@@ -923,10 +915,8 @@ struct ModelSettingsView: View {
     @ViewBuilder
     private var nativeCleanupSection: some View {
         if model.nativeCleanupSelection.isVisible {
-            SettingsCard(
-                title: "Experimental Writing Model",
-                symbol: "flask",
-                tint: VeloraStatus.warning,
+            GroupCard(
+                header: L10n.text("Experimental writing model"),
                 footer: "LFM3 handles every writing task and never switches models automatically. It is tuned for dictation; editing and translation may be less reliable."
             ) {
                 SettingsToggleRow(
@@ -945,24 +935,24 @@ struct ModelSettingsView: View {
                             .foregroundStyle(.secondary)
                     }
                     .padding(.horizontal, 14)
-                    .padding(.vertical, 10)
+                    .padding(.vertical, VeloraSpacing.s)
                 }
                 if !model.nativeCleanupConnected {
                     GroupDivider()
                     Text(L10n.text("Reconnect to the engine to change this choice."))
                         .font(.caption).foregroundStyle(.secondary)
-                        .padding(.horizontal, 14).padding(.vertical, 8)
+                        .padding(.horizontal, 14).padding(.vertical, VeloraSpacing.s)
                 } else if !model.nativeCleanupAvailable && model.nativeCleanupEnabled {
                     GroupDivider()
                     Text(L10n.text("LFM3 Native is unavailable. Restore the local package or turn this off to choose another writing model."))
                         .font(.caption).foregroundStyle(.secondary)
-                        .padding(.horizontal, 14).padding(.vertical, 8)
+                        .padding(.horizontal, 14).padding(.vertical, VeloraSpacing.s)
                 }
                 if let error = model.nativeCleanupError {
                     GroupDivider()
                     Text(error)
                         .font(.caption).foregroundStyle(VeloraStatus.warningText)
-                        .padding(.horizontal, 14).padding(.vertical, 8)
+                        .padding(.horizontal, 14).padding(.vertical, VeloraSpacing.s)
                 }
             }
         }
@@ -977,14 +967,14 @@ struct ModelSettingsView: View {
         title: String, slot: Slot, choices: [Choice], selection: Binding<String>
     ) -> some View {
         let active = choices.first { $0.id == selection.wrappedValue }
-        SettingsRow(
-            title: title,
-            subtitle: caption(for: active, fallback: selection.wrappedValue)
+        GroupRow(
+            label: L10n.text(title),
+            sub: caption(for: active, fallback: selection.wrappedValue)
         ) {
             Button(changing == slot ? L10n.text("Done") : L10n.text("Change…")) {
                 changing = changing == slot ? nil : slot
             }
-            .buttonStyle(.settingsChip)
+            .buttonStyle(.capsule)
         }
         if changing == slot {
             GroupDivider()
@@ -995,13 +985,15 @@ struct ModelSettingsView: View {
                         .toggleStyle(.checkbox)
                         .font(.system(size: 12))
                     Spacer()
-                    Picker(L10n.text("Sort"), selection: $modelSort) {
+                    HeaderMenu(
+                        L10n.text("Sort"),
+                        value: modelSortTitle,
+                        selection: $modelSort
+                    ) {
                         Text(L10n.text("Recommended")).tag("recommended")
                         Text(L10n.text("Name")).tag("name")
                         Text(L10n.text("Download size")).tag("size")
                     }
-                    .labelsHidden()
-                    .frame(maxWidth: 150)
                 }
                 let visibleChoices = filteredChoices(choices, selection: selection.wrappedValue, slot: slot)
                 if visibleChoices.isEmpty {
@@ -1025,7 +1017,7 @@ struct ModelSettingsView: View {
                                     .padding(.top, 1)
                                 VStack(alignment: .leading, spacing: 2) {
                                     Text(choice.name)
-                                        .font(.system(size: 12.5, weight: isSelected ? .semibold : .regular))
+                                        .font(.system(size: 13, weight: isSelected ? .medium : .regular))
                                     Text(choice.detail)
                                         .font(.system(size: 11))
                                         .foregroundStyle(.secondary)
@@ -1041,9 +1033,9 @@ struct ModelSettingsView: View {
                             .padding(.horizontal, 10)
                             .padding(.vertical, 7)
                             .background(
-                                RoundedRectangle(cornerRadius: 8, style: .continuous)
+                                RoundedRectangle(cornerRadius: VeloraRadius.tile, style: .continuous)
                                     .fill(isSelected ? VeloraBrand.accent.opacity(0.10) : Color.clear))
-                            .contentShape(RoundedRectangle(cornerRadius: 8, style: .continuous))
+                            .contentShape(RoundedRectangle(cornerRadius: VeloraRadius.tile, style: .continuous))
                         }
                         .buttonStyle(.plain)
                         .disabled(!model.downloads.isCurrent)
@@ -1051,7 +1043,7 @@ struct ModelSettingsView: View {
                 }
             }
             .padding(.horizontal, 14)
-            .padding(.vertical, 10)
+            .padding(.vertical, VeloraSpacing.m)
         }
     }
 
@@ -1131,8 +1123,8 @@ struct AdvancedSettingsView: View {
     @State private var editingNotesPrompt = false
 
     var body: some View {
-        SettingsCanvas { isWide in
-            SettingsAdaptiveColumns(isWide: isWide) {
+        SettingsScrollCanvas {
+            SettingsColumnPair {
                 meetingsCard
                 diagnosticsCard
             } right: {
@@ -1147,41 +1139,31 @@ struct AdvancedSettingsView: View {
     }
 
     private var meetingsCard: some View {
-        SettingsCard(
-            title: "Meetings",
-            symbol: "person.2.wave.2",
-            tint: VeloraBrand.accent,
+        GroupCard(
+            header: L10n.text("Meetings"),
             footer: MeetingPreferenceRows.footer
         ) {
             MeetingPreferenceRows(model: model, coordinator: coordinator)
             GroupDivider()
-            SettingsRow(title: "Notes prompt") {
-                HStack(spacing: VeloraSpacing.s) {
-                    SettingsStatusPill(
-                        text: model.meetingNotesPrompt.isEmpty ? "Default" : "Custom",
-                        tint: model.meetingNotesPrompt.isEmpty ? .secondary : VeloraBrand.accent)
-                    Button(L10n.text("Edit…")) { editingNotesPrompt = true }
-                        .buttonStyle(.settingsChip)
-                }
+            GroupRow(
+                label: L10n.text("Notes prompt"),
+                sub: L10n.text(model.meetingNotesPrompt.isEmpty ? "Using default guidance." : "Using custom prompt.")
+            ) {
+                Button(L10n.text("Edit…")) { editingNotesPrompt = true }
+                    .buttonStyle(.capsule)
             }
         }
     }
 
     private var retentionCard: some View {
-        SettingsCard(
-            title: "Storage & Retention",
-            symbol: "clock.arrow.circlepath",
-            tint: VeloraBrand.warm
-        ) {
+        GroupCard(header: L10n.text("Storage and retention")) {
             RetentionSettingsView(model: model)
         }
     }
 
     private var developerToolsCard: some View {
-        SettingsCard(
-            title: "Terminals & Developer Tools",
-            symbol: "terminal",
-            tint: Color.purple,
+        GroupCard(
+            header: L10n.text("Terminals and developer tools"),
             footer: "Export copies your preferences, shortcuts and speech model. History, recordings, dictionary and permissions stay on this Mac, and local agents open no network port."
         ) {
             SettingsToggleRow(
@@ -1218,84 +1200,74 @@ struct AdvancedSettingsView: View {
                         .font(.caption)
                         .foregroundStyle(VeloraStatus.warningText)
                         .padding(.horizontal, 14)
-                        .padding(.vertical, 8)
+                        .padding(.vertical, VeloraSpacing.s)
                 }
             }
         }
     }
 
     private var diagnosticsCard: some View {
-        SettingsCard(
-            title: "Diagnostics & Setup",
-            symbol: "wrench.and.screwdriver",
-            tint: Color.secondary
-        ) {
-            SettingsRow(
-                title: "Engine logs",
-                subtitle: "Open the local speech engine log folder in Finder."
+        GroupCard(header: L10n.text("Diagnostics and setup")) {
+            GroupRow(
+                label: L10n.text("Engine logs"),
+                sub: L10n.text("Open the local speech engine log folder in Finder.")
             ) {
                 Button(L10n.text("Show in Finder")) { Self.revealEngineLog() }
-                    .buttonStyle(.settingsChip)
+                    .buttonStyle(.capsule)
             }
             GroupDivider()
-            SettingsRow(
-                title: "Setup Assistant",
-                subtitle: "Re-check permissions, microphone input, and model setup."
+            GroupRow(
+                label: L10n.text("Setup Assistant"),
+                sub: L10n.text("Re-check permissions, microphone input, and model setup.")
             ) {
                 Button(L10n.text("Run Setup Assistant…"), action: openSetupAssistant)
-                    .buttonStyle(.settingsChip)
+                    .buttonStyle(.capsule)
             }
             GroupDivider()
-            DisclosureGroup(L10n.text("Recent support events")) {
+            SettingsDisclosureRow(title: "Recent support events") {
                 ActivityView()
-                    .padding(.top, VeloraSpacing.s)
             }
-            .padding(.horizontal, 14)
-            .padding(.vertical, 10)
         }
     }
 
     /// Export/Import plus the last result and the file's path.
     private var settingsFileRow: some View {
         VStack(alignment: .leading, spacing: 4) {
-            HStack(spacing: VeloraSpacing.s) {
-                VStack(alignment: .leading, spacing: 2) {
-                    Text(L10n.text("Settings file"))
-                        .font(.system(size: 13))
-                    Text(L10n.text("~/.velora/settings.json"))
-                        .font(.caption.monospaced())
-                        .foregroundStyle(.secondary)
-                        .textSelection(.enabled)
+            GroupRow(
+                label: L10n.text("Settings file"),
+                sub: "~/.velora/settings.json"
+            ) {
+                HStack(spacing: VeloraSpacing.xs) {
+                    Button(L10n.text("Export…")) { model.exportSettings() }
+                        .buttonStyle(.capsule)
+                    Button(L10n.text("Import…")) { model.importSettings() }
+                        .buttonStyle(.capsule)
                 }
-                Spacer()
-                Button(L10n.text("Export…")) { model.exportSettings() }
-                    .buttonStyle(.settingsChip)
-                Button(L10n.text("Import…")) { model.importSettings() }
-                    .buttonStyle(.settingsChip)
             }
             if let result = model.settingsTransferResult {
-                if result.hasPrefix("Import failed") || result.hasPrefix("Export failed") {
-                    Label(result, systemImage: "exclamationmark.triangle.fill")
-                        .font(.caption)
-                        .foregroundStyle(VeloraStatus.warningText)
-                } else {
-                    Label(result, systemImage: "checkmark.circle.fill")
-                        .font(.caption)
-                        .foregroundStyle(.secondary)
+                Group {
+                    if result.hasPrefix("Import failed") || result.hasPrefix("Export failed") {
+                        Label(result, systemImage: "exclamationmark.triangle.fill")
+                            .foregroundStyle(VeloraStatus.warningText)
+                    } else {
+                        Label(result, systemImage: "checkmark.circle.fill")
+                            .foregroundStyle(.secondary)
+                    }
                 }
+                .font(.caption)
+                .padding(.horizontal, 14)
+                .padding(.bottom, VeloraSpacing.s)
             }
         }
-        .padding(.horizontal, 14)
-        .padding(.vertical, 10)
     }
 
     /// Title + status caption on the left, install action on the right.
     private func agentIntegrationRow(
         title: String, detail: String, buttonTitle: String, action: @escaping () -> Void
     ) -> some View {
-        SettingsRow(title: title, subtitle: detail) {
-            Button(buttonTitle, action: action)
-                .buttonStyle(.settingsChip)
+        GroupRow(label: L10n.text(title), sub: L10n.text(detail)) {
+            Button(L10n.text(buttonTitle), action: action)
+                .buttonStyle(.capsule)
         }
     }
 
@@ -1332,9 +1304,9 @@ struct ShortcutsSettingsView: View {
     @State private var requestingMusicPermission = false
 
     var body: some View {
-        SettingsCanvas { isWide in
-            dictationHeroCard(isWide: isWide)
-            SettingsAdaptiveColumns(isWide: isWide) {
+        SettingsScrollCanvas {
+            dictationHeroCard
+            SettingsColumnPair {
                 streamTypingCard
                 proofreadCard
             } right: {
@@ -1352,28 +1324,21 @@ struct ShortcutsSettingsView: View {
 
     // MARK: Dictation hero card
 
-    private func dictationHeroCard(isWide: Bool) -> some View {
-        SettingsCard(
-            title: "Primary Dictation",
-            symbol: "mic.fill",
-            tint: VeloraBrand.accent,
-            footer: model.hotkeyMode == .hold ? "A quick tap locks recording on; tap again to finish." : nil,
-            headerTrailing: {
-                Button(L10n.text("Restore defaults")) {
-                    model.restoreDictationShortcutDefaults()
-                }
-                .buttonStyle(.settingsChip)
-            }
+    private var dictationHeroCard: some View {
+        GroupCard(
+            header: L10n.text("Primary dictation"),
+            headerLink: (L10n.text("Restore defaults"), { model.restoreDictationShortcutDefaults() }),
+            footer: model.hotkeyMode == .hold ? "A quick tap locks recording on; tap again to finish." : nil
         ) {
-            SettingsRow(
-                title: "Dictation shortcut",
-                subtitle: "Press your shortcut and speak, anywhere you can type. Esc cancels."
+            GroupRow(
+                label: L10n.text("Dictation shortcut"),
+                sub: L10n.text("Press your shortcut and speak, anywhere you can type. Esc cancels.")
             ) {
                 HotkeyRecorderView(
                     hotkey: $model.hotkey, showsQuickPicks: false, feature: "Dictation")
             }
             GroupDivider()
-            SettingsRow(title: "When pressed") {
+            GroupRow(label: L10n.text("When pressed")) {
                 Picker(L10n.text("When pressed"), selection: $model.hotkeyMode) {
                     ForEach(HotkeyMode.allCases) { mode in
                         Text(L10n.text(mode.displayName)).tag(mode)
@@ -1381,7 +1346,7 @@ struct ShortcutsSettingsView: View {
                 }
                 .labelsHidden()
                 .pickerStyle(.segmented)
-                .frame(width: isWide ? 280 : 230)
+                .fixedSize()
             }
             GroupDivider()
             SettingsToggleRow(
@@ -1402,13 +1367,12 @@ struct ShortcutsSettingsView: View {
         }
     }
 
-    // MARK: Voice Mode bento cards
+    // MARK: Voice mode cards (same monochrome symbol idiom as Home › Ways to talk)
 
     private var streamTypingCard: some View {
         modeCard(
             title: "Stream Typing",
-            symbol: "textformat",
-            tint: VeloraBrand.accent,
+            symbol: "text.cursor",
             caption: "Your words appear at the cursor while you speak.",
             footer: "Velora swaps in the polished text when you finish. If you type or move the cursor, it stops and copies the final text instead.",
             isOn: $model.streamTypingEnabled,
@@ -1420,7 +1384,6 @@ struct ShortcutsSettingsView: View {
         modeCard(
             title: "Voice Edit",
             symbol: "wand.and.stars",
-            tint: Color.purple,
             caption: "Select text, press the shortcut, and say the change: \u{201C}make this more formal\u{201D}. \u{2318}Z undoes it.",
             isOn: $model.voiceEdit,
             hotkey: $model.editHotkey,
@@ -1431,7 +1394,6 @@ struct ShortcutsSettingsView: View {
         modeCard(
             title: "Proofread",
             symbol: "text.badge.checkmark",
-            tint: VeloraStatus.success,
             caption: "Fix spelling and grammar in selected text, no microphone needed.",
             isOn: $model.proofreadEnabled,
             hotkey: $model.proofreadHotkey,
@@ -1439,31 +1401,34 @@ struct ShortcutsSettingsView: View {
     }
 
     private var actionModeCard: some View {
-        SettingsCard(
+        GroupCard(
             footer: "Action Mode needs Accessibility permission and runs entirely on this Mac."
         ) {
-            HStack(alignment: .top, spacing: VeloraSpacing.m) {
-                IconTile(symbol: "sparkles", color: VeloraBrand.warm, side: 28)
-                VStack(alignment: .leading, spacing: 3) {
+            HStack(alignment: .center, spacing: VeloraSpacing.m) {
+                Image(systemName: "sparkles")
+                    .font(.system(size: 15, weight: .medium))
+                    .foregroundStyle(model.actionsEnabled ? AnyShapeStyle(VeloraBrand.accent) : AnyShapeStyle(.secondary))
+                    .frame(width: 22)
+                    .accessibilityHidden(true)
+                VStack(alignment: .leading, spacing: 2) {
                     HStack(spacing: VeloraSpacing.s) {
                         Text(L10n.text("Action Mode"))
-                            .font(.system(size: 13.5, weight: .semibold))
+                            .font(.system(size: 13, weight: .medium))
                         ExperimentalBadge()
                     }
                     Text(L10n.text("Hold the shortcut and say what to do: \u{201C}message Priya on Slack that I\u{2019}m running late\u{201D}. Say \u{201C}draft\u{201D} to stop before it sends."))
-                        .font(.system(size: 11.5))
+                        .font(.system(size: 11))
                         .foregroundStyle(.secondary)
                         .fixedSize(horizontal: false, vertical: true)
                 }
                 Spacer(minLength: VeloraSpacing.s)
-                Toggle("", isOn: $model.actionsEnabled)
+                Toggle(L10n.text("Action Mode"), isOn: $model.actionsEnabled)
                     .labelsHidden()
                     .toggleStyle(.switch)
                     .controlSize(.small)
-                    .accessibilityLabel(L10n.text("Action Mode"))
             }
             .padding(.horizontal, 14)
-            .padding(.vertical, 12)
+            .padding(.vertical, VeloraSpacing.m)
             GroupDivider()
             Group {
                 shortcutCardRow(for: "Action Mode", hotkey: $model.actionHotkey)
@@ -1487,33 +1452,35 @@ struct ShortcutsSettingsView: View {
     private func modeCard(
         title: String,
         symbol: String,
-        tint: Color,
         caption: String,
         footer: String? = nil,
         isOn: Binding<Bool>,
         hotkey: Binding<Hotkey>,
         conflict: String?
     ) -> some View {
-        SettingsCard(footer: footer) {
-            HStack(alignment: .top, spacing: VeloraSpacing.m) {
-                IconTile(symbol: symbol, color: tint, side: 28)
-                VStack(alignment: .leading, spacing: 3) {
+        GroupCard(footer: footer) {
+            HStack(alignment: .center, spacing: VeloraSpacing.m) {
+                Image(systemName: symbol)
+                    .font(.system(size: 15, weight: .medium))
+                    .foregroundStyle(isOn.wrappedValue ? AnyShapeStyle(VeloraBrand.accent) : AnyShapeStyle(.secondary))
+                    .frame(width: 22)
+                    .accessibilityHidden(true)
+                VStack(alignment: .leading, spacing: 2) {
                     Text(L10n.text(title))
-                        .font(.system(size: 13.5, weight: .semibold))
+                        .font(.system(size: 13, weight: .medium))
                     Text(L10n.text(caption))
-                        .font(.system(size: 11.5))
+                        .font(.system(size: 11))
                         .foregroundStyle(.secondary)
                         .fixedSize(horizontal: false, vertical: true)
                 }
                 Spacer(minLength: VeloraSpacing.s)
-                Toggle("", isOn: isOn)
+                Toggle(L10n.text(title), isOn: isOn)
                     .labelsHidden()
                     .toggleStyle(.switch)
                     .controlSize(.small)
-                    .accessibilityLabel(L10n.text(title))
             }
             .padding(.horizontal, 14)
-            .padding(.vertical, 12)
+            .padding(.vertical, VeloraSpacing.m)
             GroupDivider()
             Group {
                 shortcutCardRow(for: title, hotkey: hotkey)
@@ -1531,21 +1498,21 @@ struct ShortcutsSettingsView: View {
         let actionable: [NativeMediaPermission?] = [.needsConsent, .denied, .unavailable]
         if actionable.contains(musicPermission) {
             GroupDivider()
-            SettingsRow(
-                title: "Music control",
-                subtitle: "Allow once to play or pause Music without bringing it forward."
+            GroupRow(
+                label: L10n.text("Music control"),
+                sub: L10n.text("Allow once to play or pause Music without bringing it forward.")
             ) {
                 switch musicPermission {
                 case .needsConsent:
                     Button(requestingMusicPermission ? "Waiting…" : "Allow…",
                            action: requestMusicPermission)
-                        .buttonStyle(.settingsChip)
+                        .buttonStyle(.capsule)
                         .disabled(requestingMusicPermission)
                 case .denied:
                     Button(L10n.text("Open Settings")) {
                         Permissions.openAutomationSettings()
                     }
-                    .buttonStyle(.settingsChip)
+                    .buttonStyle(.capsule)
                 default:
                     Text(L10n.text("Open Music, then return here"))
                         .font(.caption)
@@ -1558,16 +1525,11 @@ struct ShortcutsSettingsView: View {
     // MARK: Shared rows
 
     private func shortcutCardRow(for feature: String, hotkey: Binding<Hotkey>) -> some View {
-        HStack {
-            Text(L10n.text("Shortcut"))
-                .font(.system(size: 12.5))
-                .foregroundStyle(.secondary)
-                .accessibilityLabel(L10n.format("%@ shortcut", L10n.text(feature)))
-            Spacer()
+        GroupRow(label: L10n.text("Shortcut")) {
             HotkeyRecorderView(hotkey: hotkey, showsQuickPicks: false, feature: feature)
         }
-        .padding(.horizontal, 14)
-        .padding(.vertical, 10)
+        .accessibilityElement(children: .contain)
+        .accessibilityLabel(L10n.format("%@ shortcut", L10n.text(feature)))
     }
 
     private func conflictLabel(_ text: String) -> some View {

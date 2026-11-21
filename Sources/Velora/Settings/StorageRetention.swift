@@ -346,11 +346,11 @@ struct RetentionSettingsView: View {
             GroupDivider()
             retentionRow("Keep meeting audio", value: $meetingAudioDays, forever: false, choices: [7, 30, 90, 365])
             GroupDivider()
-            SettingsRow(
-                title: "Clean up expired items",
-                subtitle: "Text stays forever unless you choose a limit. Audio can expire while text stays."
+            GroupRow(
+                label: "Clean up expired items",
+                sub: "Text stays forever unless you choose a limit. Audio can expire while text stays."
             ) {
-                Button(busy ? "Preparing…" : "Preview cleanup…") {
+                Button(busy ? "Preparing…" : "Preview Cleanup…") {
                     busy = true
                     StorageRetention.shared.preview(policy: policy, dictationAudioDays: dictationAudioDays,
                         meetingAudioDays: meetingAudioDays) { result in
@@ -361,7 +361,7 @@ struct RetentionSettingsView: View {
                         }
                     }
                 }
-                .buttonStyle(.settingsChip)
+                .buttonStyle(.capsule)
                 .disabled(busy)
             }
             if let message {
@@ -404,14 +404,13 @@ struct RetentionSettingsView: View {
     }
 
     private func retentionRow(_ title: String, value: Binding<Int>, forever: Bool, choices: [Int]) -> some View {
-        SettingsRow(title: title) {
-            Picker(title, selection: value) {
+        let label = value.wrappedValue == 0 ? "Forever" : "\(value.wrappedValue) days"
+        return GroupRow(label: title) {
+            HeaderMenu(title, value: label, selection: value) {
                 if forever { Text("Forever").tag(0) }
                 ForEach(choices, id: \.self) { days in Text("\(days) days").tag(days) }
                 if value.wrappedValue > 0 && !choices.contains(value.wrappedValue) { Text("\(value.wrappedValue) days").tag(value.wrappedValue) }
             }
-            .labelsHidden()
-            .frame(maxWidth: 140)
         }
     }
 }
