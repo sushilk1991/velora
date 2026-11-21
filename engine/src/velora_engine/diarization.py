@@ -10,6 +10,10 @@ Speed: ~2 s per audio-minute at 2 threads (more threads measured slower).
 
 Models (~46 MB total) download once to ``~/.velora/models/diarization`` from
 the sherpa-onnx GitHub releases, sha256-pinned.
+
+``diarize()`` is the offline authority for a stored transcript.
+``StreamingDiarizer`` is the live, provisional view over rolling 1.5 s
+windows: it labels speech as it arrives and never touches stored transcripts.
 """
 from __future__ import annotations
 
@@ -198,6 +202,223 @@ def diarize(pcm: np.ndarray) -> list[Turn]:
             order[seg.speaker] = f"s{len(order) + 1}"
         turns.append(Turn(float(seg.start), float(seg.end), order[seg.speaker]))
     return turns
+
+
+_STREAM_SAMPLE_RATE = 16_000
+_STREAM_WINDOW_S = 1.5
+_STREAM_SIMILARITY_THRESHOLD = 0.55
+_STREAM_MAX_SPEAKERS = 8
+# RMS a window must carry before it may name a speaker. In float32 [-1, 1] a
+# quiet room sits near 1e-3 and speech at 2e-2..1e-1, so this drops digital
+# silence and idle noise without eating a soft first word.
+_STREAM_SILENCE_RMS = 1e-3
+
+
+def titanet_embedder() -> Callable[[np.ndarray], np.ndarray | None] | None:
+    """On-device TitaNet embedder, or None when its model is not installed.
+
+    Deliberately never downloads: live labeling runs inside the speech path
+    and unit tests must not fetch 46 MB. ``ensure_models`` remains the batch
+    path's explicit fetch.
+    """
+    model = models_dir() / _EMB_NAME
+    if not model.is_file():
+        return None
+    try:
+        import sherpa_onnx
+
+        extractor = sherpa_onnx.SpeakerEmbeddingExtractor(
+            sherpa_onnx.SpeakerEmbeddingExtractorConfig(
+                model=str(model), num_threads=_NUM_THREADS))
+    except Exception:  # noqa: BLE001 — no wheel or bad model: live labels stay off
+        log.debug("streaming diarization: no speaker-embedding extractor", exc_info=True)
+        return None
+
+    def embed(pcm: np.ndarray) -> np.ndarray | None:
+        try:
+            stream = extractor.create_stream()
+            stream.accept_waveform(
+                _STREAM_SAMPLE_RATE, np.ascontiguousarray(pcm, dtype=np.float32))
+            stream.input_finished()
+            if not extractor.is_ready(stream):
+                return None
+            return np.asarray(extractor.compute(stream), dtype=np.float32)
+        except Exception:  # noqa: BLE001 — one bad window must not end the stream
+            log.debug("streaming diarization: embedding failed", exc_info=True)
+            return None
+
+    return embed
+
+
+class StreamingDiarizer:
+    """Provisional live speaker labels over rolling 1.5 s windows.
+
+    Expects 16 kHz mono float32 samples, the same as ``diarize()``.
+
+    This is the live view, never the authority: ``diarize()`` still labels a
+    stored transcript in one offline pass, and nothing here writes to a
+    transcript. Each window's embedding is compared with running normalized
+    speaker centroids. A match refines its centroid with an incremental mean,
+    so labels settle as evidence accumulates; a new centroid appears only for
+    a voice nothing matches while the speaker cap has room; and silence is
+    skipped so a pause can never invent a speaker.
+    """
+
+    def __init__(
+        self,
+        embed_fn: Callable[[np.ndarray], np.ndarray | None] | None = None,
+        *,
+        window_s: float = _STREAM_WINDOW_S,
+        sample_rate: int = _STREAM_SAMPLE_RATE,
+        similarity_threshold: float = _STREAM_SIMILARITY_THRESHOLD,
+        max_speakers: int = _STREAM_MAX_SPEAKERS,
+        silence_rms: float = _STREAM_SILENCE_RMS,
+    ) -> None:
+        if window_s <= 0 or sample_rate <= 0:
+            raise ValueError("window_s and sample_rate must be positive")
+        if max_speakers < 1:
+            raise ValueError("max_speakers must be at least 1")
+        self.window_s = float(window_s)
+        self.sample_rate = int(sample_rate)
+        self.similarity_threshold = float(similarity_threshold)
+        self.max_speakers = int(max_speakers)
+        self.silence_rms = float(silence_rms)
+        self._window_samples = max(1, int(round(self.window_s * self.sample_rate)))
+        self._embed_fn = embed_fn
+        self._embedder_resolved = embed_fn is not None
+        self._buffer = np.zeros(0, dtype=np.float32)
+        self._centroids: list[np.ndarray] = []
+        self._counts: list[int] = []
+        self._open: Turn | None = None
+        self._windows = 0
+
+    @property
+    def speaker_count(self) -> int:
+        return len(self._centroids)
+
+    @property
+    def centroids(self) -> tuple[np.ndarray, ...]:
+        """The running centroids, for diagnostics and convergence tests."""
+        return tuple(self._centroids)
+
+    def reset(self) -> None:
+        """Forget every speaker, timestamp, open turn, and buffered sample."""
+        self._buffer = np.zeros(0, dtype=np.float32)
+        self._centroids = []
+        self._counts = []
+        self._open = None
+        self._windows = 0
+
+    def feed(self, pcm: np.ndarray) -> list[Turn]:
+        """Consume audio and return the turns that closed during this call.
+
+        Buffers to whole ``window_s`` windows, so callers may hand over any
+        number of samples, including far more or fewer than one window.
+        """
+        samples = np.asarray(pcm, dtype=np.float32).reshape(-1)
+        if samples.size:
+            self._buffer = (
+                np.concatenate((self._buffer, samples))
+                if self._buffer.size else samples.copy()
+            )
+        turns: list[Turn] = []
+        while self._buffer.size >= self._window_samples:
+            window = self._buffer[: self._window_samples]
+            self._buffer = self._buffer[self._window_samples :]
+            self._consume(window, turns)
+        return turns
+
+    def flush(self) -> list[Turn]:
+        """End of stream: close the open turn and drop the partial window."""
+        turns: list[Turn] = []
+        self._close(turns)
+        self._buffer = np.zeros(0, dtype=np.float32)
+        return turns
+
+    def _consume(self, window: np.ndarray, turns: list[Turn]) -> None:
+        start = self._windows * self.window_s
+        end = start + self.window_s
+        self._windows += 1
+        if _rms(window) < self.silence_rms:
+            self._close(turns)
+            return
+        embedding = self._embed(window)
+        if embedding is None:
+            self._close(turns)
+            return
+        speaker = self._assign(embedding)
+        if self._open is not None and self._open.speaker == speaker:
+            self._open = Turn(self._open.start, end, speaker)
+            return
+        self._close(turns)
+        self._open = Turn(start, end, speaker)
+
+    def _embed(self, window: np.ndarray) -> np.ndarray | None:
+        if not self._embedder_resolved:
+            self._embedder_resolved = True
+            self._embed_fn = titanet_embedder()
+        if self._embed_fn is None:
+            return None
+        try:
+            return _unit(self._embed_fn(window))
+        except Exception:  # noqa: BLE001 — live labeling degrades, never raises
+            log.warning("streaming diarization: embedder failed", exc_info=True)
+            return None
+
+    def _assign(self, embedding: np.ndarray) -> str:
+        if not self._centroids:
+            return self._new_speaker(embedding)
+        scores = [float(np.dot(embedding, centroid)) for centroid in self._centroids]
+        best = int(np.argmax(scores))
+        if scores[best] >= self.similarity_threshold:
+            self._refine(best, embedding)
+            return self._label(best)
+        if len(self._centroids) < self.max_speakers:
+            return self._new_speaker(embedding)
+        # At the cap an unmatched voice borrows the closest label but does not
+        # move that centroid: a forced match is not evidence of identity, and
+        # letting it drag the centroid would corrupt the speaker it borrowed.
+        return self._label(best)
+
+    def _new_speaker(self, embedding: np.ndarray) -> str:
+        self._centroids.append(embedding)
+        self._counts.append(1)
+        return self._label(len(self._centroids) - 1)
+
+    def _refine(self, index: int, embedding: np.ndarray) -> None:
+        count = self._counts[index]
+        mean = _unit(self._centroids[index] * count + embedding)
+        if mean is None:
+            return
+        self._centroids[index] = mean
+        self._counts[index] = count + 1
+
+    def _close(self, turns: list[Turn]) -> None:
+        if self._open is not None:
+            turns.append(self._open)
+            self._open = None
+
+    @staticmethod
+    def _label(index: int) -> str:
+        return f"s{index + 1}"
+
+
+def _unit(vector: object) -> np.ndarray | None:
+    """L2-normalize an embedding, or None when it carries no direction."""
+    try:
+        value = np.asarray(vector, dtype=np.float32).reshape(-1)
+    except (TypeError, ValueError):
+        return None
+    if value.size == 0 or not bool(np.isfinite(value).all()):
+        return None
+    norm = float(np.linalg.norm(value))
+    if norm <= 1e-8:
+        return None
+    return value / norm
+
+
+def _rms(window: np.ndarray) -> float:
+    return float(np.sqrt(np.mean(np.square(window, dtype=np.float64))))
 
 
 def plan_chunks(
