@@ -623,6 +623,26 @@ enum StatsLatency {
         var id: Int { start }
     }
 
+    struct AdaptiveBin: Equatable, Identifiable {
+        let startMs: Int
+        let widthMs: Int
+        let count: Int
+        let isOverflow: Bool
+
+        var id: Int { startMs }
+        var startSeconds: Double { Double(startMs) / 1000.0 }
+        var endSeconds: Double { Double(startMs + widthMs) / 1000.0 }
+    }
+
+    struct AdaptiveDistribution: Equatable {
+        let bins: [AdaptiveBin]
+        let stepMs: Int
+        let overflowMs: Int
+
+        var maxSeconds: Double { Double(overflowMs + stepMs) / 1000.0 }
+        var overflowSeconds: Double { Double(overflowMs) / 1000.0 }
+    }
+
     static func bins(_ ms: [Int]) -> [Bin] {
         var counts = Array(repeating: 0, count: binCount)
         for value in ms {
@@ -630,6 +650,38 @@ enum StatsLatency {
             counts[index] += 1
         }
         return counts.enumerated().map { Bin(start: $0.offset * binSeconds, count: $0.element) }
+    }
+
+    /// Fits the bucket width and X-axis range to the actual p95 so fast
+    /// on-device dictations fill the chart instead of huddling in the first
+    /// 20% of a 10-second axis.
+    static func adaptive(_ ms: [Int], p95Ms: Int) -> AdaptiveDistribution {
+        let stepMs: Int
+        let regularBins: Int
+        if p95Ms <= 1_800 {
+            stepMs = 250
+            regularBins = 8   // 0..2.0 s + 2.0 s+
+        } else if p95Ms <= 3_800 {
+            stepMs = 500
+            regularBins = 8   // 0..4.0 s + 4.0 s+
+        } else {
+            stepMs = 1_000
+            regularBins = 10  // 0..10 s + 10 s+
+        }
+        let overflowMs = regularBins * stepMs
+        var counts = Array(repeating: 0, count: regularBins + 1)
+        for value in ms {
+            let index = min(max(value, 0) / stepMs, regularBins)
+            counts[index] += 1
+        }
+        let bins = counts.enumerated().map { idx, count in
+            AdaptiveBin(
+                startMs: idx * stepMs,
+                widthMs: stepMs,
+                count: count,
+                isOverflow: idx == regularBins)
+        }
+        return AdaptiveDistribution(bins: bins, stepMs: stepMs, overflowMs: overflowMs)
     }
 }
 
@@ -1088,14 +1140,23 @@ struct IntelligenceSettingsView: View {
         }
     }
 
-    /// Today has no "of N days", so its fourth tile is the streak.
+    /// Today has no "of N days", so its fourth tile is the streak. All other
+    /// ranges show active days plus both current and longest streak, with the
+    /// live streak dots glowing in warm apricot.
     @ViewBuilder
     private var activityTile: some View {
-        let longest = "\(HistoryJournal.plural(vm.insights.longestStreak, "day"))"
-        let strip = StatTileTrend.days(StatsActivity.strip(range: vm.range, insights: vm.insights))
+        let current = vm.insights.currentStreak
+        let longest = vm.insights.longestStreak
+        let strip = StatTileTrend.days(
+            StatsActivity.strip(range: vm.range, insights: vm.insights),
+            streak: current)
         if vm.range == .today {
-            StatTile(label: "Streak", value: HistoryJournal.plural(vm.insights.currentStreak, "day"), trend: strip) {
-                tileCaption("Longest \(longest)")
+            StatTile(
+                label: "Streak",
+                value: HistoryJournal.plural(current, "day"),
+                trend: strip
+            ) {
+                streakCaption(current: current, longest: longest, showCurrent: false)
             }
         } else {
             let days = StatsActivity.activeDays(range: vm.range, insights: vm.insights)
@@ -1104,8 +1165,22 @@ struct IntelligenceSettingsView: View {
                 value: "\(HistoryJournal.grouped(days.active)) of \(HistoryJournal.grouped(days.total))",
                 trend: strip
             ) {
-                tileCaption("Longest streak \(longest)")
+                streakCaption(current: current, longest: longest, showCurrent: true)
             }
+        }
+    }
+
+    @ViewBuilder
+    private func streakCaption(current: Int, longest: Int, showCurrent: Bool) -> some View {
+        if showCurrent && current > 0 {
+            HStack(spacing: 4) {
+                Image(systemName: "flame.fill")
+                    .font(.system(size: 10))
+                    .foregroundStyle(VeloraBrand.warm)
+                tileCaption("\(current)d streak · best \(longest)d")
+            }
+        } else {
+            tileCaption("Best streak \(HistoryJournal.plural(longest, "day"))")
         }
     }
 
@@ -1198,16 +1273,21 @@ struct IntelligenceSettingsView: View {
         }
     }
 
-    // MARK: Ready in, modes, calendar
+    // MARK: End-to-end time, modes, calendar
 
     private var readyCard: some View {
         let ready = vm.detail.readyMs
         let enough = ready.count >= StatsLatency.minimumSamples
-        return StatsChartCard(title: "Ready in", caption: enough ? readyCaption : nil) {
+        let medianMs = vm.detail.readyMedianMs ?? 0
+        let slowMs = vm.detail.readySlowestMs ?? 0
+        return StatsChartCard(title: "End-to-end time", caption: enough ? readyCaption : nil) {
             if enough {
                 StatsLatencyChart(
-                    bins: StatsLatency.bins(ready),
-                    medianMs: vm.detail.readyMedianMs ?? 0, slowMs: vm.detail.readySlowestMs ?? 0)
+                    distribution: StatsLatency.adaptive(ready, p95Ms: slowMs),
+                    medianMs: medianMs,
+                    slowMs: slowMs,
+                    averageSpeechMs: vm.stats.averageSttMs,
+                    averageCleanupMs: vm.stats.averageCleanupWallMs)
             } else {
                 StatsEmptyNote(text: "Not enough dictations yet")
             }
@@ -1262,7 +1342,10 @@ struct IntelligenceSettingsView: View {
     private var calendarCard: some View {
         let active = vm.insights.heatmapDaily.count
         return StatsChartCard(title: "Last 12 weeks", caption: HistoryJournal.plural(active, "active day")) {
-            StatsActivityCalendar(cells: StatsCalendar.cells(daily: vm.insights.heatmapDaily))
+            StatsActivityCalendar(
+                cells: StatsCalendar.cells(daily: vm.insights.heatmapDaily),
+                currentStreak: vm.insights.currentStreak,
+                longestStreak: vm.insights.longestStreak)
         }
     }
 

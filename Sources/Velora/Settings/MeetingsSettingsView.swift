@@ -916,8 +916,14 @@ struct MeetingPreferenceRows: View {
     @ObservedObject var coordinator: MeetingCoordinator
     @AppStorage(MeetingPolicy.leadKey) private var calendarLeadMinutes = 5
     @AppStorage(MeetingPolicy.endKey) private var meetingEndBehavior = MeetingPolicy.EndBehavior.confirmedNative.rawValue
+    @State private var calendarAuth = MeetingDetector.calendarAuthorization
+    @State private var calendarPermissionHint: String?
 
     static let footer = "Velora detects calls from local call apps, the microphone, and meeting pages in your browser, never saving meeting addresses, and records only after you choose Start Meeting Notes."
+
+    private var needsCalendarSettingsPrompt: Bool {
+        calendarAuth == .denied || calendarAuth == .restricted || calendarAuth == .writeOnly
+    }
 
     var body: some View {
         SettingsToggleRow(
@@ -926,23 +932,36 @@ struct MeetingPreferenceRows: View {
         GroupDivider()
         SettingsToggleRow(
             title: "Name meetings from Calendar",
+            subtitle: calendarRowSubtitle,
             isOn: $model.meetingCalendar)
             .onChange(of: model.meetingCalendar) { _, enabled in
-                if enabled && coordinator.calendarAuthorization != .fullAccess {
-                    coordinator.requestCalendarAccess { granted in
-                        if !granted { model.meetingCalendar = false }
-                    }
-                }
+                handleCalendarToggle(enabled)
             }
+            .onAppear { refreshCalendarStatus() }
+            .onReceive(NotificationCenter.default.publisher(for: NSApplication.didBecomeActiveNotification)) { _ in
+                refreshCalendarStatus()
+            }
+        if calendarPermissionHint != nil || (model.meetingCalendar && needsCalendarSettingsPrompt) {
+            GroupDivider()
+            GroupRow(
+                label: L10n.text("Calendar access is turned off"),
+                sub: calendarPermissionHint
+                    ?? L10n.text("Allow Full Calendar Access for Velora in System Settings, then turn this on again.")
+            ) {
+                Button(L10n.text("Open Settings")) {
+                    Permissions.openCalendarSettings()
+                }
+                .buttonStyle(.capsule)
+            }
+        }
         GroupDivider()
         GroupRow(label: L10n.text("Calendar lead time")) {
-            HeaderMenu(
+            CapsuleOptionMenu(
                 L10n.text("Calendar lead time"),
                 value: "\(calendarLeadMinutes) minutes",
-                selection: $calendarLeadMinutes
-            ) {
-                ForEach([0, 5, 10, 15, 30], id: \.self) { Text("\($0) minutes").tag($0) }
-            }
+                selection: $calendarLeadMinutes,
+                items: [0, 5, 10, 15, 30].map { CapsuleMenuItem($0, title: "\($0) minutes") }
+            )
         }
         .disabled(!model.meetingCalendar)
         .opacity(model.meetingCalendar ? 1 : 0.5)
@@ -952,13 +971,12 @@ struct MeetingPreferenceRows: View {
                 Text(L10n.text("When the call ends"))
                     .font(.system(size: 13))
                 Spacer(minLength: VeloraSpacing.s)
-                HeaderMenu(
+                CapsuleOptionMenu(
                     L10n.text("When the call ends"),
                     value: MeetingPolicy.EndBehavior(rawValue: meetingEndBehavior)?.title ?? meetingEndBehavior,
-                    selection: $meetingEndBehavior
-                ) {
-                    ForEach(MeetingPolicy.EndBehavior.allCases) { Text($0.title).tag($0.rawValue) }
-                }
+                    selection: $meetingEndBehavior,
+                    items: MeetingPolicy.EndBehavior.allCases.map { CapsuleMenuItem($0.rawValue, title: $0.title) }
+                )
             }
             Text(L10n.text("Browser and manual recordings always ask before finishing unless you choose to keep recording. Detection never starts a recording."))
                 .font(.system(size: 11))
@@ -972,6 +990,50 @@ struct MeetingPreferenceRows: View {
             title: "Improve remote speech detection",
             subtitle: "Skips long silences while keeping the transcript honestly labeled Me and Them. Runs on this Mac; downloads two small voice models (~46 MB) on the first meeting.",
             isOn: $model.meetingDiarization)
+    }
+
+    private var calendarRowSubtitle: String? {
+        if model.meetingCalendar && calendarAuth == .fullAccess {
+            return "Uses upcoming event titles on this Mac."
+        }
+        return nil
+    }
+
+    private func refreshCalendarStatus() {
+        let latest = MeetingDetector.calendarAuthorization
+        calendarAuth = latest
+        if latest == .fullAccess {
+            calendarPermissionHint = nil
+        }
+    }
+
+    private func handleCalendarToggle(_ enabled: Bool) {
+        guard enabled else {
+            calendarPermissionHint = nil
+            return
+        }
+        let current = MeetingDetector.calendarAuthorization
+        calendarAuth = current
+        if current == .fullAccess {
+            calendarPermissionHint = nil
+            return
+        }
+        if current == .denied || current == .restricted || current == .writeOnly {
+            model.meetingCalendar = false
+            calendarPermissionHint = current == .writeOnly
+                ? L10n.text("Velora needs Full Calendar Access (not Add Events Only) to read meeting titles.")
+                : L10n.text("Allow Full Calendar Access for Velora in System Settings, then turn this on again.")
+            return
+        }
+        coordinator.requestCalendarAccess { granted in
+            calendarAuth = MeetingDetector.calendarAuthorization
+            if granted {
+                calendarPermissionHint = nil
+            } else {
+                model.meetingCalendar = false
+                calendarPermissionHint = L10n.text("Calendar permission wasn't granted. Allow Full Calendar Access in System Settings to name meetings automatically.")
+            }
+        }
     }
 }
 

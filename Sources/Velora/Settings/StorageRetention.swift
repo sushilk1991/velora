@@ -405,12 +405,14 @@ struct RetentionSettingsView: View {
 
     private func retentionRow(_ title: String, value: Binding<Int>, forever: Bool, choices: [Int]) -> some View {
         let label = value.wrappedValue == 0 ? "Forever" : "\(value.wrappedValue) days"
+        var items: [CapsuleMenuItem<Int>] = []
+        if forever { items.append(CapsuleMenuItem(0, title: "Forever")) }
+        items.append(contentsOf: choices.map { CapsuleMenuItem($0, title: "\($0) days") })
+        if value.wrappedValue > 0 && !choices.contains(value.wrappedValue) {
+            items.append(CapsuleMenuItem(value.wrappedValue, title: "\(value.wrappedValue) days"))
+        }
         return GroupRow(label: title) {
-            HeaderMenu(title, value: label, selection: value) {
-                if forever { Text("Forever").tag(0) }
-                ForEach(choices, id: \.self) { days in Text("\(days) days").tag(days) }
-                if value.wrappedValue > 0 && !choices.contains(value.wrappedValue) { Text("\(value.wrappedValue) days").tag(value.wrappedValue) }
-            }
+            CapsuleOptionMenu(title, value: label, selection: value, items: items)
         }
     }
 }

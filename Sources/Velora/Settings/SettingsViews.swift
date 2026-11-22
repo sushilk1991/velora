@@ -176,15 +176,12 @@ struct GeneralSettingsView: View {
                 label: L10n.text("Interface language"),
                 sub: L10n.text("Changes menus and settings. Dictation language is set separately.")
             ) {
-                HeaderMenu(
+                CapsuleOptionMenu(
                     L10n.text("Interface language"),
                     value: model.interfaceLanguage.title,
-                    selection: $model.interfaceLanguage
-                ) {
-                    ForEach(InterfaceLanguage.allCases) { language in
-                        Text(language.title).tag(language)
-                    }
-                }
+                    selection: $model.interfaceLanguage,
+                    items: InterfaceLanguage.allCases.map { CapsuleMenuItem($0, title: $0.title) }
+                )
             }
             GroupDivider()
             SettingsToggleRow(
@@ -200,15 +197,12 @@ struct GeneralSettingsView: View {
             footer: "You can also hide it from its right-click menu."
         ) {
             GroupRow(label: L10n.text("Show pill")) {
-                HeaderMenu(
+                CapsuleOptionMenu(
                     L10n.text("Show pill"),
                     value: L10n.text(pillVisibility.wrappedValue.title),
-                    selection: pillVisibility
-                ) {
-                    ForEach(PillVisibility.allCases) { choice in
-                        Text(L10n.text(choice.title)).tag(choice)
-                    }
-                }
+                    selection: pillVisibility,
+                    items: PillVisibility.allCases.map { CapsuleMenuItem($0, title: L10n.text($0.title)) }
+                )
             }
             GroupDivider()
             SettingsDisclosureRow(title: "Preview the pill") {
@@ -226,15 +220,12 @@ struct GeneralSettingsView: View {
             if model.soundsEnabled {
                 GroupDivider()
                 GroupRow(label: L10n.text("Sound set")) {
-                    HeaderMenu(
+                    CapsuleOptionMenu(
                         L10n.text("Sound set"),
                         value: model.soundSet.title,
-                        selection: $model.soundSet
-                    ) {
-                        ForEach(SoundSet.allCases) { soundSet in
-                            Text(soundSet.title).tag(soundSet)
-                        }
-                    }
+                        selection: $model.soundSet,
+                        items: SoundSet.allCases.map { CapsuleMenuItem($0, title: $0.title) }
+                    )
                 }
                 GroupDivider()
                 GroupRow(label: L10n.text("Sound volume")) {
@@ -408,6 +399,8 @@ struct DictationSettingsView: View {
     @ObservedObject var model: SettingsModel
     @State private var archiveSize: String = "…"
     @State private var inputDevices: [AudioInputDevices.Device] = []
+    @State private var screenRecordingGranted = Permissions.screenRecordingGranted
+    @State private var requestedScreenRecording = false
 
     /// Whisper language codes, weighted toward the most-spoken languages.
     private static let languages: [(String, String)] = [
@@ -433,9 +426,16 @@ struct DictationSettingsView: View {
         .onAppear {
             AudioInputDevices.beginObserving()
             inputDevices = AudioInputDevices.displayList()
+            screenRecordingGranted = Permissions.screenRecordingGranted
         }
         .onReceive(NotificationCenter.default.publisher(for: .veloraAudioInputDevicesChanged)) { _ in
             inputDevices = AudioInputDevices.displayList()
+        }
+        .onReceive(NotificationCenter.default.publisher(for: NSApplication.didBecomeActiveNotification)) { _ in
+            screenRecordingGranted = Permissions.screenRecordingGranted
+            if screenRecordingGranted {
+                requestedScreenRecording = false
+            }
         }
     }
 
@@ -443,6 +443,20 @@ struct DictationSettingsView: View {
         guard let uid = model.inputDeviceUID else { return L10n.text("System Default") }
         return inputDevices.first(where: { $0.uid == uid })?.name
             ?? L10n.text("Chosen Microphone (Not Connected)")
+    }
+
+    private var microphoneMenuItems: [CapsuleMenuItem<String?>] {
+        var items: [CapsuleMenuItem<String?>] = [
+            CapsuleMenuItem(nil, title: L10n.text("System Default")),
+        ]
+        items.append(contentsOf: inputDevices.map {
+            CapsuleMenuItem(Optional($0.uid), title: $0.name)
+        })
+        if let uid = model.inputDeviceUID,
+           !inputDevices.contains(where: { $0.uid == uid }) {
+            items.append(CapsuleMenuItem(Optional(uid), title: L10n.text("Chosen Microphone (Not Connected)"), separatorBefore: true))
+        }
+        return items
     }
 
     private var selectedLanguageName: String {
@@ -456,32 +470,21 @@ struct DictationSettingsView: View {
             footer: "Velora keeps using a chosen microphone when AirPods or another input connect."
         ) {
             GroupRow(label: L10n.text("Microphone")) {
-                HeaderMenu(
+                CapsuleOptionMenu(
                     L10n.text("Microphone"),
                     value: selectedMicrophoneName,
-                    selection: $model.inputDeviceUID
-                ) {
-                    Text(L10n.text("System Default")).tag(String?.none)
-                    ForEach(inputDevices, id: \.uid) { device in
-                        Text(device.name).tag(String?.some(device.uid))
-                    }
-                    if let uid = model.inputDeviceUID,
-                       !inputDevices.contains(where: { $0.uid == uid }) {
-                        Text(L10n.text("Chosen Microphone (Not Connected)")).tag(String?.some(uid))
-                    }
-                }
+                    selection: $model.inputDeviceUID,
+                    items: microphoneMenuItems
+                )
             }
             GroupDivider()
             GroupRow(label: L10n.text("Language")) {
-                HeaderMenu(
+                CapsuleOptionMenu(
                     L10n.text("Language"),
                     value: selectedLanguageName,
-                    selection: $model.language
-                ) {
-                    ForEach(Self.languages, id: \.0) { code, name in
-                        Text(L10n.text(name)).tag(code)
-                    }
-                }
+                    selection: $model.language,
+                    items: Self.languages.map { CapsuleMenuItem($0.0, title: L10n.text($0.1)) }
+                )
             }
             GroupDivider()
             SettingsToggleRow(
@@ -498,15 +501,12 @@ struct DictationSettingsView: View {
                     Text(L10n.text("Result"))
                         .font(.system(size: 13))
                     Spacer(minLength: VeloraSpacing.s)
-                    HeaderMenu(
+                    CapsuleOptionMenu(
                         L10n.text("Result"),
                         value: L10n.text(model.dictationDelivery.title),
-                        selection: $model.dictationDelivery
-                    ) {
-                        ForEach(DictationDelivery.allCases) { choice in
-                            Text(L10n.text(choice.title)).tag(choice)
-                        }
-                    }
+                        selection: $model.dictationDelivery,
+                        items: DictationDelivery.allCases.map { CapsuleMenuItem($0, title: L10n.text($0.title)) }
+                    )
                 }
                 Text(L10n.text("If insertion is blocked, your words stay on the clipboard. A copy you make during delivery always wins."))
                     .font(.system(size: 11))
@@ -561,12 +561,37 @@ struct DictationSettingsView: View {
         ) {
             GroupRow(
                 label: L10n.text("On-device screen text recognition"),
-                sub: L10n.text("Helps spell names and technical terms visible on screen.")
+                sub: L10n.text(screenRecordingGranted
+                    ? "Screen Recording access is enabled for reading text in images."
+                    : "Helps spell names and technical terms visible on screen.")
             ) {
-                Button(L10n.text("Allow Access…")) {
-                    Permissions.requestScreenText()
+                if screenRecordingGranted {
+                    Label(L10n.text("Allowed"), systemImage: "checkmark.circle.fill")
+                        .font(.system(size: 12, weight: .medium))
+                        .foregroundStyle(VeloraStatus.success)
+                } else {
+                    Button(L10n.text("Allow Access…")) {
+                        requestedScreenRecording = true
+                        Permissions.requestScreenText()
+                    }
+                    .buttonStyle(.capsule)
                 }
-                .buttonStyle(.capsule)
+            }
+            if !screenRecordingGranted && requestedScreenRecording {
+                GroupDivider()
+                HStack(spacing: VeloraSpacing.s) {
+                    Text(L10n.text("Already enabled in System Settings? Quit and reopen Velora so macOS applies Screen Recording access."))
+                        .font(.system(size: 11))
+                        .foregroundStyle(.secondary)
+                        .fixedSize(horizontal: false, vertical: true)
+                    Spacer(minLength: VeloraSpacing.s)
+                    Button(L10n.text("Recheck")) {
+                        screenRecordingGranted = Permissions.screenRecordingGranted
+                    }
+                    .buttonStyle(.capsule)
+                }
+                .padding(.horizontal, 14)
+                .padding(.vertical, VeloraSpacing.s)
             }
         }
     }
@@ -615,58 +640,96 @@ struct DictationSettingsView: View {
 
 // MARK: - Models
 
-/// Models: the two models in use, each with a "Change…" that unfolds the
-/// choices in place, and the storage they occupy.
-///
-///     On this Mac
-///     Speech to text                                   [Change…]
-///       Whisper Turbo · 1.6 GB
-///       ○ Parakeet v3 / Fastest. English and 24 … (only while unfolded)
-///     Cleanup                                          [Change…]
-///       Quality · 5.2 GB
+/// Models: direct, scannable model picker for Speech and Writing models
+/// (inspired by Hex's zero-nesting clarity), with inline downloaded state,
+/// live download progress, and one-click removal of unused local weights.
 struct ModelSettingsView: View {
     @ObservedObject private var interfaceLocale = InterfaceLocale.shared
     @ObservedObject var model: SettingsModel
     @State private var storageUsed: String = Self.calculating
     @State private var cachedModels: [ModelStorage.CachedModel] = []
-    @State private var changing: Slot?
     @State private var removalCandidate: String?
-    @State private var modelSearch = ""
-    @State private var installedOnly = false
-    @State private var modelSort = "recommended"
+    @State private var speechFilter: SpeechFilter = .all
 
-    /// Which "Change…" is unfolded (at most one at a time).
-    private enum Slot { case speech, cleanup }
+    private enum SpeechFilter: String, CaseIterable, Identifiable {
+        case all, downloaded
+        var id: String { rawValue }
+        var title: String {
+            switch self {
+            case .all: return "All"
+            case .downloaded: return "On Mac"
+            }
+        }
+    }
 
-    /// Shown in the storage rows until the first disk scan finishes; a bare
-    /// "…" read as missing data.
+    /// Shown in the storage header until the first disk scan finishes.
     private static let calculating = "Calculating…"
 
-    /// One row in the picker / catalog. Prefers the engine's advertised models
-    /// (so newly-shipped models appear without an app update); falls back to the
-    /// static catalog before the first `status` reply lands.
     private struct Choice: Identifiable {
         let id: String
         let name: String
         let detail: String
         let size: String
+        let isRecommended: Bool
+    }
+
+    private var cachedByID: [String: ModelStorage.CachedModel] {
+        Dictionary(uniqueKeysWithValues: cachedModels.map { ($0.id, $0) })
     }
 
     private var speechChoices: [Choice] {
         let engine = model.sttEngineModels
         let recommended = model.recommendedSTTModel
+        let base: [Choice]
         if !engine.isEmpty {
-            return engine.map {
+            base = engine.map {
                 Choice(
                     id: $0.id, name: $0.displayName,
-                    detail: $0.id == recommended
-                        ? "Recommended for your language choice. \($0.description)"
-                        : $0.description,
-                    size: $0.size)
+                    detail: $0.description, size: $0.size,
+                    isRecommended: $0.id == recommended)
+            }
+        } else {
+            base = STTModel.all.map {
+                Choice(
+                    id: $0.id, name: $0.displayName,
+                    detail: $0.languages, size: $0.size,
+                    isRecommended: $0.id == recommended || ($0.id == model.sttModel && (recommended ?? "").isEmpty))
             }
         }
-        return STTModel.all.map {
-            Choice(id: $0.id, name: $0.displayName, detail: $0.languages, size: $0.size)
+        return sortChoices(base, selected: model.sttModel)
+    }
+
+    private var visibleSpeechChoices: [Choice] {
+        guard speechFilter == .downloaded else { return speechChoices }
+        let cached = cachedByID
+        return speechChoices.filter { choice in
+            choice.id == model.sttModel || cached[choice.id] != nil
+        }
+    }
+
+    private var cleanupChoices: [Choice] {
+        let recommended = model.recommendedCleanupModel
+        let base = model.cleanupEngineModels.map {
+            Choice(
+                id: $0.id, name: $0.displayName,
+                detail: $0.description, size: $0.size,
+                isRecommended: $0.id == recommended)
+        }
+        return sortChoices(base, selected: model.cleanupModel)
+    }
+
+    private func sortChoices(_ choices: [Choice], selected: String) -> [Choice] {
+        choices.sorted { lhs, rhs in
+            if (lhs.id == selected) != (rhs.id == selected) {
+                return lhs.id == selected
+            }
+            if lhs.isRecommended != rhs.isRecommended {
+                return lhs.isRecommended
+            }
+            let leftBytes = ModelChoiceOrder.downloadBytes(lhs.size)
+            let rightBytes = ModelChoiceOrder.downloadBytes(rhs.size)
+            if leftBytes != rightBytes { return leftBytes < rightBytes }
+            return lhs.name.localizedStandardCompare(rhs.name) == .orderedAscending
         }
     }
 
@@ -681,46 +744,38 @@ struct ModelSettingsView: View {
         }
     }
 
-    /// Cleanup models the engine advertises (smallest first).
-    private var cleanupChoices: [Choice] {
-        model.cleanupEngineModels.map {
-            let recommended = $0.id == model.recommendedCleanupModel
-            return Choice(
-                id: $0.id, name: $0.displayName,
-                detail: recommended ? "Recommended for this Mac. \($0.description)" : $0.description,
-                size: $0.size)
-        }
-    }
-
     /// Selected choices and in-flight models remain protected from deletion.
     private var activeModelIDs: Set<String> {
         Set([model.sttModel, model.cleanupModel].filter { !$0.isEmpty })
             .union(model.downloads.protectedModels)
     }
 
-    private var unusedModels: [ModelStorage.CachedModel] {
-        cachedModels.filter { !activeModelIDs.contains($0.id) }
+    private var hasActiveDownloadOrAlert: Bool {
+        !model.downloads.downloads.filter { $0.state != .ready }.isEmpty
+            || !model.downloads.pending.isEmpty
+            || !model.downloads.selectionErrors.isEmpty
+            || model.storageError != nil
+    }
+
+    private var customSpeechPathActive: Bool {
+        !model.sttModel.isEmpty && !speechChoices.contains(where: { $0.id == model.sttModel })
     }
 
     var body: some View {
         SettingsScrollCanvas {
+            if hasActiveDownloadOrAlert {
+                downloadBannerCard
+            }
             SettingsColumnPair {
-                speechModelCard
-                storageCard
+                speechModelsCard
             } right: {
-                writingModelCard
+                writingModelsCard
                 nativeCleanupSection
-                downloadStatusCard
+                customAndStorageCard
             }
         }
         .task(id: model.storageRevision) { await refreshStorage() }
         .onAppear { model.requestStatus() }
-        .onChange(of: model.nativeCleanupSwitching) { _, switching in
-            if switching && changing == .cleanup { changing = nil }
-        }
-        .onChange(of: model.nativeCleanupEnabled) { _, enabled in
-            if enabled && changing == .cleanup { changing = nil }
-        }
         .alert("Remove Velora model copies?", isPresented: Binding(
             get: { removalCandidate != nil },
             set: { if !$0 { removalCandidate = nil } })) {
@@ -734,42 +789,81 @@ struct ModelSettingsView: View {
             }
     }
 
-    private var languageScopeTitle: String {
-        model.languageScope == "english"
-            ? L10n.text("English only")
-            : L10n.text("English and other languages")
-    }
-
-    private var modelSortTitle: String {
-        switch modelSort {
-        case "name": return L10n.text("Name")
-        case "size": return L10n.text("Download size")
-        default: return L10n.text("Recommended")
+    private var speechModelsCard: some View {
+        GroupCard(
+            header: L10n.text("Speech models"),
+            headerCaption: storageUsed == Self.calculating ? nil : storageUsed,
+            footer: "Models download once and run locally on this Mac. Switching languages picks the best default for that scope."
+        ) {
+            GroupRow(label: L10n.text("Languages")) {
+                Picker(L10n.text("Languages you dictate"), selection: $model.languageScope) {
+                    Text(L10n.text("English only")).tag("english")
+                    Text(L10n.text("Multilingual")).tag("multilingual")
+                }
+                .labelsHidden()
+                .pickerStyle(.segmented)
+                .fixedSize()
+            }
+            if !cachedModels.isEmpty {
+                GroupDivider()
+                HStack {
+                    Text(L10n.text("Choose a model"))
+                        .font(.system(size: 12))
+                        .foregroundStyle(.secondary)
+                    Spacer()
+                    Picker(L10n.text("Filter models"), selection: $speechFilter) {
+                        ForEach(SpeechFilter.allCases) { filter in
+                            Text(L10n.text(filter.title)).tag(filter)
+                        }
+                    }
+                    .labelsHidden()
+                    .pickerStyle(.segmented)
+                    .controlSize(.small)
+                    .fixedSize()
+                }
+                .padding(.horizontal, 14)
+                .padding(.vertical, VeloraSpacing.s)
+            }
+            if customSpeechPathActive {
+                GroupDivider()
+                GroupRow(
+                    label: shortName(model.sttModel),
+                    sub: L10n.text("Custom local Whisper weights in use.")
+                ) {
+                    Text(L10n.text("Active"))
+                        .font(.system(size: 12, weight: .medium))
+                        .foregroundStyle(VeloraBrand.accent)
+                }
+            }
+            let choices = visibleSpeechChoices
+            if choices.isEmpty {
+                GroupDivider()
+                Text(L10n.text("No downloaded speech models yet. Switch to All to pick one."))
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+                    .padding(.horizontal, 14)
+                    .padding(.vertical, VeloraSpacing.m)
+            } else {
+                ForEach(choices) { choice in
+                    GroupDivider()
+                    modelCatalogRow(
+                        choice: choice,
+                        kind: .stt,
+                        isSelected: choice.id == model.sttModel,
+                        disabled: !model.downloads.isCurrent && !model.sttEngineModels.isEmpty
+                    ) {
+                        model.setSpeechModel(choice.id)
+                    }
+                }
+            }
         }
     }
 
-    private var speechModelCard: some View {
-        let active = speechChoices.first { $0.id == speechBinding.wrappedValue }
-        return GroupCard(
-            header: L10n.text("Speech to text"),
-            headerCaption: active?.size.isEmpty == false ? active?.size : nil,
-            footer: "Changing the language choice re-selects the recommended speech model for it. Models download once, then run on this Mac."
+    private var customAndStorageCard: some View {
+        GroupCard(
+            header: L10n.text("Files and cache"),
+            headerCaption: storageUsed
         ) {
-            GroupRow(label: L10n.text("Languages you dictate")) {
-                HeaderMenu(
-                    L10n.text("Languages you dictate"),
-                    value: languageScopeTitle,
-                    selection: $model.languageScope
-                ) {
-                    Text(L10n.text("English only")).tag("english")
-                    Text(L10n.text("English and other languages")).tag("multilingual")
-                }
-            }
-            GroupDivider()
-            slotRow(
-                title: "Active model", slot: .speech, choices: speechChoices,
-                selection: speechBinding)
-            GroupDivider()
             GroupRow(
                 label: L10n.text("Custom Whisper weights"),
                 sub: L10n.text("Use a local .bin or .gguf file in place without copying.")
@@ -777,57 +871,72 @@ struct ModelSettingsView: View {
                 Button(L10n.text("Choose File…")) { chooseWhisperModel() }
                     .buttonStyle(.capsule)
             }
+            GroupDivider()
+            GroupRow(
+                label: L10n.text("Model cache folder"),
+                sub: L10n.text("Downloaded weights and prepared caches on this Mac.")
+            ) {
+                Button(L10n.text("Show in Finder")) {
+                    NSWorkspace.shared.activateFileViewerSelecting([ModelStorage.hubURL])
+                }
+                .buttonStyle(.capsule)
+            }
         }
     }
 
-    private var writingModelCard: some View {
-        let active = cleanupChoices.first { $0.id == cleanupBinding.wrappedValue }
+    private var writingModelsCard: some View {
+        let writingFooter = model.nativeCleanupEnabled
+            ? "LFM3 Native is active below. Turn it off to switch between standard writing models."
+            : "Writing models polish grammar and structure after transcription. Save memory unloads the model while idle; speech models stay ready."
         return GroupCard(
-            header: L10n.text("Writing and cleanup"),
+            header: L10n.text("Writing model"),
             headerCaption: L10n.text(model.cleanupLoaded ? "Loaded" : "Standby"),
-            footer: "Automatic uses Velora's memory policy. Save memory releases the writing model while idle; speech models stay ready."
+            footer: writingFooter
         ) {
             if model.nativeCleanupEnabled {
                 GroupRow(
-                    label: L10n.text("Writing model"),
-                    sub: L10n.text("Turn off LFM3 Native to use or change the saved writing model.")
+                    label: "LFM3 Native",
+                    sub: L10n.text("Active for all writing tasks.")
                 ) {
-                    Text("LFM3 Native")
-                        .font(.system(size: 12))
-                        .foregroundStyle(.secondary)
+                    Text(L10n.text("Active"))
+                        .font(.system(size: 12, weight: .medium))
+                        .foregroundStyle(VeloraBrand.accent)
                 }
-                if !cleanupChoices.isEmpty { GroupDivider() }
-            }
-            if !cleanupChoices.isEmpty {
-                slotRow(
-                    title: model.nativeCleanupEnabled ? "Saved writing model" : "Active model",
-                    slot: .cleanup, choices: cleanupChoices,
-                    selection: cleanupBinding)
-                    .disabled(model.nativeCleanupEnabled || model.nativeCleanupSwitching)
-                    .opacity((model.nativeCleanupEnabled || model.nativeCleanupSwitching) ? 0.5 : 1)
-                GroupDivider()
-            } else if !model.nativeCleanupEnabled {
+            } else if cleanupChoices.isEmpty {
                 let fallback = model.cleanupModel.isEmpty
                     ? L10n.text("Automatic (on-device)")
                     : shortName(model.cleanupModel)
                 GroupRow(
-                    label: L10n.text("Active model"),
-                    sub: active?.name ?? fallback
+                    label: fallback,
+                    sub: L10n.text(model.cleanupLoaded
+                        ? "Loaded and ready on this Mac."
+                        : "Selected automatically based on this Mac's memory.")
                 ) {
                     Text(L10n.text("On-device"))
                         .font(.system(size: 12))
                         .foregroundStyle(.secondary)
                 }
-                GroupDivider()
+            } else {
+                ForEach(Array(cleanupChoices.enumerated()), id: \.element.id) { index, choice in
+                    if index > 0 { GroupDivider() }
+                    modelCatalogRow(
+                        choice: choice,
+                        kind: .cleanup,
+                        isSelected: choice.id == model.cleanupModel,
+                        disabled: model.nativeCleanupSwitching || !model.downloads.isCurrent
+                    ) {
+                        model.setCleanupModel(choice.id)
+                    }
+                }
             }
+            GroupDivider()
             GroupRow(label: L10n.text("Idle memory policy")) {
-                HeaderMenu(
+                CapsuleOptionMenu(
                     L10n.text("Writing model readiness"),
                     value: model.cleanupMemoryPolicy.title,
-                    selection: $model.cleanupMemoryPolicy
-                ) {
-                    ForEach(CleanupMemoryPolicy.allCases) { policy in Text(policy.title).tag(policy) }
-                }
+                    selection: $model.cleanupMemoryPolicy,
+                    items: CleanupMemoryPolicy.allCases.map { CapsuleMenuItem($0, title: $0.title) }
+                )
             }
             if model.cleanupMemoryPolicy == .saveMemory {
                 GroupDivider()
@@ -840,16 +949,17 @@ struct ModelSettingsView: View {
         }
     }
 
-    private var downloadStatusCard: some View {
-        GroupCard(header: L10n.text("Engine and downloads")) {
+    @ViewBuilder
+    private var downloadBannerCard: some View {
+        GroupCard(header: L10n.text("Active downloads")) {
             VStack(alignment: .leading, spacing: VeloraSpacing.s) {
                 DownloadRecoveryView(state: model.downloads)
                 if let pending = model.downloads.pending[.stt] {
-                    Text("Requested speech model: \(shortName(pending)); not adopted yet.")
+                    Text("Preparing speech model: \(shortName(pending))…")
                         .font(.caption).foregroundStyle(.secondary)
                 }
                 if let pending = model.downloads.pending[.cleanup] {
-                    Text("Requested writing model: \(shortName(pending)); not adopted yet.")
+                    Text("Preparing writing model: \(shortName(pending))…")
                         .font(.caption).foregroundStyle(.secondary)
                 }
                 ForEach([DownloadKind.stt, .cleanup], id: \.rawValue) { kind in
@@ -857,58 +967,12 @@ struct ModelSettingsView: View {
                         Text(error).font(.caption).foregroundStyle(VeloraStatus.warningText)
                     }
                 }
-                Text(L10n.text(model.nativeCleanupEnabled
-                     ? model.cleanupLoaded ? "LFM3 Native is loaded for all writing tasks." : "LFM3 Native is selected but not loaded."
-                     : model.cleanupLoaded ? "Selected writing model is loaded." : "Selected writing model is not loaded. Dictation can still transcribe speech."))
-                    .font(.caption).foregroundStyle(.secondary)
+                if let error = model.storageError {
+                    Text(error).font(.caption).foregroundStyle(VeloraStatus.warningText)
+                }
             }
             .padding(.horizontal, 14)
             .padding(.vertical, VeloraSpacing.m)
-        }
-    }
-
-    private var storageCard: some View {
-        GroupCard(
-            header: L10n.text("On-disk storage"),
-            headerCaption: storageUsed,
-            footer: "Sizes include downloaded weights and prepared caches, but not the app bundle. Removal never deletes shared Hub files, included resources, or imported models."
-        ) {
-            GroupRow(label: L10n.text("Model cache folder")) {
-                Button(L10n.text("Show in Finder")) {
-                    NSWorkspace.shared.activateFileViewerSelecting([ModelStorage.hubURL])
-                }
-                .buttonStyle(.capsule)
-            }
-            ForEach(cachedModels) { item in
-                GroupDivider()
-                GroupRow(
-                    label: shortName(item.id),
-                    sub: ByteCountFormatter.string(fromByteCount: item.bytes, countStyle: .file)
-                ) {
-                    if ModelStorage.canRemove(item, protected: activeModelIDs) {
-                        Button(L10n.text("Remove…")) { removalCandidate = item.id }
-                            .buttonStyle(.capsule)
-                            .disabled(!model.downloads.isCurrent)
-                    } else if activeModelIDs.contains(item.id) {
-                        Text(L10n.text(model.nativeCleanupEnabled && item.id == model.cleanupModel
-                            ? "Saved choice" : "In use"))
-                            .font(.system(size: 12))
-                            .foregroundStyle(.secondary)
-                    } else {
-                        Text(L10n.text("Shared"))
-                            .font(.system(size: 12))
-                            .foregroundStyle(.secondary)
-                    }
-                }
-            }
-            if let error = model.storageError {
-                GroupDivider()
-                Text(error)
-                    .font(.caption)
-                    .foregroundStyle(VeloraStatus.warningText)
-                    .padding(.horizontal, 14)
-                    .padding(.vertical, VeloraSpacing.s)
-            }
         }
     }
 
@@ -958,132 +1022,136 @@ struct ModelSettingsView: View {
         }
     }
 
-    // MARK: Slot rows
+    // MARK: Model catalog row
 
-    /// Title, the active model's caption, and "Change…"; while unfolded,
-    /// every choice as a selectable row beneath.
-    @ViewBuilder
-    private func slotRow(
-        title: String, slot: Slot, choices: [Choice], selection: Binding<String>
+    private func modelCatalogRow(
+        choice: Choice,
+        kind: DownloadKind,
+        isSelected: Bool,
+        disabled: Bool,
+        onSelect: @escaping () -> Void
     ) -> some View {
-        let active = choices.first { $0.id == selection.wrappedValue }
-        GroupRow(
-            label: L10n.text(title),
-            sub: caption(for: active, fallback: selection.wrappedValue)
-        ) {
-            Button(changing == slot ? L10n.text("Done") : L10n.text("Change…")) {
-                changing = changing == slot ? nil : slot
-            }
-            .buttonStyle(.capsule)
-        }
-        if changing == slot {
-            GroupDivider()
-            VStack(alignment: .leading, spacing: VeloraSpacing.s) {
-                SettingsSearchBox(prompt: "Search models or languages", query: $modelSearch)
-                HStack(spacing: VeloraSpacing.m) {
-                    Toggle(L10n.text("Installed only"), isOn: $installedOnly)
-                        .toggleStyle(.checkbox)
-                        .font(.system(size: 12))
-                    Spacer()
-                    HeaderMenu(
-                        L10n.text("Sort"),
-                        value: modelSortTitle,
-                        selection: $modelSort
-                    ) {
-                        Text(L10n.text("Recommended")).tag("recommended")
-                        Text(L10n.text("Name")).tag("name")
-                        Text(L10n.text("Download size")).tag("size")
-                    }
-                }
-                let visibleChoices = filteredChoices(choices, selection: selection.wrappedValue, slot: slot)
-                if visibleChoices.isEmpty {
-                    Text(L10n.text("No models match. Clear the search or show all models."))
-                        .font(.caption)
-                        .foregroundStyle(.secondary)
-                        .padding(.vertical, 6)
-                }
-                VStack(alignment: .leading, spacing: 4) {
-                    ForEach(visibleChoices) { choice in
-                        let isSelected = choice.id == selection.wrappedValue
-                        Button {
-                            selection.wrappedValue = choice.id
-                        } label: {
-                            HStack(alignment: .top, spacing: VeloraSpacing.s) {
-                                Image(systemName: isSelected ? "checkmark.circle.fill" : "circle")
-                                    .font(.system(size: 13))
-                                    .foregroundStyle(isSelected
-                                                     ? AnyShapeStyle(VeloraBrand.accent)
-                                                     : AnyShapeStyle(.tertiary))
-                                    .padding(.top, 1)
-                                VStack(alignment: .leading, spacing: 2) {
-                                    Text(choice.name)
-                                        .font(.system(size: 13, weight: isSelected ? .medium : .regular))
-                                    Text(choice.detail)
-                                        .font(.system(size: 11))
-                                        .foregroundStyle(.secondary)
-                                        .fixedSize(horizontal: false, vertical: true)
-                                }
-                                Spacer(minLength: VeloraSpacing.s)
-                                if !choice.size.isEmpty {
-                                    Text(choice.size)
-                                        .font(.system(size: 11).monospacedDigit())
-                                        .foregroundStyle(.secondary)
-                                }
+        let cached = cachedByID[choice.id]
+        let download = model.downloads.downloads.first { $0.model == choice.id && $0.kind == kind }
+        let canRemove = cached.map { ModelStorage.canRemove($0, protected: activeModelIDs) } ?? false
+
+        return HStack(alignment: .center, spacing: VeloraSpacing.s) {
+            Button(action: onSelect) {
+                HStack(alignment: .top, spacing: VeloraSpacing.m) {
+                    Image(systemName: isSelected ? "checkmark.circle.fill" : "circle")
+                        .font(.system(size: 14, weight: .medium))
+                        .foregroundStyle(isSelected
+                                         ? AnyShapeStyle(VeloraBrand.accent)
+                                         : AnyShapeStyle(.tertiary))
+                        .padding(.top, 1)
+                    VStack(alignment: .leading, spacing: 3) {
+                        HStack(spacing: 6) {
+                            Text(choice.name)
+                                .font(.system(size: 13, weight: isSelected ? .semibold : .regular))
+                                .foregroundStyle(.primary)
+                                .lineLimit(1)
+                            if choice.isRecommended {
+                                modelBadge("Recommended", tint: VeloraBrand.accent)
                             }
-                            .padding(.horizontal, 10)
-                            .padding(.vertical, 7)
-                            .background(
-                                RoundedRectangle(cornerRadius: VeloraRadius.tile, style: .continuous)
-                                    .fill(isSelected ? VeloraBrand.accent.opacity(0.10) : Color.clear))
-                            .contentShape(RoundedRectangle(cornerRadius: VeloraRadius.tile, style: .continuous))
+                            if cached != nil && !isSelected {
+                                modelBadge("On Mac", tint: .secondary)
+                            }
                         }
-                        .buttonStyle(.plain)
-                        .disabled(!model.downloads.isCurrent)
+                        if !choice.detail.isEmpty {
+                            Text(choice.detail)
+                                .font(.system(size: 11))
+                                .foregroundStyle(.secondary)
+                                .fixedSize(horizontal: false, vertical: true)
+                        }
+                        if let download, download.state != .ready {
+                            downloadProgressLine(download)
+                        }
                     }
+                    Spacer(minLength: VeloraSpacing.s)
+                }
+                .contentShape(Rectangle())
+            }
+            .buttonStyle(.plain)
+            .disabled(disabled)
+
+            VStack(alignment: .trailing, spacing: 2) {
+                if !choice.size.isEmpty {
+                    Text(choice.size)
+                        .font(.system(size: 11.5).monospacedDigit())
+                        .foregroundStyle(.secondary)
+                }
+                if isSelected {
+                    Text(L10n.text("Active"))
+                        .font(.system(size: 10.5, weight: .medium))
+                        .foregroundStyle(VeloraBrand.accent)
                 }
             }
-            .padding(.horizontal, 14)
-            .padding(.vertical, VeloraSpacing.m)
-        }
-    }
 
-    private func filteredChoices(_ choices: [Choice], selection: String, slot: Slot) -> [Choice] {
-        let cached = Set(cachedModels.map(\.id))
-        let query = modelSearch.trimmingCharacters(in: .whitespacesAndNewlines)
-        let recommended = slot == .speech ? model.recommendedSTTModel : model.recommendedCleanupModel
-        return choices.filter { choice in
-            (!installedOnly || cached.contains(choice.id) || choice.id == selection)
-                && (query.isEmpty || (choice.name + " " + choice.detail).localizedCaseInsensitiveContains(query))
-        }.sorted { lhs, rhs in
-            if modelSort == "size" {
-                let left = ModelChoiceOrder.downloadBytes(lhs.size)
-                let right = ModelChoiceOrder.downloadBytes(rhs.size)
-                if left != right { return left < right }
-            } else if modelSort == "recommended", (lhs.id == recommended) != (rhs.id == recommended) {
-                return lhs.id == recommended
+            if canRemove {
+                Button {
+                    removalCandidate = choice.id
+                } label: {
+                    Image(systemName: "trash")
+                        .font(.system(size: 11.5, weight: .medium))
+                        .foregroundStyle(.secondary)
+                        .frame(width: 24, height: 24)
+                        .contentShape(Rectangle())
+                }
+                .buttonStyle(.plain)
+                .disabled(!model.downloads.isCurrent)
+                .help(L10n.text("Remove downloaded copy"))
+                .accessibilityLabel(L10n.format("Remove %@", choice.name))
             }
-            return lhs.name.localizedStandardCompare(rhs.name) == .orderedAscending
         }
+        .padding(.horizontal, 14)
+        .padding(.vertical, 10)
+        .background(isSelected ? VeloraBrand.accent.opacity(0.06) : Color.clear)
     }
 
-    /// "Whisper Turbo · 1.6 GB". The description shows only on the
-    /// unfolded choices, so the folded row stays one line.
-    private func caption(for choice: Choice?, fallback id: String) -> String {
-        guard let choice else { return id.isEmpty ? "Not chosen" : shortName(id) }
-        return [choice.name, choice.size]
-            .filter { !$0.isEmpty }
-            .joined(separator: " · ")
+    private func modelBadge(_ text: String, tint: Color) -> some View {
+        Text(L10n.text(text))
+            .font(.system(size: 10, weight: .medium))
+            .foregroundStyle(tint)
+            .padding(.horizontal, 6)
+            .padding(.vertical, 1.5)
+            .background(Capsule().fill(tint.opacity(0.14)))
     }
 
-    private var speechBinding: Binding<String> {
-        Binding(get: { model.sttModel }, set: { model.setSpeechModel($0) })
-    }
-
-    private var cleanupBinding: Binding<String> {
-        Binding(get: { model.cleanupModel }, set: {
-            guard !model.nativeCleanupEnabled && !model.nativeCleanupSwitching else { return }
-            model.setCleanupModel($0)
-        })
+    @ViewBuilder
+    private func downloadProgressLine(_ download: ModelDownload) -> some View {
+        switch download.state {
+        case .downloading:
+            HStack(spacing: 6) {
+                if let fraction = download.fraction {
+                    ProgressView(value: fraction)
+                        .frame(maxWidth: 120)
+                    Text("\(Int((fraction * 100).rounded()))%")
+                        .font(.system(size: 10.5).monospacedDigit())
+                        .foregroundStyle(.secondary)
+                } else {
+                    ProgressView().controlSize(.mini)
+                    Text(L10n.text("Downloading…"))
+                        .font(.system(size: 10.5))
+                        .foregroundStyle(.secondary)
+                }
+            }
+            .padding(.top, 2)
+        case .queued, .verifying, .loading, .retry_wait:
+            HStack(spacing: 6) {
+                ProgressView().controlSize(.mini)
+                Text(L10n.text(download.state == .loading ? "Loading…" : "Preparing…"))
+                    .font(.system(size: 10.5))
+                    .foregroundStyle(.secondary)
+            }
+            .padding(.top, 2)
+        case .failed:
+            Text(download.error?.message ?? L10n.text("Download failed"))
+                .font(.system(size: 10.5))
+                .foregroundStyle(VeloraStatus.warningText)
+                .padding(.top, 2)
+        case .ready:
+            EmptyView()
+        }
     }
 
     private var nativeCleanupBinding: Binding<Bool> {

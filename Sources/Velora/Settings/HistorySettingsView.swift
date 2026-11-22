@@ -590,42 +590,126 @@ enum HistoryJournal {
     }()
 }
 
-/// App icons keyed by bundle id (icon lookups touch disk, so they're cached).
+/// App icons rasterized as 64 px (@2x) CGImage bitmaps and cached by bundle
+/// id / app name. Drawing raw `NSWorkspace` `NSImage`s directly inside clipped
+/// SwiftUI views or offscreen snapshots can render blank; plain bitmaps render
+/// identically live and offscreen.
 private enum AppIconLookup {
-    private static var cache: [String: NSImage] = [:]
+    private static let pixels = 64
+    private static var cache: [String: CGImage?] = [:]
 
-    static func icon(for bundleID: String?) -> NSImage? {
-        guard let bundleID else { return nil }
-        if let cached = cache[bundleID] { return cached }
-        guard let url = NSWorkspace.shared.urlForApplication(withBundleIdentifier: bundleID)
+    static func icon(for bundleID: String?, appName: String? = nil) -> CGImage? {
+        let key = (bundleID?.isEmpty == false ? bundleID! : "") + "|" + (appName ?? "")
+        if key == "|" { return nil }
+        if let cached = cache[key] { return cached }
+
+        let resolved = resolveNSImage(bundleID: bundleID, appName: appName).flatMap(rasterize)
+        cache[key] = resolved
+        return resolved
+    }
+
+    private static func resolveNSImage(bundleID: String?, appName: String?) -> NSImage? {
+        if let bundleID, !bundleID.isEmpty {
+            if bundleID == DictationRecord.ownBundleID {
+                return VeloraAppInfo.icon
+            }
+            if let running = NSWorkspace.shared.runningApplications.first(where: { $0.bundleIdentifier == bundleID }),
+               let icon = running.icon {
+                return icon
+            }
+            if let url = NSWorkspace.shared.urlForApplication(withBundleIdentifier: bundleID) {
+                return NSWorkspace.shared.icon(forFile: url.path)
+            }
+        }
+
+        if let appName, !appName.isEmpty {
+            if appName == DictationRecord.ownAppName {
+                return VeloraAppInfo.icon
+            }
+            if let running = NSWorkspace.shared.runningApplications.first(where: { $0.localizedName == appName }),
+               let icon = running.icon {
+                return icon
+            }
+            let candidates = [
+                "/Applications/\(appName).app",
+                "/System/Applications/\(appName).app",
+                "/System/Applications/Utilities/\(appName).app",
+                (NSHomeDirectory() as NSString).appendingPathComponent("Applications/\(appName).app"),
+            ]
+            for path in candidates where FileManager.default.fileExists(atPath: path) {
+                return NSWorkspace.shared.icon(forFile: path)
+            }
+        }
+
+        return nil
+    }
+
+    private static func rasterize(_ image: NSImage) -> CGImage? {
+        guard let bitmap = NSBitmapImageRep(
+            bitmapDataPlanes: nil, pixelsWide: pixels, pixelsHigh: pixels, bitsPerSample: 8,
+            samplesPerPixel: 4, hasAlpha: true, isPlanar: false, colorSpaceName: .deviceRGB,
+            bytesPerRow: 0, bitsPerPixel: 0)
         else { return nil }
-        let icon = NSWorkspace.shared.icon(forFile: url.path)
-        cache[bundleID] = icon
-        return icon
+        NSGraphicsContext.saveGraphicsState()
+        NSGraphicsContext.current = NSGraphicsContext(bitmapImageRep: bitmap)
+        image.draw(in: NSRect(x: 0, y: 0, width: pixels, height: pixels))
+        NSGraphicsContext.restoreGraphicsState()
+        // Reject completely transparent bitmaps (e.g. if IconServices fails or
+        // an app bundle's icon is unreadable) so callers fall back cleanly.
+        guard let data = bitmap.bitmapData else { return nil }
+        let byteCount = bitmap.bytesPerRow * bitmap.pixelsHigh
+        var visible = false
+        var offset = 3
+        while offset < byteCount {
+            if data[offset] > 8 {
+                visible = true
+                break
+            }
+            offset += 4
+        }
+        return visible ? bitmap.cgImage : nil
     }
 }
 
-/// An app's icon at `side`, falling back to the waveform glyph on a tinted
-/// tile when the app isn't installed any more.
+/// An app's icon at `side`, falling back to a crisp initial/waveform tile when
+/// the app isn't installed or its icon can't be read.
 private struct AppIconView: View {
     let bundleID: String?
+    var appName: String? = nil
     let side: CGFloat
 
+    private var fallbackInitial: String? {
+        guard let name = appName?.trimmingCharacters(in: .whitespacesAndNewlines),
+              let first = name.first, first.isLetter || first.isNumber
+        else { return nil }
+        return String(first).uppercased()
+    }
+
     var body: some View {
-        if let icon = AppIconLookup.icon(for: bundleID) {
-            Image(nsImage: icon)
+        if let icon = AppIconLookup.icon(for: bundleID, appName: appName) {
+            Image(decorative: icon, scale: 2)
                 .resizable()
+                .interpolation(.high)
                 .frame(width: side, height: side)
+                .clipShape(RoundedRectangle(cornerRadius: side * 0.22, style: .continuous))
                 .accessibilityHidden(true)
         } else {
-            Image(systemName: "waveform")
-                .font(.system(size: side * 0.55, weight: .semibold))
-                .foregroundStyle(VeloraBrand.accent)
-                .frame(width: side, height: side)
-                .background(
-                    RoundedRectangle(cornerRadius: side * 0.22, style: .continuous)
-                        .fill(Color.primary.opacity(0.06)))
-                .accessibilityHidden(true)
+            Group {
+                if let initial = fallbackInitial {
+                    Text(initial)
+                        .font(.system(size: side * 0.46, weight: .semibold, design: .rounded))
+                        .foregroundStyle(VeloraBrand.accent)
+                } else {
+                    Image(systemName: "waveform")
+                        .font(.system(size: side * 0.46, weight: .semibold))
+                        .foregroundStyle(VeloraBrand.accent)
+                }
+            }
+            .frame(width: side, height: side)
+            .background(
+                RoundedRectangle(cornerRadius: side * 0.22, style: .continuous)
+                    .fill(VeloraBrand.accent.opacity(0.12)))
+            .accessibilityHidden(true)
         }
     }
 }
@@ -681,12 +765,10 @@ struct HistorySettingsView: View {
     @StateObject private var vm: HistoryViewModel
     @State private var showClearConfirm = false
 
-    /// Widest the journal text runs; the column starts at the pane title's
-    /// leading edge (centring it left a dead gutter beside the title).
-    private static let columnWidth: CGFloat = 760
-    private static let daySpacing: CGFloat = 28
-    /// Rows carry 8 pt of their own vertical padding (the hover fill), so
-    /// the gap between them stays tight.
+    /// Generous reading width that fills normal windows cleanly (matching
+    /// Dictionary and Modes) while staying comfortable on ultra-wide displays.
+    private static let columnWidth: CGFloat = 1040
+    private static let daySpacing: CGFloat = 24
     private static let entrySpacing: CGFloat = 8
 
     init(model: SettingsModel, history: HistoryStore, supervisor: EngineSupervisor?,
@@ -742,6 +824,7 @@ struct HistorySettingsView: View {
                 .frame(maxWidth: Self.columnWidth, alignment: .leading)
                 .frame(maxWidth: .infinity, alignment: .leading)
                 .padding(.bottom, VeloraSpacing.xl)
+                .background(OverlayScrollStyle())
             }
         }
     }
@@ -811,6 +894,7 @@ struct HistorySettingsView: View {
                     onPlay: { vm.togglePlayback(record) },
                     onDelete: { vm.delete(record) },
                     modeNames: vm.modeNames)
+                .id("\(record.id)-\(vm.expandedID == record.id)")
                 .onAppear {
                     if record.id == vm.visibleRecords.last?.id { vm.loadMore() }
                 }
@@ -936,21 +1020,14 @@ private struct JournalEntry: View {
     @State private var trialLoadError: String?
     @State private var trialLoadGeneration = 0
 
-    /// Wide enough for a 12-hour "12:30 PM".
-    private static let timeColumn: CGFloat = 64
-    private static let iconSide: CGFloat = 18
+    private static let iconSide: CGFloat = 28
     private static let textSize: CGFloat = 14
     private static let expandedTextSize: CGFloat = 14.5
     private static let codeTextSize: CGFloat = 12.5
     /// Extra leading that lifts the system font's ~1.2 line height to the
     /// journal's 1.45 (14 pt → about 3.5 pt between lines).
-    private static let extraLeadingRatio: CGFloat = 0.25
-    /// Hover fill behind a collapsed row, bled `rowBleed` past the text so
-    /// the text itself stays on the column's edge.
-    private static let hoverFill = 0.05
-    private static let rowBleed: CGFloat = 10
-    private static let rowRadius: CGFloat = 10
-    /// Raw transcript: 12.5 pt secondary text behind a 2 pt hairline rule.
+    private static let extraLeadingRatio: CGFloat = 0.28
+    private static let hoverFill = 0.055
     private static let rawTextSize: CGFloat = 12.5
     private static let rawRuleWidth: CGFloat = 2
     private static let copiedFlash: TimeInterval = 1.2
@@ -1041,11 +1118,16 @@ private struct JournalEntry: View {
     // MARK: Collapsed
 
     private var collapsedRow: some View {
-        HStack(alignment: .top, spacing: 0) {
-            timeLabel
-            VStack(alignment: .leading, spacing: VeloraSpacing.xs) {
-                appLine
-                transcript(size: Self.textSize, lineLimit: Self.collapsedLines)
+        HStack(alignment: .top, spacing: VeloraSpacing.m) {
+            AppIconView(bundleID: record.bundleID, appName: record.appName, side: Self.iconSide)
+                .padding(.top, 1)
+            VStack(alignment: .leading, spacing: 4) {
+                HStack(alignment: .firstTextBaseline, spacing: VeloraSpacing.s) {
+                    appHeader
+                    Spacer(minLength: VeloraSpacing.s)
+                    timeLabel
+                }
+                transcript(size: Self.textSize, lineLimit: Self.collapsedLines, selectable: false)
                 if let gap = HistoryJournal.gapNote(record) {
                     Text(gap)
                         .font(.caption)
@@ -1053,14 +1135,12 @@ private struct JournalEntry: View {
                 }
             }
         }
-        .padding(.vertical, VeloraSpacing.s)
-        .padding(.horizontal, Self.rowBleed)
-        .padding(.horizontal, -Self.rowBleed)
+        .padding(.horizontal, 14)
+        .padding(.vertical, 12)
         .background(
-            RoundedRectangle(cornerRadius: Self.rowRadius, style: .continuous)
-                .fill(Color.primary.opacity(hovering ? Self.hoverFill : 0))
-                .padding(.horizontal, -Self.rowBleed))
-        .contentShape(Rectangle())
+            RoundedRectangle(cornerRadius: VeloraRadius.card, style: .continuous)
+                .fill(hovering ? Color.primary.opacity(Self.hoverFill) : VeloraPanel.groupFill))
+        .contentShape(RoundedRectangle(cornerRadius: VeloraRadius.card, style: .continuous))
         .onHover { hovering = $0 }
         .onTapGesture(perform: onToggle)
         .accessibilityElement(children: .combine)
@@ -1072,51 +1152,66 @@ private struct JournalEntry: View {
 
     private var expandedCard: some View {
         VStack(alignment: .leading, spacing: VeloraSpacing.m) {
-            HStack(alignment: .center, spacing: 0) {
+            HStack(alignment: .center, spacing: VeloraSpacing.m) {
+                AppIconView(bundleID: record.bundleID, appName: record.appName, side: Self.iconSide)
+                appHeader
+                Spacer(minLength: VeloraSpacing.s)
                 timeLabel
-                appLine
-                Spacer(minLength: 0)
+                Button(action: onToggle) {
+                    Image(systemName: "chevron.up")
+                        .font(.system(size: 11, weight: .semibold))
+                        .foregroundStyle(.secondary)
+                        .frame(width: 24, height: 24)
+                        .contentShape(Rectangle())
+                }
+                .buttonStyle(.plain)
+                .help("Collapse")
+                .accessibilityLabel("Collapse")
             }
             .contentShape(Rectangle())
             .onTapGesture(perform: onToggle)
 
-            transcript(size: Self.expandedTextSize, lineLimit: nil)
-                .padding(.leading, Self.timeColumn)
+            transcript(size: Self.expandedTextSize, lineLimit: nil, selectable: true)
+                .padding(.leading, Self.iconSide + VeloraSpacing.m)
 
             if let gap = HistoryJournal.gapNote(record) {
                 Label(gap, systemImage: "exclamationmark.triangle.fill")
                     .font(.caption)
                     .foregroundStyle(VeloraStatus.warningText)
-                    .padding(.leading, Self.timeColumn)
+                    .padding(.leading, Self.iconSide + VeloraSpacing.m)
             }
 
             if HistoryJournal.hasDistinctRaw(record) {
                 rawDisclosure
-                    .padding(.leading, Self.timeColumn)
+                    .padding(.leading, Self.iconSide + VeloraSpacing.m)
             }
 
             if let trialRun, hasTranscript && !isReprocessing {
                 HistoryTrialFeedbackDetail(record: record, run: trialRun)
-                    .padding(.leading, Self.timeColumn)
+                    .padding(.leading, Self.iconSide + VeloraSpacing.m)
             } else if let trialLoadError {
                 Text(trialLoadError)
                     .font(.caption)
                     .foregroundStyle(VeloraStatus.warningText)
                     .fixedSize(horizontal: false, vertical: true)
-                    .padding(.leading, Self.timeColumn)
+                    .padding(.leading, Self.iconSide + VeloraSpacing.m)
             }
 
             if reprocessFailed {
                 Label("Reprocess failed. Try again.", systemImage: "exclamationmark.triangle.fill")
                     .font(.caption)
                     .foregroundStyle(VeloraStatus.warningText)
-                    .padding(.leading, Self.timeColumn)
+                    .padding(.leading, Self.iconSide + VeloraSpacing.m)
             }
 
+            GroupDivider()
+                .padding(.horizontal, -14)
+
             toolbar
-                .padding(.leading, Self.timeColumn)
+                .padding(.leading, Self.iconSide + VeloraSpacing.m)
         }
-        .padding(VeloraSpacing.m)
+        .padding(.horizontal, 14)
+        .padding(.vertical, 14)
         .background(
             RoundedRectangle(cornerRadius: VeloraRadius.card, style: .continuous)
                 .fill(VeloraPanel.raised))
@@ -1167,37 +1262,41 @@ private struct JournalEntry: View {
 
     private var timeLabel: some View {
         Text(HistoryJournal.time(record.timestamp))
-            .font(.system(size: 12))
+            .font(.system(size: 11.5))
             .monospacedDigit()
             .foregroundStyle(.tertiary)
-            .frame(width: Self.timeColumn, alignment: .leading)
+            .lineLimit(1)
     }
 
-    private var appLine: some View {
-        HStack(spacing: VeloraSpacing.xs + 2) {
-            AppIconView(bundleID: record.bundleID, side: Self.iconSide)
+    private var appHeader: some View {
+        HStack(alignment: .firstTextBaseline, spacing: VeloraSpacing.s) {
             Text(record.appName ?? "Unknown app")
-                .font(.system(size: 12, weight: .semibold))
+                .font(.system(size: 13, weight: .semibold))
                 .lineLimit(1)
             Text(HistoryJournal.entryMeta(record))
-                .font(.system(size: 11))
-                .foregroundStyle(.tertiary)
+                .font(.system(size: 11.5))
+                .foregroundStyle(.secondary)
                 .monospacedDigit()
                 .lineLimit(1)
         }
     }
 
-    private func transcript(size: CGFloat, lineLimit: Int?) -> some View {
+    @ViewBuilder
+    private func transcript(size: CGFloat, lineLimit: Int?, selectable: Bool) -> some View {
         let pointSize = isCode ? Self.codeTextSize : size
-        return Text(hasTranscript ? record.final : "No transcript. Reprocess the saved audio.")
+        let text = Text(hasTranscript ? record.final : "No transcript. Re-transcribe the saved audio.")
             .font(.system(size: pointSize, design: isCode ? .monospaced : .default))
             .lineSpacing(pointSize * Self.extraLeadingRatio)
             .foregroundStyle(hasTranscript ? .primary : .secondary)
             .italic(!hasTranscript)
-            .textSelection(.enabled)
             .lineLimit(lineLimit)
             .fixedSize(horizontal: false, vertical: true)
             .frame(maxWidth: .infinity, alignment: .leading)
+        if selectable {
+            text.textSelection(.enabled)
+        } else {
+            text
+        }
     }
 
     // MARK: Toolbar
@@ -1211,11 +1310,29 @@ private struct JournalEntry: View {
                     DispatchQueue.main.asyncAfter(deadline: .now() + Self.copiedFlash) { copied = false }
                 }
                 .buttonStyle(.capsule)
-                ResultShareButton(text: record.final).buttonStyle(.capsule)
-                Button("Insert Again", action: onPaste)
+
+                if !modeNames.isEmpty {
+                    CapsuleOptionMenu(
+                        "Change Mode",
+                        title: "Change Mode",
+                        items: modeNames.map { CapsuleMenuItem($0, title: $0) },
+                        selected: record.mode
+                    ) { mode in
+                        reformatModeOverride = mode
+                        reformatSnapshot = record
+                        reformatting = true
+                    }
+                }
+            }
+
+            if hasAudio {
+                retranscribeMenu
+                Button(isPlaying ? "Stop" : "Play", action: onPlay)
                     .buttonStyle(.capsule)
-                    .help("Copy; if the original app is open, switch there and try to paste")
-                Button("Fix this") {
+            }
+
+            if hasTranscript {
+                Button("Edit") {
                     editSnapshot = record
                     editDraft = record.final
                     editError = nil
@@ -1224,36 +1341,29 @@ private struct JournalEntry: View {
                     editing = true
                 }
                 .buttonStyle(.capsule)
-                Menu {
-                    Button("Reformat saved text…") {
-                        reformatModeOverride = nil
-                        reformatSnapshot = record
-                        reformatting = true
-                    }
+
+                HeaderMenu(actions: "More actions") {
+                    Button("Insert Again", action: onPaste)
                     Button("Copy As Heard") {
                         let pb = NSPasteboard.general
                         pb.clearContents()
                         pb.setString(record.raw.isEmpty ? record.final : record.raw, forType: .string)
                     }
                     if record.previousFinal != nil {
-                        Button("Undo last correction", action: onUndo)
+                        Button("Undo Last Correction", action: onUndo)
                     }
                     Divider()
-                    Button("Adjust app style in Modes…") {
-                        ModesViewModel.prepareStyleExample(text: record.raw.isEmpty ? record.final : record.raw,
+                    Button("Adjust App Style in Modes…") {
+                        ModesViewModel.prepareStyleExample(
+                            text: record.raw.isEmpty ? record.final : record.raw,
                             modeName: record.mode, bundleID: record.targetBundleID)
                         onEditStyle()
                     }
-                } label: { Text("More") }
-                .menuStyle(.borderlessButton)
-                .fixedSize()
+                }
             }
-            reprocessMenu
-            if hasAudio {
-                Button(isPlaying ? "Stop" : "Play", action: onPlay)
-                    .buttonStyle(.capsule)
-            }
+
             Spacer(minLength: 0)
+
             Button {
                 confirmingDelete = true
             } label: {
@@ -1264,7 +1374,6 @@ private struct JournalEntry: View {
             .buttonStyle(.capsule)
             .help("Delete this transcript permanently")
             .accessibilityLabel("Delete")
-            // One click used to delete the transcript and its audio for good.
             .confirmationDialog("Delete this dictation?", isPresented: $confirmingDelete) {
                 Button("Delete", role: .destructive, action: onDelete)
                 Button("Cancel", role: .cancel) {}
@@ -1274,48 +1383,32 @@ private struct JournalEntry: View {
         }
     }
 
-    /// The reprocess menu dressed as a capsule so it sits with the buttons.
-    private var reprocessMenu: some View {
-        Menu {
-            Section("Speech model") {
-                if sttModels.isEmpty {
-                    Button("Reprocess with current model") { onReprocess(nil, nil) }
-                } else {
-                    ForEach(sttModels) { m in
-                        Button(m.displayName) { onReprocess(m.id, nil) }
-                    }
-                }
-            }
-            Section("Mode") {
-                ForEach(modeNames, id: \.self) { mode in
-                    Button(mode) { onReprocess(nil, mode) }
-                }
-            }
-        } label: {
-            HStack(spacing: VeloraSpacing.xs) {
-                if isReprocessing {
+    private var retranscribeMenu: some View {
+        let modelItems: [CapsuleMenuItem<String>] = if sttModels.isEmpty {
+            [CapsuleMenuItem("__current__", title: "Current Speech Model")]
+        } else {
+            sttModels.map { CapsuleMenuItem($0.id, title: $0.displayName) }
+        }
+        return Group {
+            if isReprocessing {
+                HStack(spacing: VeloraSpacing.xs) {
                     ProgressView().controlSize(.mini)
+                    Text("Re-transcribing…")
+                        .font(.system(size: 12, weight: .medium))
+                        .foregroundStyle(.secondary)
                 }
-                Text("Reprocess")
-                    .font(.system(size: 12, weight: .medium))
+                .padding(.horizontal, VeloraSpacing.m)
+                .frame(height: 28)
+            } else {
+                CapsuleOptionMenu(
+                    "Re-transcribe",
+                    title: "Re-transcribe",
+                    items: modelItems
+                ) { modelID in
+                    onReprocess(modelID == "__current__" ? nil : modelID, nil)
+                }
             }
         }
-        .menuStyle(.borderlessButton)
-        .menuIndicator(.hidden)
-        .fixedSize()
-        .padding(.horizontal, VeloraSpacing.m)
-        .frame(height: 28)
-        .background(
-            RoundedRectangle(cornerRadius: VeloraRadius.capsule, style: .continuous)
-                .fill(Color.primary.opacity(0.10)))
-        .overlay(
-            RoundedRectangle(cornerRadius: VeloraRadius.capsule, style: .continuous)
-                .strokeBorder(VeloraPanel.hairline, lineWidth: 1))
-        .disabled(!hasAudio || isReprocessing)
-        .opacity(hasAudio ? 1 : 0.5)
-        .help(hasAudio
-              ? "Re-transcribe the saved audio with another model or mode"
-              : "Reprocessing unavailable: no saved audio for this dictation")
     }
 
     private var spellingSuggestions: some View {
@@ -1627,7 +1720,7 @@ struct HistoryRecentList: View {
     private func row(_ record: DictationRecord) -> some View {
         let isCode = HistoryJournal.isCodeMode(record.mode)
         return HStack(alignment: .top, spacing: VeloraSpacing.s + 2) {
-            AppIconView(bundleID: record.bundleID, side: Self.iconSide)
+            AppIconView(bundleID: record.bundleID, appName: record.appName, side: Self.iconSide)
             VStack(alignment: .leading, spacing: 2) {
                 HStack(alignment: .firstTextBaseline) {
                     Text(record.appName ?? "Unknown app")

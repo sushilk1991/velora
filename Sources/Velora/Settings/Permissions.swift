@@ -69,11 +69,26 @@ enum Permissions {
         _ = AXIsProcessTrustedWithOptions(options as CFDictionary)
     }
 
+    /// True when Screen Recording is granted for this process (enables on-device
+    /// OCR for text inside images). Note: macOS may require relaunching the app
+    /// after toggling the switch in System Settings before this returns true.
+    static var screenRecordingGranted: Bool {
+        CGPreflightScreenCaptureAccess()
+    }
+
     /// Optional local OCR permission, requested only by the Settings button.
     /// Denial does not enter anyMissing or prevent ordinary dictation.
     static func requestScreenText() {
         _ = CGRequestScreenCaptureAccess()
+        openScreenRecordingSettings()
+    }
+
+    static func openScreenRecordingSettings() {
         openSettings("x-apple.systempreferences:com.apple.preference.security?Privacy_ScreenCapture")
+    }
+
+    static func openCalendarSettings() {
+        openSettings("x-apple.systempreferences:com.apple.preference.security?Privacy_Calendars")
     }
 
     // MARK: - System Settings deep links

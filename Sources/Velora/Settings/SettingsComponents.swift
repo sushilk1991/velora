@@ -1,12 +1,13 @@
+import AppKit
 import SwiftUI
 
 enum SettingsLayoutMetrics {
     static let sectionSpacing: CGFloat = 18
 }
 
-/// Scrollable vertical canvas for every Settings tab. Matches `Home`, `Stats`,
-/// `Dictionary`, and `Modes`: plain scroll container on `WindowShell`'s canvas
-/// with consistent 18 pt section spacing and 20 pt bottom breathing room.
+/// Scrollable vertical canvas for every Settings tab. Forces overlay scrollbars
+/// on its enclosing `NSScrollView` so switching between scrolling and
+/// non-scrolling tabs never shifts card columns horizontally.
 struct SettingsScrollCanvas<Content: View>: View {
     private let content: Content
 
@@ -21,6 +22,45 @@ struct SettingsScrollCanvas<Content: View>: View {
             }
             .frame(maxWidth: .infinity, alignment: .leading)
             .padding(.bottom, VeloraSpacing.xl)
+            .background(OverlayScrollStyle())
+        }
+    }
+}
+
+/// Sets `scrollerStyle = .overlay` on the enclosing `NSScrollView` so macOS
+/// "Always show scroll bars" doesn't narrow overflowing tabs by 15 pt and
+/// cause layout jumps when switching tabs.
+struct OverlayScrollStyle: NSViewRepresentable {
+    func makeNSView(context: Context) -> NSView {
+        OverlayScrollAnchorView()
+    }
+
+    func updateNSView(_ nsView: NSView, context: Context) {
+        (nsView as? OverlayScrollAnchorView)?.applyOverlayStyle()
+    }
+}
+
+private final class OverlayScrollAnchorView: NSView {
+    override func viewDidMoveToSuperview() {
+        super.viewDidMoveToSuperview()
+        applyOverlayStyle()
+    }
+
+    override func viewDidMoveToWindow() {
+        super.viewDidMoveToWindow()
+        applyOverlayStyle()
+    }
+
+    func applyOverlayStyle() {
+        var current: NSView? = superview
+        while let candidate = current {
+            if let scrollView = candidate as? NSScrollView {
+                if scrollView.scrollerStyle != .overlay {
+                    scrollView.scrollerStyle = .overlay
+                }
+                return
+            }
+            current = candidate.superview
         }
     }
 }
@@ -163,6 +203,155 @@ struct SettingsDisclosureRow<Content: View>: View {
                     .padding(.horizontal, 14)
                     .padding(.vertical, VeloraSpacing.m)
             }
+        }
+    }
+}
+
+/// One selectable entry in a `CapsuleOptionMenu`.
+struct CapsuleMenuItem<Value: Hashable> {
+    let value: Value
+    let title: String
+    let isSeparatorBefore: Bool
+
+    init(_ value: Value, title: String, separatorBefore: Bool = false) {
+        self.value = value
+        self.title = title
+        self.isSeparatorBefore = separatorBefore
+    }
+}
+
+/// Glass capsule chooser backed directly by AppKit `NSMenu.popUp(positioning:at:in:)`.
+///
+/// SwiftUI `Menu` with `.menuStyle(.button)` + a custom `ButtonStyle` drops
+/// clicks inside `ScrollView`s and when the window floats over another app's
+/// full-screen Space. Anchoring a real `NSMenu` to the button's `NSView` keeps
+/// the exact 28 pt `.capsule` appearance while opening 100% reliably everywhere.
+struct CapsuleOptionMenu<Value: Hashable>: View {
+    let label: String
+    let valueTitle: String
+    var systemImage: String?
+    let items: [CapsuleMenuItem<Value>]
+    let selectedValue: Value?
+    let onSelect: (Value) -> Void
+
+    @Environment(\.isEnabled) private var isEnabled
+    @State private var anchorView: NSView?
+
+    private static var chevronSize: CGFloat { 9 }
+
+    init(
+        _ label: String,
+        value: String,
+        systemImage: String? = nil,
+        selection: Binding<Value>,
+        items: [CapsuleMenuItem<Value>]
+    ) {
+        self.label = label
+        self.valueTitle = value
+        self.systemImage = systemImage
+        self.items = items
+        self.selectedValue = selection.wrappedValue
+        self.onSelect = { selection.wrappedValue = $0 }
+    }
+
+    init(
+        _ label: String,
+        title: String,
+        systemImage: String? = nil,
+        items: [CapsuleMenuItem<Value>],
+        selected: Value? = nil,
+        onSelect: @escaping (Value) -> Void
+    ) {
+        self.label = label
+        self.valueTitle = title
+        self.systemImage = systemImage
+        self.items = items
+        self.selectedValue = selected
+        self.onSelect = onSelect
+    }
+
+    var body: some View {
+        Button(action: presentMenu) {
+            HStack(spacing: VeloraSpacing.xs) {
+                if let systemImage {
+                    Image(systemName: systemImage)
+                }
+                Text(valueTitle)
+                    .lineLimit(1)
+                Image(systemName: "chevron.down")
+                    .font(.system(size: Self.chevronSize, weight: .semibold))
+                    .foregroundStyle(.secondary)
+            }
+        }
+        .buttonStyle(.capsule)
+        .fixedSize()
+        .background(MenuAnchorView(anchor: $anchorView))
+        .help(label)
+        .accessibilityLabel(label)
+        .accessibilityValue(valueTitle)
+    }
+
+    private func presentMenu() {
+        guard isEnabled, let view = anchorView else { return }
+        if let window = view.window {
+            NSApp.activate(ignoringOtherApps: true)
+            window.makeKey()
+        }
+        let coordinator = PopupMenuCoordinator(items: items, onSelect: onSelect)
+        let menu = NSMenu(title: label)
+        menu.autoenablesItems = false
+        for (index, item) in items.enumerated() {
+            if item.isSeparatorBefore && index > 0 {
+                menu.addItem(.separator())
+            }
+            let menuItem = NSMenuItem(
+                title: item.title,
+                action: #selector(PopupMenuCoordinator<Value>.picked(_:)),
+                keyEquivalent: "")
+            menuItem.target = coordinator
+            menuItem.tag = index
+            menuItem.isEnabled = true
+            if let selectedValue, item.value == selectedValue {
+                menuItem.state = .on
+            }
+            menu.addItem(menuItem)
+        }
+        // Keep the target alive until `popUp` finishes tracking synchronously.
+        withExtendedLifetime(coordinator) {
+            let origin = NSPoint(x: 0, y: view.bounds.height + 4)
+            _ = menu.popUp(positioning: nil, at: origin, in: view)
+        }
+    }
+}
+
+private final class PopupMenuCoordinator<Value: Hashable>: NSObject {
+    let items: [CapsuleMenuItem<Value>]
+    let onSelect: (Value) -> Void
+
+    init(items: [CapsuleMenuItem<Value>], onSelect: @escaping (Value) -> Void) {
+        self.items = items
+        self.onSelect = onSelect
+    }
+
+    @objc func picked(_ sender: NSMenuItem) {
+        let index = sender.tag
+        guard items.indices.contains(index) else { return }
+        onSelect(items[index].value)
+    }
+}
+
+private struct MenuAnchorView: NSViewRepresentable {
+    @Binding var anchor: NSView?
+
+    func makeNSView(context: Context) -> NSView {
+        let view = NSView()
+        DispatchQueue.main.async { anchor = view }
+        return view
+    }
+
+    func updateNSView(_ nsView: NSView, context: Context) {
+        if anchor !== nsView {
+            DispatchQueue.main.async { anchor = nsView }
         }
     }
 }

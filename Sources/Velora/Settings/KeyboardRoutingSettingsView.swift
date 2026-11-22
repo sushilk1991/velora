@@ -52,34 +52,24 @@ struct KeyboardRoutingSettingsView: View {
                                 .font(.system(size: 12))
                                 .foregroundStyle(.secondary)
                             Spacer()
-                            HeaderMenu(
+                            CapsuleOptionMenu(
                                 L10n.text("Language"),
                                 value: languageTitle(for: id),
-                                selection: languageBinding(id)
-                            ) {
-                                ForEach(KeyboardLanguageRouting.languages, id: \.0) { Text($0.1).tag($0.0) }
-                                if let selected = model.keyboardSpeechRoutes[id]?.language,
-                                   !KeyboardLanguageRouting.languages.contains(where: { $0.0 == selected }) {
-                                    Text(selected).tag(selected)
-                                }
-                            }
+                                selection: languageBinding(id),
+                                items: languageMenuItems(for: id)
+                            )
                         }
                         HStack(spacing: VeloraSpacing.m) {
                             Text(L10n.text("Speech model"))
                                 .font(.system(size: 12))
                                 .foregroundStyle(.secondary)
                             Spacer()
-                            HeaderMenu(
+                            CapsuleOptionMenu(
                                 L10n.text("Speech model"),
                                 value: modelTitle(for: id),
-                                selection: modelBinding(id)
-                            ) {
-                                ForEach(speechModels, id: \.id) { Text($0.name).tag($0.id) }
-                                if let selected = model.keyboardSpeechRoutes[id]?.model,
-                                   !speechModels.contains(where: { $0.id == selected }) {
-                                    Text(selected + " (not installed)").tag(selected)
-                                }
-                            }
+                                selection: modelBinding(id),
+                                items: modelMenuItems(for: id)
+                            )
                         }
                     }
                     .padding(.horizontal, 14)
@@ -105,6 +95,24 @@ struct KeyboardRoutingSettingsView: View {
             return model.sttEngineModels.filter { installed.contains($0.id) }.map { ($0.id, $0.displayName) }
         }
         return STTModel.all.filter { installed.contains($0.id) }.map { ($0.id, $0.displayName) }
+    }
+
+    private func languageMenuItems(for id: String) -> [CapsuleMenuItem<String>] {
+        var items = KeyboardLanguageRouting.languages.map { CapsuleMenuItem($0.0, title: $0.1) }
+        if let selected = model.keyboardSpeechRoutes[id]?.language,
+           !KeyboardLanguageRouting.languages.contains(where: { $0.0 == selected }) {
+            items.append(CapsuleMenuItem(selected, title: selected))
+        }
+        return items
+    }
+
+    private func modelMenuItems(for id: String) -> [CapsuleMenuItem<String>] {
+        var items = speechModels.map { CapsuleMenuItem($0.id, title: $0.name) }
+        if let selected = model.keyboardSpeechRoutes[id]?.model,
+           !speechModels.contains(where: { $0.id == selected }) {
+            items.append(CapsuleMenuItem(selected, title: selected + " (not installed)"))
+        }
+        return items
     }
 
     private func languageTitle(for id: String) -> String {

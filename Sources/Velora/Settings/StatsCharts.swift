@@ -72,15 +72,24 @@ enum StatsAppIcons {
     }
 
     private static func rasterize(_ bundleID: String) -> CGImage? {
-        guard let url = NSWorkspace.shared.urlForApplication(withBundleIdentifier: bundleID),
-              let bitmap = NSBitmapImageRep(
+        let icon: NSImage
+        if bundleID == DictationRecord.ownBundleID {
+            icon = VeloraAppInfo.icon
+        } else if let running = NSWorkspace.shared.runningApplications.first(where: { $0.bundleIdentifier == bundleID }),
+                  let runningIcon = running.icon {
+            icon = runningIcon
+        } else if let url = NSWorkspace.shared.urlForApplication(withBundleIdentifier: bundleID) {
+            icon = NSWorkspace.shared.icon(forFile: url.path)
+        } else {
+            return nil
+        }
+        guard let bitmap = NSBitmapImageRep(
                 bitmapDataPlanes: nil, pixelsWide: pixels, pixelsHigh: pixels, bitsPerSample: 8,
                 samplesPerPixel: 4, hasAlpha: true, isPlanar: false, colorSpaceName: .deviceRGB,
                 bytesPerRow: 0, bitsPerPixel: 0)
         else {
             return nil
         }
-        let icon = NSWorkspace.shared.icon(forFile: url.path)
         NSGraphicsContext.saveGraphicsState()
         NSGraphicsContext.current = NSGraphicsContext(bitmapImageRep: bitmap)
         icon.draw(in: NSRect(x: 0, y: 0, width: pixels, height: pixels))
@@ -123,8 +132,8 @@ struct StatsChartCard<Content: View>: View {
 enum StatTileTrend {
     /// Sparkline of bucket values; fewer than 2 leaves the space blank.
     case series([Double])
-    /// One dot per day, oldest first, filled when the day has a dictation.
-    case days([Bool])
+    /// One dot per day, oldest first; trailing `streak` active days glow warm.
+    case days([Bool], streak: Int = 0)
 }
 
 /// The Stats tiles four across: equal columns, every tile as tall as the
@@ -235,8 +244,8 @@ struct StatTile<Caption: View>: View {
         switch trend {
         case .series(let values):
             StatsSparkline(series: values)
-        case .days(let days):
-            StatsDayStrip(days: days)
+        case .days(let days, let streak):
+            StatsDayStrip(days: days, streak: streak)
         }
     }
 }
@@ -306,6 +315,7 @@ private struct StatsSparkline: View {
 ///     ● ● ● ○ ● ● ● ○ ● ● ● ● ○ ● ●          oldest top left, today last
 private struct StatsDayStrip: View {
     let days: [Bool]
+    var streak: Int = 0
 
     private static let height = StatsChartStyle.trendHeight
     private static let perRow = 15
@@ -315,20 +325,46 @@ private struct StatsDayStrip: View {
     private static let dotShare: CGFloat = 0.7
     private static let idleOpacity = 0.14
 
+    /// Indices belonging to the live streak (trailing run ending on today or
+    /// yesterday when today hasn't started yet).
+    private var streakIndices: Set<Int> {
+        guard streak > 0, !days.isEmpty else { return [] }
+        guard let lastActive = days.lastIndex(of: true), lastActive >= days.count - 2 else {
+            return []
+        }
+        var result: Set<Int> = []
+        var idx = lastActive
+        while idx >= 0 && days[idx] && result.count < streak {
+            result.insert(idx)
+            idx -= 1
+        }
+        return result
+    }
+
     var body: some View {
-        let rows = stride(from: 0, to: days.count, by: Self.perRow).map {
-            Array(days[$0..<min($0 + Self.perRow, days.count)])
+        let highlighted = streakIndices
+        let rows = stride(from: 0, to: days.count, by: Self.perRow).map { start in
+            (start, Array(days[start..<min(start + Self.perRow, days.count)]))
         }
         let columns = min(days.count, Self.perRow)
         GeometryReader { geometry in
             let slot = geometry.size.width / CGFloat(max(columns, 1))
             let side = min(Self.maxDot, slot * Self.dotShare)
             VStack(spacing: Self.rowGap) {
-                ForEach(Array(rows.enumerated()), id: \.offset) { _, row in
+                ForEach(Array(rows.enumerated()), id: \.offset) { _, entry in
+                    let (baseIndex, row) = entry
                     HStack(spacing: 0) {
-                        ForEach(Array(row.enumerated()), id: \.offset) { _, active in
+                        ForEach(Array(row.enumerated()), id: \.offset) { offset, active in
+                            let globalIndex = baseIndex + offset
+                            let color: Color = if !active {
+                                Color.primary.opacity(Self.idleOpacity)
+                            } else if highlighted.contains(globalIndex) {
+                                VeloraBrand.warm
+                            } else {
+                                VeloraBrand.accent
+                            }
                             Circle()
-                                .fill(active ? VeloraBrand.accent : Color.primary.opacity(Self.idleOpacity))
+                                .fill(color)
                                 .frame(width: side, height: side)
                                 .frame(width: slot)
                         }
@@ -613,55 +649,127 @@ struct StatsTopAppsChart: View {
     }
 }
 
-/// Ready in: 1 s bins, the 10 s+ overflow bin lighter, a solid median rule
-/// and a dashed 95th-percentile rule.
-///
-///     █▇▃▂ · · · · · ▁      | median   ¦ 95%
-///     0 s  2 s  4 s … 10 s+
+/// End-to-end time: adaptive bins fitted to p95, solid median rule, dashed
+/// 95th-percentile rule, plus an optional Speech vs Cleanup stage breakdown.
 struct StatsLatencyChart: View {
-    let bins: [StatsLatency.Bin]
+    let distribution: StatsLatency.AdaptiveDistribution
     let medianMs: Int
     let slowMs: Int
+    var averageSpeechMs: Int?
+    var averageCleanupMs: Int?
 
-    private static let height: CGFloat = 130
-    private static let gap = 0.06
+    private static let height: CGFloat = 112
     private static let overflowOpacity = 0.45
-    private static let ticks = [0, 2, 4, 6, 8, 10]
     private static let dash: [CGFloat] = [3, 3]
-    private static let radius: CGFloat = 2
+    private static let radius: CGFloat = 3
+
+    private var tickSeconds: [Double] {
+        let overflow = distribution.overflowSeconds
+        let step = overflow <= 2.0 ? 0.5 : (overflow <= 4.0 ? 1.0 : 2.0)
+        var ticks: [Double] = []
+        var value = 0.0
+        while value <= overflow + 0.001 {
+            ticks.append(value)
+            value += step
+        }
+        return ticks
+    }
 
     var body: some View {
-        let cap = Double(StatsLatency.overflowSeconds)
-        StatsChartBox(height: Self.height) {
-            Chart {
-                ForEach(bins) { bin in
-                    RectangleMark(
-                        xStart: .value("From", Double(bin.start) + Self.gap),
-                        xEnd: .value("To", Double(bin.start + StatsLatency.binSeconds) - Self.gap),
-                        yStart: .value("Zero", 0),
-                        yEnd: .value("Dictations", bin.count))
-                        .foregroundStyle(VeloraBrand.accent.opacity(bin.isOverflow ? Self.overflowOpacity : 1))
-                        .cornerRadius(Self.radius)
+        let cap = distribution.overflowSeconds
+        let binGap = Double(distribution.stepMs) / 1000.0 * 0.08
+        VStack(alignment: .leading, spacing: VeloraSpacing.m) {
+            StatsChartBox(height: Self.height) {
+                Chart {
+                    ForEach(distribution.bins) { bin in
+                        RectangleMark(
+                            xStart: .value("From", bin.startSeconds + binGap),
+                            xEnd: .value("To", bin.endSeconds - binGap),
+                            yStart: .value("Zero", 0),
+                            yEnd: .value("Dictations", bin.count))
+                            .foregroundStyle(VeloraBrand.accent.opacity(bin.isOverflow ? Self.overflowOpacity : 1))
+                            .cornerRadius(Self.radius)
+                    }
+                    RuleMark(x: .value("Median", min(Double(medianMs) / 1000, cap)))
+                        .foregroundStyle(Color.primary.opacity(0.65))
+                        .lineStyle(StrokeStyle(lineWidth: 1))
+                    RuleMark(x: .value("95th percentile", min(Double(slowMs) / 1000, cap)))
+                        .foregroundStyle(Color.secondary)
+                        .lineStyle(StrokeStyle(lineWidth: 1, dash: Self.dash))
                 }
-                RuleMark(x: .value("Median", min(Double(medianMs) / 1000, cap)))
-                    .foregroundStyle(Color.primary.opacity(0.6))
-                    .lineStyle(StrokeStyle(lineWidth: 1))
-                RuleMark(x: .value("95th percentile", min(Double(slowMs) / 1000, cap)))
-                    .foregroundStyle(Color.secondary)
-                    .lineStyle(StrokeStyle(lineWidth: 1, dash: Self.dash))
-            }
-            .chartXScale(domain: 0.0...(cap + Double(StatsLatency.binSeconds)))
-            .chartXAxis {
-                AxisMarks(values: Self.ticks.map(Double.init)) { value in
-                    AxisValueLabel {
-                        let seconds = Int(value.as(Double.self) ?? 0)
-                        Text(seconds >= StatsLatency.overflowSeconds ? "\(seconds) s+" : "\(seconds) s")
-                            .font(StatsChartStyle.axisFont)
+                .chartXScale(domain: 0.0...distribution.maxSeconds)
+                .chartXAxis {
+                    AxisMarks(values: tickSeconds) { value in
+                        AxisValueLabel {
+                            let seconds = value.as(Double.self) ?? 0
+                            Text(tickLabel(seconds, overflow: cap))
+                                .font(StatsChartStyle.axisFont)
+                        }
                     }
                 }
+                .chartYAxis(.hidden)
             }
-            .chartYAxis(.hidden)
+            stageBreakdown
         }
+    }
+
+    @ViewBuilder
+    private var stageBreakdown: some View {
+        let speech = averageSpeechMs ?? 0
+        let cleanup = averageCleanupMs ?? 0
+        let total = speech + cleanup
+        if total > 0 {
+            let speechFraction = CGFloat(speech) / CGFloat(total)
+            VStack(alignment: .leading, spacing: 5) {
+                GeometryReader { geo in
+                    let w = geo.size.width
+                    HStack(spacing: 2) {
+                        if speech > 0 {
+                            RoundedRectangle(cornerRadius: 3, style: .continuous)
+                                .fill(VeloraBrand.accent)
+                                .frame(width: max(6, w * speechFraction - (cleanup > 0 ? 1 : 0)))
+                        }
+                        if cleanup > 0 {
+                            RoundedRectangle(cornerRadius: 3, style: .continuous)
+                                .fill(VeloraBrand.warm)
+                        }
+                    }
+                }
+                .frame(height: 6)
+                HStack(spacing: VeloraSpacing.m) {
+                    if speech > 0 {
+                        stageLegend(color: VeloraBrand.accent, label: "Speech \(HistoryJournal.latency(ms: speech))")
+                    }
+                    if cleanup > 0 {
+                        stageLegend(color: VeloraBrand.warm, label: "Cleanup \(HistoryJournal.latency(ms: cleanup))")
+                    }
+                    Spacer(minLength: 0)
+                    Text("Median \(HistoryJournal.latency(ms: medianMs))")
+                        .font(.system(size: 11))
+                        .foregroundStyle(.tertiary)
+                        .monospacedDigit()
+                }
+            }
+        }
+    }
+
+    private func stageLegend(color: Color, label: String) -> some View {
+        HStack(spacing: 5) {
+            Circle()
+                .fill(color)
+                .frame(width: 6, height: 6)
+            Text(label)
+                .font(.system(size: 11))
+                .foregroundStyle(.secondary)
+                .monospacedDigit()
+        }
+    }
+
+    private func tickLabel(_ seconds: Double, overflow: Double) -> String {
+        let formatted = seconds.truncatingRemainder(dividingBy: 1) == 0
+            ? "\(Int(seconds)) s"
+            : String(format: "%.1f s", seconds)
+        return seconds >= overflow - 0.001 ? formatted + "+" : formatted
     }
 }
 
@@ -718,39 +826,90 @@ struct StatsModesChart: View {
 }
 
 /// The last 12 weeks as weekday rows and week columns, darker for busier
-/// days.
+/// days, with the live streak cells highlighted in warm apricot.
 struct StatsActivityCalendar: View {
     let cells: [StatsCalendarCell]
+    var currentStreak: Int = 0
+    var longestStreak: Int = 0
 
     private static let height: CGFloat = 96
     private static let gap = 0.08
     private static let floorOpacity = 0.2
     private static let radius: CGFloat = 2
 
+    private var streakDates: Set<Date> {
+        guard currentStreak > 0, !cells.isEmpty else { return [] }
+        guard let lastActiveIdx = cells.lastIndex(where: { $0.words > 0 }),
+              lastActiveIdx >= cells.count - 2
+        else { return [] }
+        var dates: Set<Date> = []
+        var idx = lastActiveIdx
+        while idx >= 0 && cells[idx].words > 0 && dates.count < currentStreak {
+            dates.insert(cells[idx].date)
+            idx -= 1
+        }
+        return dates
+    }
+
     var body: some View {
         let peak = Double(max(cells.map(\.words).max() ?? 0, 1))
         let columns = (cells.map(\.column).max() ?? 0) + 1
-        StatsChartBox(height: Self.height) {
-            Chart(cells) { cell in
-                RectangleMark(
-                    xStart: .value("Week", Double(cell.column) + Self.gap),
-                    xEnd: .value("Week", Double(cell.column + 1) - Self.gap),
-                    yStart: .value("Day", Double(cell.row) + Self.gap),
-                    yEnd: .value("Day", Double(cell.row + 1) - Self.gap))
-                    .foregroundStyle(fill(cell.words, peak: peak))
-                    .cornerRadius(Self.radius)
+        let highlighted = streakDates
+        VStack(alignment: .leading, spacing: VeloraSpacing.s) {
+            StatsChartBox(height: Self.height) {
+                Chart(cells) { cell in
+                    RectangleMark(
+                        xStart: .value("Week", Double(cell.column) + Self.gap),
+                        xEnd: .value("Week", Double(cell.column + 1) - Self.gap),
+                        yStart: .value("Day", Double(cell.row) + Self.gap),
+                        yEnd: .value("Day", Double(cell.row + 1) - Self.gap))
+                        .foregroundStyle(fill(cell.words, peak: peak, inStreak: highlighted.contains(cell.date)))
+                        .cornerRadius(Self.radius)
+                }
+                .chartXScale(domain: 0.0...Double(columns))
+                .chartYScale(domain: [Double(StatsWeekdays.count), 0.0])
+                .chartXAxis(.hidden)
+                .chartYAxis(.hidden)
             }
-            .chartXScale(domain: 0.0...Double(columns))
-            .chartYScale(domain: [Double(StatsWeekdays.count), 0.0])
-            .chartXAxis(.hidden)
-            .chartYAxis(.hidden)
+            HStack(spacing: VeloraSpacing.xs) {
+                if currentStreak > 0 {
+                    HStack(spacing: 3) {
+                        Image(systemName: "flame.fill")
+                            .font(.system(size: 9.5))
+                            .foregroundStyle(VeloraBrand.warm)
+                        Text("\(currentStreak)d · Best \(longestStreak)d")
+                            .font(.system(size: 10.5))
+                            .foregroundStyle(.secondary)
+                            .monospacedDigit()
+                    }
+                } else if longestStreak > 0 {
+                    Text("Best \(longestStreak)d")
+                        .font(.system(size: 10.5))
+                        .foregroundStyle(.secondary)
+                        .monospacedDigit()
+                }
+                Spacer(minLength: 0)
+                Text("Less")
+                    .font(.system(size: 10))
+                    .foregroundStyle(.tertiary)
+                HStack(spacing: 2) {
+                    RoundedRectangle(cornerRadius: 1.5).fill(StatsChartStyle.well).frame(width: 8, height: 8)
+                    RoundedRectangle(cornerRadius: 1.5).fill(VeloraBrand.accent.opacity(0.35)).frame(width: 8, height: 8)
+                    RoundedRectangle(cornerRadius: 1.5).fill(VeloraBrand.accent.opacity(0.65)).frame(width: 8, height: 8)
+                    RoundedRectangle(cornerRadius: 1.5).fill(VeloraBrand.accent).frame(width: 8, height: 8)
+                }
+                Text("More")
+                    .font(.system(size: 10))
+                    .foregroundStyle(.tertiary)
+            }
         }
     }
 
-    private func fill(_ words: Int, peak: Double) -> Color {
+    private func fill(_ words: Int, peak: Double, inStreak: Bool) -> Color {
         guard words > 0 else {
             return StatsChartStyle.well
         }
-        return VeloraBrand.accent.opacity(Self.floorOpacity + (1 - Self.floorOpacity) * Double(words) / peak)
+        let opacity = Self.floorOpacity + (1 - Self.floorOpacity) * Double(words) / peak
+        return (inStreak ? VeloraBrand.warm : VeloraBrand.accent).opacity(opacity)
     }
 }

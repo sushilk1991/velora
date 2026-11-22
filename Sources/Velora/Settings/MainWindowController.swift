@@ -490,32 +490,82 @@ struct SettingsPane: View {
     }
 }
 
-/// Segmented section picker for the Settings header (`General` … `Advanced`),
-/// matching `StatsHeaderControls` (`Today | 7 Days | 30 Days | All Time`).
-/// ⌘1–⌘6 stay bound to the main content panes.
+/// Concentric glass capsule section picker for the Settings header
+/// (`General` … `Advanced`). Every segment — first, middle, and last — shares
+/// the same concentric inner radius (`VeloraRadius.capsule - 2 = 12 pt`) so
+/// switching tabs never flashes mismatched square/rounded corners.
 struct SettingsSectionStrip: View {
     @ObservedObject private var interfaceLocale = InterfaceLocale.shared
     @ObservedObject var selection: MainWindowSelection
+    @State private var hovered: SettingsTab?
 
-    private var tabBinding: Binding<SettingsTab> {
-        Binding(
-            get: { selection.currentSettingsTab },
-            set: { selection.settingsTab = $0 }
-        )
-    }
+    private static let trackHeight: CGFloat = 30
+    private static let trackPadding: CGFloat = 2
+    private static let outerRadius: CGFloat = VeloraRadius.capsule
+    private static let innerRadius: CGFloat = VeloraRadius.capsule - 2
 
     var body: some View {
-        Picker(L10n.text("Settings section"), selection: tabBinding) {
+        HStack(spacing: 2) {
             ForEach(SettingsTab.allCases) { tab in
-                Text(tab.title).tag(tab)
+                let selected = selection.currentSettingsTab == tab
+                Button {
+                    withAnimation(VeloraMotion.quick) {
+                        selection.settingsTab = tab
+                    }
+                } label: {
+                    Text(tab.title)
+                        .font(.system(size: 12.5, weight: selected ? .semibold : .medium))
+                        .foregroundStyle(selected ? .primary : .secondary)
+                        .lineLimit(1)
+                        .padding(.horizontal, 12)
+                        .frame(height: Self.trackHeight - Self.trackPadding * 2)
+                        .background(
+                            RoundedRectangle(cornerRadius: Self.innerRadius, style: .circular)
+                                .fill(pillFill(selected: selected, hovered: hovered == tab))
+                        )
+                        .contentShape(RoundedRectangle(cornerRadius: Self.innerRadius, style: .circular))
+                }
+                .buttonStyle(.plain)
+                .onHover { inside in
+                    if inside {
+                        hovered = tab
+                    } else if hovered == tab {
+                        hovered = nil
+                    }
+                }
+                .accessibilityAddTraits(selected ? [.isSelected] : [])
             }
         }
-        .pickerStyle(.segmented)
-        .labelsHidden()
-        // Large (30 pt) matches Stats' header segmented control and the
-        // 28 pt capsules across the rest of the window.
-        .controlSize(.large)
-        .fixedSize()
+        .padding(Self.trackPadding)
+        .frame(height: Self.trackHeight)
+        .fixedSize(horizontal: true, vertical: false)
+        .background(
+            RoundedRectangle(cornerRadius: Self.outerRadius, style: .circular)
+                .fill(VeloraPanel.groupFill)
+        )
+        .overlay(
+            RoundedRectangle(cornerRadius: Self.outerRadius, style: .circular)
+                .strokeBorder(VeloraPanel.hairline, lineWidth: 1)
+        )
+        .onMoveCommand { direction in
+            let tabs = SettingsTab.allCases
+            guard let index = tabs.firstIndex(of: selection.currentSettingsTab) else { return }
+            switch direction {
+            case .left:
+                selection.settingsTab = tabs[max(index - 1, 0)]
+            case .right:
+                selection.settingsTab = tabs[min(index + 1, tabs.count - 1)]
+            default:
+                break
+            }
+        }
+    }
+
+    private func pillFill(selected: Bool, hovered: Bool) -> Color {
+        if selected {
+            return VeloraPanel.sidebarSelection
+        }
+        return hovered ? Color.primary.opacity(0.05) : .clear
     }
 }
 
