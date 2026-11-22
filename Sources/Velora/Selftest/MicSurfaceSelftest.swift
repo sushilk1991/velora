@@ -20,6 +20,7 @@ enum MicSurfaceSelftest {
         testDiagnosticLine()
         testLevelMath()
         testPillMenuTopLevelUnchanged()
+        testCapsuleOptionMenu()
     }
 
     /// The shared failure counter. An alias rather than `extension Selftest`,
@@ -308,6 +309,42 @@ enum MicSurfaceSelftest {
                "the Microphone row still opens on System Default")
         expect(mic?.submenu?.items.contains { $0.title == "Excluded Microphones" } == false,
                "with nothing excluded, the submenu has no excluded group")
+    }
+
+    private static func testCapsuleOptionMenu() {
+        var pickedValue: String?
+        let trigger = CapsuleMenuTriggerNSView<String>()
+        trigger.frame = NSRect(x: 0, y: 0, width: 120, height: 28)
+        trigger.menuLabel = "Interface language"
+        trigger.valueTitle = "English"
+        trigger.selectedValue = "en"
+        trigger.items = [
+            CapsuleMenuItem("en", title: "English"),
+            CapsuleMenuItem("es", title: "Español"),
+            CapsuleMenuItem("fr", title: "Français", separatorBefore: true),
+        ]
+        trigger.onSelect = { pickedValue = $0 }
+
+        expect(trigger.isFlipped, "capsule menu trigger uses flipped coordinates so menus pop below it")
+        expect(trigger.acceptsFirstMouse(for: nil), "capsule menu opens on first click even when inactive")
+        expect(trigger.hitTest(NSPoint(x: 10, y: 10)) === trigger, "enabled capsule trigger accepts clicks")
+
+        trigger.isMenuEnabled = false
+        expect(trigger.hitTest(NSPoint(x: 10, y: 10)) == nil, "disabled capsule trigger ignores clicks")
+        trigger.isMenuEnabled = true
+
+        let menu = trigger.buildMenu()
+        expect(menu.items.count == 4, "menu contains 3 options + 1 separator (got \(menu.items.count))")
+        expect(menu.items[0].title == "English" && menu.items[0].state == .on,
+               "selected item carries checkmark state")
+        expect(menu.items[1].title == "Español" && menu.items[1].state == .off,
+               "unselected item is unchecked")
+        expect(menu.items[2].isSeparatorItem, "separatorBefore inserts an NSMenuItem separator")
+
+        if let action = menu.items[1].action {
+            _ = (menu.items[1].target as AnyObject?)?.perform(action, with: menu.items[1])
+        }
+        expect(pickedValue == "es", "picking a menu item invokes onSelect with its value")
     }
 }
 #endif

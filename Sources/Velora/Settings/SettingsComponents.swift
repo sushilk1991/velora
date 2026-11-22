@@ -41,6 +41,8 @@ struct OverlayScrollStyle: NSViewRepresentable {
 }
 
 private final class OverlayScrollAnchorView: NSView {
+    override func hitTest(_ point: NSPoint) -> NSView? { nil }
+
     override func viewDidMoveToSuperview() {
         super.viewDidMoveToSuperview()
         applyOverlayStyle()
@@ -220,12 +222,13 @@ struct CapsuleMenuItem<Value: Hashable> {
     }
 }
 
-/// Glass capsule chooser backed directly by AppKit `NSMenu.popUp(positioning:at:in:)`.
+/// Glass capsule chooser backed directly by an AppKit `NSView` overlay that
+/// opens `NSMenu.popUp(positioning:at:in:)` on `mouseDown`.
 ///
-/// SwiftUI `Menu` with `.menuStyle(.button)` + a custom `ButtonStyle` drops
-/// clicks inside `ScrollView`s and when the window floats over another app's
-/// full-screen Space. Anchoring a real `NSMenu` to the button's `NSView` keeps
-/// the exact 28 pt `.capsule` appearance while opening 100% reliably everywhere.
+/// Using an AppKit `mouseDown` responder (like `NSPopUpButton`) avoids both
+/// SwiftUI `Menu` click drops in `ScrollView`/full-screen Spaces and background
+/// `NSView` hit-test interception, and opens on the very first click even when
+/// the window is inactive (`acceptsFirstMouse = true`).
 struct CapsuleOptionMenu<Value: Hashable>: View {
     let label: String
     let valueTitle: String
@@ -235,9 +238,13 @@ struct CapsuleOptionMenu<Value: Hashable>: View {
     let onSelect: (Value) -> Void
 
     @Environment(\.isEnabled) private var isEnabled
-    @State private var anchorView: NSView?
+    @State private var isPressed = false
 
+    private static var height: CGFloat { 28 }
     private static var chevronSize: CGFloat { 9 }
+    private static var shape: RoundedRectangle {
+        RoundedRectangle(cornerRadius: VeloraRadius.capsule, style: .circular)
+    }
 
     init(
         _ label: String,
@@ -271,34 +278,124 @@ struct CapsuleOptionMenu<Value: Hashable>: View {
     }
 
     var body: some View {
-        Button(action: presentMenu) {
-            HStack(spacing: VeloraSpacing.xs) {
-                if let systemImage {
-                    Image(systemName: systemImage)
-                }
-                Text(valueTitle)
-                    .lineLimit(1)
-                Image(systemName: "chevron.down")
-                    .font(.system(size: Self.chevronSize, weight: .semibold))
-                    .foregroundStyle(.secondary)
+        HStack(spacing: VeloraSpacing.xs) {
+            if let systemImage {
+                Image(systemName: systemImage)
             }
+            Text(valueTitle)
+                .lineLimit(1)
+            Image(systemName: "chevron.down")
+                .font(.system(size: Self.chevronSize, weight: .semibold))
+                .foregroundStyle(.secondary)
         }
-        .buttonStyle(.capsule)
+        .font(.system(size: 12, weight: .medium))
+        .padding(.horizontal, VeloraSpacing.m)
+        .frame(height: Self.height)
+        .background(
+            Self.shape
+                .fill(Color.primary.opacity(isPressed ? 0.16 : 0.10)))
+        .overlay(
+            Self.shape
+                .strokeBorder(VeloraPanel.hairline, lineWidth: 1))
+        .opacity(isEnabled ? 1 : 0.4)
         .fixedSize()
-        .background(MenuAnchorView(anchor: $anchorView))
+        .overlay(
+            CapsuleMenuTrigger(
+                label: label,
+                valueTitle: valueTitle,
+                items: items,
+                selectedValue: selectedValue,
+                isEnabled: isEnabled,
+                onSelect: onSelect,
+                onPressedChange: { isPressed = $0 }
+            )
+        )
         .help(label)
+        .accessibilityElement(children: .ignore)
         .accessibilityLabel(label)
         .accessibilityValue(valueTitle)
+        .accessibilityAddTraits(.isButton)
+    }
+}
+
+private struct CapsuleMenuTrigger<Value: Hashable>: NSViewRepresentable {
+    let label: String
+    let valueTitle: String
+    let items: [CapsuleMenuItem<Value>]
+    let selectedValue: Value?
+    let isEnabled: Bool
+    let onSelect: (Value) -> Void
+    let onPressedChange: (Bool) -> Void
+
+    func makeNSView(context: Context) -> CapsuleMenuTriggerNSView<Value> {
+        let view = CapsuleMenuTriggerNSView<Value>()
+        update(view)
+        return view
     }
 
-    private func presentMenu() {
-        guard isEnabled, let view = anchorView else { return }
-        if let window = view.window {
-            NSApp.activate(ignoringOtherApps: true)
-            window.makeKey()
+    func updateNSView(_ nsView: CapsuleMenuTriggerNSView<Value>, context: Context) {
+        update(nsView)
+    }
+
+    private func update(_ view: CapsuleMenuTriggerNSView<Value>) {
+        view.menuLabel = label
+        view.valueTitle = valueTitle
+        view.items = items
+        view.selectedValue = selectedValue
+        view.isMenuEnabled = isEnabled
+        view.onSelect = onSelect
+        view.onPressedChange = onPressedChange
+    }
+}
+
+final class CapsuleMenuTriggerNSView<Value: Hashable>: NSView {
+    var menuLabel: String = ""
+    var valueTitle: String = ""
+    var items: [CapsuleMenuItem<Value>] = []
+    var selectedValue: Value?
+    var isMenuEnabled: Bool = true
+    var onSelect: (Value) -> Void = { _ in }
+    var onPressedChange: (Bool) -> Void = { _ in }
+
+    override var isFlipped: Bool { true }
+
+    override func acceptsFirstMouse(for event: NSEvent?) -> Bool {
+        true
+    }
+
+    override func hitTest(_ point: NSPoint) -> NSView? {
+        guard isMenuEnabled else { return nil }
+        return super.hitTest(point)
+    }
+
+    override func mouseDown(with event: NSEvent) {
+        guard isMenuEnabled, !items.isEmpty else {
+            super.mouseDown(with: event)
+            return
         }
-        let coordinator = PopupMenuCoordinator(items: items, onSelect: onSelect)
-        let menu = NSMenu(title: label)
+        presentMenu()
+    }
+
+    override func accessibilityRole() -> NSAccessibility.Role? {
+        .popUpButton
+    }
+
+    override func accessibilityLabel() -> String? {
+        menuLabel
+    }
+
+    override func accessibilityValue() -> Any? {
+        valueTitle
+    }
+
+    override func accessibilityPerformPress() -> Bool {
+        guard isMenuEnabled, !items.isEmpty else { return false }
+        presentMenu()
+        return true
+    }
+
+    func buildMenu() -> NSMenu {
+        let menu = NSMenu(title: menuLabel)
         menu.autoenablesItems = false
         for (index, item) in items.enumerated() {
             if item.isSeparatorBefore && index > 0 {
@@ -306,9 +403,9 @@ struct CapsuleOptionMenu<Value: Hashable>: View {
             }
             let menuItem = NSMenuItem(
                 title: item.title,
-                action: #selector(PopupMenuCoordinator<Value>.picked(_:)),
+                action: #selector(picked(_:)),
                 keyEquivalent: "")
-            menuItem.target = coordinator
+            menuItem.target = self
             menuItem.tag = index
             menuItem.isEnabled = true
             if let selectedValue, item.value == selectedValue {
@@ -316,42 +413,25 @@ struct CapsuleOptionMenu<Value: Hashable>: View {
             }
             menu.addItem(menuItem)
         }
-        // Keep the target alive until `popUp` finishes tracking synchronously.
-        withExtendedLifetime(coordinator) {
-            let origin = NSPoint(x: 0, y: view.bounds.height + 4)
-            _ = menu.popUp(positioning: nil, at: origin, in: view)
+        return menu
+    }
+
+    func presentMenu() {
+        if let window {
+            NSApp.activate(ignoringOtherApps: true)
+            window.makeKey()
         }
-    }
-}
+        onPressedChange(true)
+        defer { onPressedChange(false) }
 
-private final class PopupMenuCoordinator<Value: Hashable>: NSObject {
-    let items: [CapsuleMenuItem<Value>]
-    let onSelect: (Value) -> Void
-
-    init(items: [CapsuleMenuItem<Value>], onSelect: @escaping (Value) -> Void) {
-        self.items = items
-        self.onSelect = onSelect
+        let menu = buildMenu()
+        let origin = NSPoint(x: 0, y: bounds.height + 4)
+        _ = menu.popUp(positioning: nil, at: origin, in: self)
     }
 
-    @objc func picked(_ sender: NSMenuItem) {
+    @objc private func picked(_ sender: NSMenuItem) {
         let index = sender.tag
         guard items.indices.contains(index) else { return }
         onSelect(items[index].value)
-    }
-}
-
-private struct MenuAnchorView: NSViewRepresentable {
-    @Binding var anchor: NSView?
-
-    func makeNSView(context: Context) -> NSView {
-        let view = NSView()
-        DispatchQueue.main.async { anchor = view }
-        return view
-    }
-
-    func updateNSView(_ nsView: NSView, context: Context) {
-        if anchor !== nsView {
-            DispatchQueue.main.async { anchor = nsView }
-        }
     }
 }
