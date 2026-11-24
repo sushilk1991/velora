@@ -111,8 +111,16 @@ struct HUDSessionContext: Equatable {
     let appIcon: NSImage?
     let modeName: String
     let livePreview: Bool
+    let autoSend: Bool
+    let autoSendGuarded: Bool
 
-    init(appIcon: NSImage?, modeName: String, livePreview: Bool = false) {
+    init(
+        appIcon: NSImage?,
+        modeName: String,
+        livePreview: Bool = false,
+        autoSend: Bool = false,
+        autoSendGuarded: Bool = false
+    ) {
         if let source = appIcon, let normalized = source.copy() as? NSImage {
             normalized.size = NSSize(
                 width: HUDGeometry.chipIconSide,
@@ -123,12 +131,16 @@ struct HUDSessionContext: Equatable {
         }
         self.modeName = modeName
         self.livePreview = livePreview
+        self.autoSend = autoSend
+        self.autoSendGuarded = autoSendGuarded
     }
 
     static func == (lhs: HUDSessionContext, rhs: HUDSessionContext) -> Bool {
         lhs.appIcon === rhs.appIcon
             && lhs.modeName == rhs.modeName
             && lhs.livePreview == rhs.livePreview
+            && lhs.autoSend == rhs.autoSend
+            && lhs.autoSendGuarded == rhs.autoSendGuarded
     }
 }
 

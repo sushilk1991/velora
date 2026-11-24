@@ -867,7 +867,7 @@ final class TextInserter {
         return CFEqual(expected, current)
     }
 
-    private static func deliveryAllowed(
+    static func deliveryAllowed(
         targetBundleID: String?, targetElement: AXUIElement? = nil
     ) -> Bool {
         guard Permissions.accessibilityGranted, canPostEvents, !SecureInput.isActive else {

@@ -17,6 +17,8 @@ enum SecondaryHotkeyRole: String, CaseIterable {
     case stream
     /// Action Mode: hold, speak a command, Velora carries it out.
     case action
+    /// Dictate & Send: hold, see live words, release to paste and press Return.
+    case dictateAndSend
     case alternateDictation
 
     var label: String { rawValue }

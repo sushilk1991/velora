@@ -1,3 +1,4 @@
+import CoreGraphics
 import Foundation
 
 /// Stable, human-readable settings document stored at `~/.velora/settings.json`.
@@ -110,6 +111,8 @@ extension SettingsDocument {
         var delivery: DictationDelivery = .pasteAndKeep
         var removeHesitations: Bool = false
         var showLiveWords: Bool = false
+        var autoSendKey: AutoSendKey = .returnKey
+        var autoSendBlockedApps: [String] = AppConfig.defaultAutoSendBlockedApps
         var autoPunctuation: Bool
         var saveAudio: Bool
         var romanizeOutput: Bool
@@ -170,6 +173,9 @@ extension SettingsDocument {
             delivery = try container.decodeIfPresent(DictationDelivery.self, forKey: .delivery) ?? .pasteAndKeep
             removeHesitations = try container.decodeIfPresent(Bool.self, forKey: .removeHesitations) ?? false
             showLiveWords = try container.decodeIfPresent(Bool.self, forKey: .showLiveWords) ?? false
+            autoSendKey = try container.decodeIfPresent(AutoSendKey.self, forKey: .autoSendKey) ?? .returnKey
+            autoSendBlockedApps = try container.decodeIfPresent([String].self, forKey: .autoSendBlockedApps)
+                ?? AppConfig.defaultAutoSendBlockedApps
             autoPunctuation = try container.decode(Bool.self, forKey: .autoPunctuation)
             saveAudio = try container.decode(Bool.self, forKey: .saveAudio)
             romanizeOutput = try container.decode(Bool.self, forKey: .romanizeOutput)
@@ -297,6 +303,9 @@ extension SettingsDocument {
         /// Stream Typing writes provisional speech at the owned cursor.
         var streamTyping: Hotkey
         var streamTypingEnabled: Bool
+        /// Dictate & Send: hold, see live words, release to paste and press Return.
+        var dictateAndSend: Hotkey = .controlShiftReturn
+        var dictateAndSendEnabled: Bool = true
         var behavior: HotkeyMode
         /// Action Mode: hold, speak a command, Velora carries it out.
         var action: Hotkey
@@ -316,7 +325,9 @@ extension SettingsDocument {
             behavior: .hold,
             action: .controlShiftA,
             actionsEnabled: true,
-            backgroundActions: true)
+            backgroundActions: true,
+            dictateAndSend: .controlShiftReturn,
+            dictateAndSendEnabled: true)
 
         // Older settings have neither Stream Typing nor Action Mode keys;
         // decoding fills them rather than resetting unrelated preferences.
@@ -324,7 +335,9 @@ extension SettingsDocument {
              proofreadSelection: Hotkey, proofreadEnabled: Bool,
              streamTyping: Hotkey, streamTypingEnabled: Bool,
              behavior: HotkeyMode, action: Hotkey, actionsEnabled: Bool,
-             backgroundActions: Bool) {
+             backgroundActions: Bool,
+             dictateAndSend: Hotkey = .controlShiftReturn,
+             dictateAndSendEnabled: Bool = true) {
             self.dictation = dictation
             self.editSelection = editSelection
             self.voiceEdit = voiceEdit
@@ -336,6 +349,8 @@ extension SettingsDocument {
             self.action = action
             self.actionsEnabled = actionsEnabled
             self.backgroundActions = backgroundActions
+            self.dictateAndSend = dictateAndSend
+            self.dictateAndSendEnabled = dictateAndSendEnabled
         }
 
         init(from decoder: Decoder) throws {
@@ -364,6 +379,13 @@ extension SettingsDocument {
                     excluding: [dictation, editSelection, streamTyping, action])
             proofreadEnabled = try container.decodeIfPresent(
                 Bool.self, forKey: .proofreadEnabled) ?? true
+            dictateAndSend = try container.decodeIfPresent(
+                Hotkey.self, forKey: .dictateAndSend)
+                ?? Shortcuts.defaultDictateAndSendHotkey(
+                    excluding: [dictation, editSelection, proofreadSelection,
+                                streamTyping, action])
+            dictateAndSendEnabled = try container.decodeIfPresent(
+                Bool.self, forKey: .dictateAndSendEnabled) ?? true
         }
 
         static let defaultActionHotkey = Hotkey.controlShiftA
@@ -371,7 +393,8 @@ extension SettingsDocument {
         /// Restore only dictation preferences. A reserved default must not
         /// silently displace another feature or leave a partially reset UI.
         func restoringDictationDefaults() -> Shortcuts? {
-            guard ![editSelection, proofreadSelection, streamTyping, action].contains(.rightOption) else {
+            guard ![editSelection, proofreadSelection, streamTyping, action, dictateAndSend]
+                .contains(.rightOption) else {
                 return nil
             }
             var restored = self
@@ -380,6 +403,12 @@ extension SettingsDocument {
             restored.secondDictation = .f19
             restored.behavior = .hold
             return restored
+        }
+
+        static func defaultDictateAndSendHotkey(excluding used: [Hotkey]) -> Hotkey {
+            [Hotkey.controlShiftReturn, .f19, .fnGlobe, .optionShiftA,
+             .controlShiftG, .controlShiftS, .controlShiftA, .optionShiftE]
+                .first { !used.contains($0) } ?? .controlShiftReturn
         }
 
         static func defaultProofreadHotkey(excluding used: [Hotkey]) -> Hotkey {
@@ -616,6 +645,12 @@ enum SettingsDocumentCodec {
               }) else {
             throw SettingsDocumentError.invalidValue("typing fallback apps")
         }
+        guard value.dictation.autoSendBlockedApps.count <= 256,
+              value.dictation.autoSendBlockedApps.allSatisfy({
+                  isPrintableNonempty($0, maximumLength: 512)
+              }) else {
+            throw SettingsDocumentError.invalidValue("auto-send blocked apps")
+        }
 
         guard isPrintableNonempty(value.models.speech, maximumLength: 512) else {
             throw SettingsDocumentError.invalidValue("speech model")
@@ -650,7 +685,8 @@ enum SettingsDocumentCodec {
               value.shortcuts.editSelection.isValidSettingsHotkey,
               value.shortcuts.proofreadSelection.isValidSettingsHotkey,
               value.shortcuts.streamTyping.isValidSettingsHotkey,
-              value.shortcuts.action.isValidSettingsHotkey else {
+              value.shortcuts.action.isValidSettingsHotkey,
+              value.shortcuts.dictateAndSend.isValidSettingsHotkey else {
             throw SettingsDocumentError.invalidValue("keyboard shortcuts")
         }
         // Every binding must differ. The monitor resolves a collision by
@@ -658,7 +694,8 @@ enum SettingsDocumentCodec {
         // ever see — it is a shortcut that silently does something else.
         var bindings = [value.shortcuts.dictation, value.shortcuts.editSelection,
                         value.shortcuts.proofreadSelection,
-                        value.shortcuts.streamTyping, value.shortcuts.action]
+                        value.shortcuts.streamTyping, value.shortcuts.action,
+                        value.shortcuts.dictateAndSend]
         if value.shortcuts.secondDictationEnabled {
             guard value.shortcuts.secondDictation.isValidSettingsHotkey else {
                 throw SettingsDocumentError.invalidValue("second dictation shortcut")
@@ -676,6 +713,25 @@ enum SettingsDocumentCodec {
             && value.unicodeScalars.allSatisfy {
                 !CharacterSet.controlCharacters.contains($0)
             }
+    }
+}
+
+/// Key synthesized right after pasting when Dictate & Send completes.
+enum AutoSendKey: String, Codable, CaseIterable, Identifiable {
+    case returnKey = "return"
+    case commandReturn = "command_return"
+    var id: Self { self }
+    var title: String {
+        switch self {
+        case .returnKey: return "↩ Return"
+        case .commandReturn: return "⌘↩ Cmd+Return"
+        }
+    }
+    var cgFlags: CGEventFlags {
+        switch self {
+        case .returnKey: return []
+        case .commandReturn: return .maskCommand
+        }
     }
 }
 

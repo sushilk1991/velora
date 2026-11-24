@@ -576,6 +576,9 @@ final class AppConfig {
         let migratedProofread = SettingsDocument.Shortcuts.defaultProofreadHotkey(
             excluding: [storedHotkey, storedEditHotkey,
                         migratedStream, migratedAction])
+        let migratedDictateAndSend = SettingsDocument.Shortcuts.defaultDictateAndSendHotkey(
+            excluding: [storedHotkey, storedEditHotkey,
+                        migratedStream, migratedProofread, migratedAction])
         document.settings.shortcuts = .init(
             dictation: storedHotkey,
             editSelection: storedEditHotkey,
@@ -588,7 +591,9 @@ final class AppConfig {
                 rawValue: defaults.string(forKey: Key.hotkeyMode) ?? "") ?? .hold,
             action: migratedAction,
             actionsEnabled: true,
-            backgroundActions: true)
+            backgroundActions: true,
+            dictateAndSend: migratedDictateAndSend,
+            dictateAndSendEnabled: true)
         document.settings.updates = .init(
             checkAutomatically: defaults.bool(forKey: Key.updateChecks),
             installAutomatically: defaults.bool(forKey: Key.autoInstallUpdates))
@@ -945,6 +950,39 @@ final class AppConfig {
 
     var activeActionHotkey: Hotkey? { actionsEnabled ? actionHotkey : nil }
 
+    /// Dictate & Send: hold to see live words, release to paste and press Return.
+    var dictateAndSendHotkey: Hotkey {
+        get { readSetting(\.shortcuts.dictateAndSend) }
+        set { updateSettings { $0.shortcuts.dictateAndSend = newValue } }
+    }
+
+    var dictateAndSendEnabled: Bool {
+        get { readSetting(\.shortcuts.dictateAndSendEnabled) }
+        set { updateSettings { $0.shortcuts.dictateAndSendEnabled = newValue } }
+    }
+
+    var activeDictateAndSendHotkey: Hotkey? {
+        dictateAndSendEnabled ? dictateAndSendHotkey : nil
+    }
+
+    var autoSendKey: AutoSendKey {
+        get { readSetting(\.dictation.autoSendKey) }
+        set { updateSettings { $0.dictation.autoSendKey = newValue } }
+    }
+
+    var autoSendBlockedApps: [String] {
+        get { readSetting(\.dictation.autoSendBlockedApps) }
+        set { updateSettings { $0.dictation.autoSendBlockedApps = newValue } }
+    }
+
+    /// Email clients where pressing Return/Cmd+Return automatically could send
+    /// an unreviewed email. Dictate & Send still pastes a draft safely here.
+    static let defaultAutoSendBlockedApps = [
+        "com.apple.mail",
+        "com.microsoft.Outlook",
+        "com.superhuman.Electron",
+    ]
+
     /// Every non-dictation hotkey the monitor should watch, by role.
     ///
     /// A role whose binding collides with dictation or with an earlier role is
@@ -968,6 +1006,10 @@ final class AppConfig {
            action != table[.edit], action != table[.proofread],
            action != table[.stream] {
             table[.action] = action
+        }
+        if let send = activeDictateAndSendHotkey, send != dictation,
+           !table.values.contains(send) {
+            table[.dictateAndSend] = send
         }
         if secondDictationEnabled, secondDictationHotkey != dictation,
            !table.values.contains(secondDictationHotkey) {

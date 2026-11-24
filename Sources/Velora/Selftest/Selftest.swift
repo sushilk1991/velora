@@ -30,6 +30,8 @@ final class HotkeySelftestDelegate: HotkeyMonitorDelegate {
     var streamHotkeyUpCount = 0
     var actionHotkeyDownCount = 0
     var actionHotkeyUpCount = 0
+    var dictateAndSendDownCount = 0
+    var dictateAndSendUpCount = 0
     var escapeCount = 0
     var nonHotkeyInputCount = 0
 
@@ -42,6 +44,7 @@ final class HotkeySelftestDelegate: HotkeyMonitorDelegate {
         case .proofread: proofreadHotkeyDownCount += 1
         case .stream: streamHotkeyDownCount += 1
         case .action: actionHotkeyDownCount += 1
+        case .dictateAndSend: dictateAndSendDownCount += 1
         case .alternateDictation: hotkeyDownCount += 1
         }
     }
@@ -52,6 +55,7 @@ final class HotkeySelftestDelegate: HotkeyMonitorDelegate {
         case .proofread: proofreadHotkeyUpCount += 1
         case .stream: streamHotkeyUpCount += 1
         case .action: actionHotkeyUpCount += 1
+        case .dictateAndSend: dictateAndSendUpCount += 1
         case .alternateDictation: hotkeyUpCount += 1
         }
     }
@@ -299,6 +303,7 @@ enum Selftest {
             testLiveMeetingCapture()
         }
         testDictationDeliveryPreferences()
+        testDictateAndSendAndLiveCard()
         testModeRecipes()
         testMeetingReviewFeatures()
         testMeetingFineSubtitles()
@@ -18292,6 +18297,157 @@ private final class RecordingOutputVolume: OutputVolumeControlling {
         blocked.stageFinalOutput("recoverable", restoringPreviousClipboard: true)
         expect(!blocked.insertViaPasteboard("recoverable"), "blocked delivery posts nothing")
         expect(board.string(forType: .string) == "recoverable", "blocked paste retains the recoverable result")
+    }
+
+    private static func testDictateAndSendAndLiveCard() {
+        // 1. Default shortcut validity and HotkeyMonitor dispatch
+        expect(Hotkey.controlShiftReturn.isValidSettingsHotkey,
+               "default Dictate & Send shortcut is valid")
+        expect(Hotkey.controlShiftReturn.displayLabel == "⌃⇧↩",
+               "default Dictate & Send shortcut renders as ⌃⇧↩")
+        expect(SecondaryHotkeyRole.allCases.contains(.dictateAndSend),
+               "SecondaryHotkeyRole exposes dictateAndSend")
+
+        let monitor = HotkeyMonitor()
+        let delegate = HotkeySelftestDelegate()
+        monitor.delegate = delegate
+        monitor.hotkey = .rightOption
+        monitor.secondaryHotkeys = [.dictateAndSend: .controlShiftReturn]
+        let ctrlShift = CGEventFlags.maskControl.rawValue | CGEventFlags.maskShift.rawValue
+        expect(monitor.handleKeyDown(keyCode: 36, flags: ctrlShift, isRepeat: false),
+               "Dictate & Send chord is matched and suppressed by filtering tap")
+        expect(monitor.handleKeyUp(keyCode: 36),
+               "Dictate & Send keyUp is matched cleanly")
+        RunLoop.main.run(until: Date().addingTimeInterval(0.05))
+        expect(delegate.dictateAndSendDownCount == 1 && delegate.dictateAndSendUpCount == 1,
+               "Dictate & Send dispatches down and up edges to delegate")
+
+        // 2. AutoSendPolicy safety gates
+        let blockedApps = AppConfig.defaultAutoSendBlockedApps
+        expect(
+            AutoSendPolicy.decide(
+                requested: true, deliveryMode: .pasteAndKeep,
+                targetBundleID: "com.apple.MobileSMS", targetAppName: "Messages",
+                blockedApps: blockedApps, sendKey: .returnKey,
+                allowAutomaticInsertion: true, isVoiceCommand: false, textIsEmpty: false
+            ) == .send(.returnKey),
+            "Dictate & Send fires Return in chat apps")
+        expect(
+            AutoSendPolicy.decide(
+                requested: true, deliveryMode: .pasteAndKeep,
+                targetBundleID: "com.apple.MobileSMS", targetAppName: "Messages",
+                blockedApps: blockedApps, sendKey: .commandReturn,
+                allowAutomaticInsertion: true, isVoiceCommand: false, textIsEmpty: false
+            ) == .send(.commandReturn),
+            "Dictate & Send respects Cmd+Return send key preference")
+        expect(
+            AutoSendPolicy.decide(
+                requested: true, deliveryMode: .pasteAndKeep,
+                targetBundleID: "COM.APPLE.MAIL", targetAppName: "Mail",
+                blockedApps: blockedApps, sendKey: .returnKey,
+                allowAutomaticInsertion: true, isVoiceCommand: false, textIsEmpty: false
+            ) == .blockedByApp("Mail"),
+            "Mail is guarded against accidental auto-send regardless of bundle-id case")
+        expect(
+            AutoSendPolicy.decide(
+                requested: true, deliveryMode: .copyOnly,
+                targetBundleID: "com.apple.MobileSMS", targetAppName: "Messages",
+                blockedApps: blockedApps, sendKey: .returnKey,
+                allowAutomaticInsertion: true, isVoiceCommand: false, textIsEmpty: false
+            ) == .skipped,
+            "copy-only delivery never triggers auto-send")
+        expect(
+            AutoSendPolicy.decide(
+                requested: true, deliveryMode: .pasteAndKeep,
+                targetBundleID: "com.apple.MobileSMS", targetAppName: "Messages",
+                blockedApps: blockedApps, sendKey: .returnKey,
+                allowAutomaticInsertion: false, isVoiceCommand: false, textIsEmpty: false
+            ) == .skipped,
+            "late finals never trigger auto-send")
+        expect(
+            AutoSendPolicy.decide(
+                requested: true, deliveryMode: .pasteAndKeep,
+                targetBundleID: "com.apple.MobileSMS", targetAppName: "Messages",
+                blockedApps: blockedApps, sendKey: .returnKey,
+                allowAutomaticInsertion: true, isVoiceCommand: true, textIsEmpty: false
+            ) == .skipped,
+            "voice commands never trigger auto-send")
+        expect(
+            AutoSendPolicy.decide(
+                requested: false, deliveryMode: .pasteAndKeep,
+                targetBundleID: "com.apple.MobileSMS", targetAppName: "Messages",
+                blockedApps: blockedApps, sendKey: .returnKey,
+                allowAutomaticInsertion: true, isVoiceCommand: false, textIsEmpty: false
+            ) == .skipped,
+            "ordinary dictation never triggers auto-send")
+        expect(
+            AutoSendPolicy.settleDelay(
+                targetBundleID: "com.mitchellh.ghostty",
+                typingFallbackApps: AppConfig.defaultTypingFallbackApps
+            ) < AutoSendPolicy.settleDelay(
+                targetBundleID: "com.tinyspeck.slackmacgap",
+                typingFallbackApps: AppConfig.defaultTypingFallbackApps
+            ),
+            "paste targets wait longer than synchronous typing-fallback terminals before Return")
+
+        // 3. Live Transcript Card HUD geometry & cache keys
+        let liveContext = HUDSessionContext(
+            appIcon: nil, modeName: "Chat", livePreview: true, autoSend: true)
+        let metrics = HUDView.capsuleMetrics(for: .listening, context: liveContext)
+        expect(
+            metrics.size == CGSize(
+                width: HUDGeometry.maxListeningWidth,
+                height: HUDGeometry.liveCardHeight),
+            "Live Transcript Card uses 420x104 card geometry inside the HUD panel")
+        expect(
+            liveContext != HUDSessionContext(
+                appIcon: nil, modeName: "Chat", livePreview: true, autoSend: false),
+            "autoSend state participates in HUDSessionContext equality")
+        expect(
+            liveContext != HUDSessionContext(
+                appIcon: nil, modeName: "Chat", livePreview: true,
+                autoSend: true, autoSendGuarded: true),
+            "autoSendGuarded state participates in HUDSessionContext equality")
+
+        // 4. SettingsDocument encoding, legacy upgrade decoding, and collision validation
+        var document = SettingsDocument.defaults
+        document.settings.dictation.autoSendKey = .commandReturn
+        document.settings.shortcuts.dictateAndSend = .f19
+        do {
+            let encoded = try SettingsDocumentCodec.encode(document)
+            let decoded = try SettingsDocumentCodec.decode(encoded)
+            expect(decoded == document, "Dictate & Send settings round-trip cleanly")
+
+            var json = try JSONSerialization.jsonObject(with: encoded) as! [String: Any]
+            var settings = json["settings"] as! [String: Any]
+            var shortcuts = settings["shortcuts"] as! [String: Any]
+            var dictation = settings["dictation"] as! [String: Any]
+            shortcuts.removeValue(forKey: "dictate_and_send")
+            shortcuts.removeValue(forKey: "dictate_and_send_enabled")
+            dictation.removeValue(forKey: "auto_send_key")
+            dictation.removeValue(forKey: "auto_send_blocked_apps")
+            settings["shortcuts"] = shortcuts
+            settings["dictation"] = dictation
+            json["settings"] = settings
+            let legacy = try SettingsDocumentCodec.decode(
+                JSONSerialization.data(withJSONObject: json))
+            expect(
+                legacy.settings.shortcuts.dictateAndSend == .controlShiftReturn
+                    && legacy.settings.shortcuts.dictateAndSendEnabled
+                    && legacy.settings.dictation.autoSendKey == .returnKey
+                    && legacy.settings.dictation.autoSendBlockedApps == AppConfig.defaultAutoSendBlockedApps,
+                "legacy settings files upgrade cleanly with default Dictate & Send config")
+        } catch {
+            expect(false, "Dictate & Send settings round-trip failed: \(error)")
+        }
+
+        document.settings.shortcuts.dictateAndSend = document.settings.shortcuts.dictation
+        do {
+            try SettingsDocumentCodec.validate(document)
+            expect(false, "Dictate & Send shortcut rejects collision with primary dictation")
+        } catch {
+            expect(true, "Dictate & Send shortcut collision rejected")
+        }
     }
 
     // Register testModeRecipes() beside the existing Modes suites.

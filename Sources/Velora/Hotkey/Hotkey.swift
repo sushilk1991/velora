@@ -89,6 +89,11 @@ extension Hotkey {
         keyCode: 5,
         modifiers: CGEventFlags.maskControl.rawValue | CGEventFlags.maskShift.rawValue,
         isModifierOnly: false)
+    /// Default Dictate & Send hotkey: ⌃⇧↩ (hold, see live words, release to paste and send).
+    static let controlShiftReturn = Hotkey(
+        keyCode: 36,
+        modifiers: CGEventFlags.maskControl.rawValue | CGEventFlags.maskShift.rawValue,
+        isModifierOnly: false)
     /// Kept for the tests that exercise the collision this default avoids.
     static let optionShiftA = Hotkey(
         keyCode: 0,

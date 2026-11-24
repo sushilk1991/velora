@@ -464,6 +464,9 @@ final class SettingsModel: ObservableObject {
         proofreadEnabled = config.proofreadEnabled
         streamTypingHotkey = config.streamTypingHotkey
         streamTypingEnabled = config.streamTypingEnabled
+        dictateAndSendHotkey = config.dictateAndSendHotkey
+        dictateAndSendEnabled = config.dictateAndSendEnabled
+        autoSendKey = config.autoSendKey
         actionHotkey = config.actionHotkey
         actionsEnabled = config.actionsEnabled
         backgroundActions = config.backgroundActions
@@ -668,6 +671,9 @@ final class SettingsModel: ObservableObject {
         proofreadEnabled = imported.shortcuts.proofreadEnabled
         streamTypingHotkey = imported.shortcuts.streamTyping
         streamTypingEnabled = imported.shortcuts.streamTypingEnabled
+        dictateAndSendHotkey = imported.shortcuts.dictateAndSend
+        dictateAndSendEnabled = imported.shortcuts.dictateAndSendEnabled
+        autoSendKey = imported.dictation.autoSendKey
         actionHotkey = imported.shortcuts.action
         actionsEnabled = imported.shortcuts.actionsEnabled
         backgroundActions = imported.shortcuts.backgroundActions
@@ -905,7 +911,7 @@ final class SettingsModel: ObservableObject {
         }
     }
     var secondDictationConflict: Bool {
-        secondDictationEnabled && ([hotkey, editHotkey, proofreadHotkey, streamTypingHotkey, actionHotkey]
+        secondDictationEnabled && ([hotkey, editHotkey, proofreadHotkey, streamTypingHotkey, actionHotkey, dictateAndSendHotkey]
             .contains(secondDictationHotkey))
     }
 
@@ -1324,10 +1330,16 @@ final class SettingsModel: ObservableObject {
                 hotkey = oldValue
                 return
             }
+            guard hotkey != dictateAndSendHotkey else {
+                dictateAndSendHotkeyConflict = true
+                hotkey = oldValue
+                return
+            }
             editHotkeyConflict = false
             proofreadHotkeyConflict = false
             actionHotkeyConflict = false
             streamTypingHotkeyConflict = false
+            dictateAndSendHotkeyConflict = false
             config.hotkey = hotkey
             NotificationCenter.default.post(name: .veloraHotkeyChanged, object: nil)
         }
@@ -1343,7 +1355,8 @@ final class SettingsModel: ObservableObject {
             // the table would silently win.
             guard editHotkey != hotkey, editHotkey != proofreadHotkey,
                   editHotkey != actionHotkey,
-                  editHotkey != streamTypingHotkey else {
+                  editHotkey != streamTypingHotkey,
+                  editHotkey != dictateAndSendHotkey else {
                 editHotkeyConflict = true
                 editHotkey = oldValue
                 return
@@ -1359,7 +1372,8 @@ final class SettingsModel: ObservableObject {
             guard !applyingImportedSettings, proofreadHotkey != oldValue else { return }
             guard proofreadHotkey != hotkey, proofreadHotkey != editHotkey,
                   proofreadHotkey != streamTypingHotkey,
-                  proofreadHotkey != actionHotkey else {
+                  proofreadHotkey != actionHotkey,
+                  proofreadHotkey != dictateAndSendHotkey else {
                 proofreadHotkeyConflict = true
                 proofreadHotkey = oldValue
                 return
@@ -1384,7 +1398,8 @@ final class SettingsModel: ObservableObject {
             guard streamTypingHotkey != hotkey,
                   streamTypingHotkey != editHotkey,
                   streamTypingHotkey != proofreadHotkey,
-                  streamTypingHotkey != actionHotkey else {
+                  streamTypingHotkey != actionHotkey,
+                  streamTypingHotkey != dictateAndSendHotkey else {
                 streamTypingHotkeyConflict = true
                 streamTypingHotkey = oldValue
                 return
@@ -1403,12 +1418,46 @@ final class SettingsModel: ObservableObject {
         }
     }
 
+    @Published var dictateAndSendHotkey: Hotkey {
+        didSet {
+            guard !applyingImportedSettings, dictateAndSendHotkey != oldValue else { return }
+            guard dictateAndSendHotkey != hotkey,
+                  dictateAndSendHotkey != editHotkey,
+                  dictateAndSendHotkey != proofreadHotkey,
+                  dictateAndSendHotkey != streamTypingHotkey,
+                  dictateAndSendHotkey != actionHotkey else {
+                dictateAndSendHotkeyConflict = true
+                dictateAndSendHotkey = oldValue
+                return
+            }
+            dictateAndSendHotkeyConflict = false
+            config.dictateAndSendHotkey = dictateAndSendHotkey
+            NotificationCenter.default.post(name: .veloraHotkeyChanged, object: nil)
+        }
+    }
+
+    @Published var dictateAndSendEnabled: Bool {
+        didSet {
+            guard !applyingImportedSettings, dictateAndSendEnabled != oldValue else { return }
+            config.dictateAndSendEnabled = dictateAndSendEnabled
+            NotificationCenter.default.post(name: .veloraHotkeyChanged, object: nil)
+        }
+    }
+
+    @Published var autoSendKey: AutoSendKey {
+        didSet {
+            guard !applyingImportedSettings, autoSendKey != oldValue else { return }
+            config.autoSendKey = autoSendKey
+        }
+    }
+
     @Published var actionHotkey: Hotkey {
         didSet {
             guard !applyingImportedSettings, actionHotkey != oldValue else { return }
             guard actionHotkey != hotkey, actionHotkey != editHotkey,
                   actionHotkey != proofreadHotkey,
-                  actionHotkey != streamTypingHotkey else {
+                  actionHotkey != streamTypingHotkey,
+                  actionHotkey != dictateAndSendHotkey else {
                 actionHotkeyConflict = true
                 actionHotkey = oldValue
                 return
@@ -1438,6 +1487,7 @@ final class SettingsModel: ObservableObject {
     @Published var editHotkeyConflict = false
     @Published var proofreadHotkeyConflict = false
     @Published var streamTypingHotkeyConflict = false
+    @Published var dictateAndSendHotkeyConflict = false
     @Published var actionHotkeyConflict = false
 
     @Published var voiceEdit: Bool {

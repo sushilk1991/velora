@@ -205,6 +205,19 @@ struct GeneralSettingsView: View {
                 )
             }
             GroupDivider()
+            GroupRow(
+                label: L10n.text("Recording view"),
+                sub: L10n.text("Live Card shows your current line while speaking. Dictate & Send always uses the Live Card.")
+            ) {
+                Picker(L10n.text("Recording view"), selection: $model.showLiveWords) {
+                    Text(L10n.text("Compact Pill")).tag(false)
+                    Text(L10n.text("Live Card")).tag(true)
+                }
+                .labelsHidden()
+                .pickerStyle(.segmented)
+                .fixedSize()
+            }
+            GroupDivider()
             SettingsDisclosureRow(title: "Preview the pill") {
                 HUDPreviewView(model: model)
             }
@@ -1375,6 +1388,7 @@ struct ShortcutsSettingsView: View {
         SettingsScrollCanvas {
             dictationHeroCard
             SettingsColumnPair {
+                dictateAndSendCard
                 streamTypingCard
                 proofreadCard
             } right: {
@@ -1436,6 +1450,55 @@ struct ShortcutsSettingsView: View {
     }
 
     // MARK: Voice mode cards (same monochrome symbol idiom as Home › Ways to talk)
+
+    private var dictateAndSendCard: some View {
+        GroupCard(
+            footer: "Mail, Outlook, and Superhuman paste as a draft without auto-sending. If focus moves, Velora copies instead."
+        ) {
+            HStack(alignment: .center, spacing: VeloraSpacing.m) {
+                Image(systemName: "paperplane.fill")
+                    .font(.system(size: 15, weight: .medium))
+                    .foregroundStyle(model.dictateAndSendEnabled ? AnyShapeStyle(VeloraBrand.accent) : AnyShapeStyle(.secondary))
+                    .frame(width: 22)
+                    .accessibilityHidden(true)
+                VStack(alignment: .leading, spacing: 2) {
+                    Text(L10n.text("Dictate & Send"))
+                        .font(.system(size: 13, weight: .medium))
+                    Text(L10n.text("Hold to see your words live, then release to paste and press Return. Esc cancels."))
+                        .font(.system(size: 11))
+                        .foregroundStyle(.secondary)
+                        .fixedSize(horizontal: false, vertical: true)
+                }
+                Spacer(minLength: VeloraSpacing.s)
+                Toggle(L10n.text("Dictate & Send"), isOn: $model.dictateAndSendEnabled)
+                    .labelsHidden()
+                    .toggleStyle(.switch)
+                    .controlSize(.small)
+            }
+            .padding(.horizontal, 14)
+            .padding(.vertical, VeloraSpacing.m)
+            GroupDivider()
+            Group {
+                shortcutCardRow(for: "Dictate & Send", hotkey: $model.dictateAndSendHotkey)
+                if model.dictateAndSendHotkeyConflict {
+                    conflictLabel("Dictate & Send needs a shortcut of its own.")
+                }
+                GroupDivider()
+                GroupRow(label: L10n.text("Send key")) {
+                    Picker(L10n.text("Send key"), selection: $model.autoSendKey) {
+                        ForEach(AutoSendKey.allCases) { key in
+                            Text(L10n.text(key.title)).tag(key)
+                        }
+                    }
+                    .labelsHidden()
+                    .pickerStyle(.segmented)
+                    .fixedSize()
+                }
+            }
+            .disabled(!model.dictateAndSendEnabled)
+            .opacity(model.dictateAndSendEnabled ? 1 : 0.5)
+        }
+    }
 
     private var streamTypingCard: some View {
         modeCard(

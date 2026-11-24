@@ -229,6 +229,10 @@ struct HomeView: View {
     private var waysToTalk: some View {
         GroupCard(header: "Ways to talk") {
             wayRow(
+                symbol: "paperplane.fill", title: "Dictate & Send", sub: "See live words, send on release.",
+                hotkey: model.dictateAndSendHotkey, enabled: $model.dictateAndSendEnabled)
+            GroupDivider()
+            wayRow(
                 symbol: "text.cursor", title: "Stream Typing", sub: "Words land as you speak.",
                 hotkey: model.streamTypingHotkey, enabled: $model.streamTypingEnabled)
             GroupDivider()

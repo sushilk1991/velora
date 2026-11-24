@@ -57,7 +57,7 @@ struct HUDView: View {
                 return (
                     CGSize(
                         width: HUDGeometry.maxListeningWidth,
-                        height: HUDGeometry.height),
+                        height: HUDGeometry.liveCardHeight),
                     true)
             }
             let width = min(
@@ -189,10 +189,18 @@ struct HUDView: View {
         HUDGeometry.surface.fill(Color.white.opacity(hovering ? 0.07 : 0))
     }
 
+    private var isAutoSendArmed: Bool {
+        model.sessionContext?.autoSend == true
+            && model.sessionContext?.autoSendGuarded != true
+            && (model.state == .listening || model.state == .transcribing)
+    }
+
     private var border: some View {
         HUDGeometry.surface.strokeBorder(
-            Color.white.opacity(hovering ? 0.34 : 0.20),
-            lineWidth: 1)
+            isAutoSendArmed
+                ? VeloraBrand.sky.color.opacity(0.68)
+                : Color.white.opacity(hovering ? 0.34 : 0.20),
+            lineWidth: isAutoSendArmed ? 1.5 : 1)
     }
 
     /// A restrained four-second rotation while listening. The timeline pauses
@@ -201,7 +209,7 @@ struct HUDView: View {
         TimelineView(.animation(minimumInterval: 1.0 / 30.0, paused: !isListening)) { timeline in
             let time = timeline.date.timeIntervalSinceReferenceDate
             let angle = Angle.degrees(time.truncatingRemainder(dividingBy: 4) / 4 * 360)
-            Capsule().strokeBorder(
+            HUDGeometry.surface.strokeBorder(
                 AngularGradient(
                     gradient: Gradient(colors: [
                         VeloraBrand.skyDeep.color,
@@ -212,7 +220,7 @@ struct HUDView: View {
                     angle: angle),
                 lineWidth: 1.5)
         }
-        .opacity(isListening ? 0.25 : 0)
+        .opacity(isListening ? (isAutoSendArmed ? 0.42 : 0.25) : 0)
         .animation(VeloraMotion.standard, value: isListening)
     }
 
@@ -277,29 +285,98 @@ struct HUDView: View {
                 .foregroundStyle(hudPrimaryText)
                 .lineLimit(1)
         }
-        .frame(width: desiredListeningWidth, height: HUDGeometry.height)
+        .frame(width: desiredListeningSize.width, height: desiredListeningSize.height)
     }
 
     private var livePreviewContent: some View {
-        HStack(spacing: VeloraSpacing.s) {
-            Image(systemName: "waveform")
-                .font(.system(size: 13, weight: .semibold))
-                .foregroundStyle(VeloraBrand.iconGradient)
-                .frame(width: 18)
-            Text(model.liveTranscript.isEmpty ? L10n.text("Listening…") : model.liveTranscript)
-                .font(.system(size: 12, weight: .medium))
-                .foregroundStyle(
-                    model.liveTranscript.isEmpty
-                        ? hudSecondaryText : hudPrimaryText)
-                .lineLimit(2)
-                .truncationMode(.head)
-                .frame(maxWidth: .infinity, alignment: .leading)
-            timerText
+        let context = model.sessionContext
+        let autoSend = context?.autoSend == true
+        let autoSendGuarded = context?.autoSendGuarded == true
+        return VStack(alignment: .leading, spacing: 0) {
+            HStack(alignment: .top, spacing: VeloraSpacing.s) {
+                Text(model.liveTranscript.isEmpty ? L10n.text("Listening…") : model.liveTranscript)
+                    .font(.system(size: 13, weight: .medium))
+                    .foregroundStyle(
+                        model.liveTranscript.isEmpty
+                            ? hudSecondaryText : hudPrimaryText)
+                    .lineLimit(3)
+                    .truncationMode(.head)
+                    .frame(maxWidth: .infinity, alignment: .topLeading)
+                InlineLiveWaveform(levels: model.levels, active: isListening)
+                    .padding(.top, 2)
+            }
+            .padding(.horizontal, HUDGeometry.contentInsetH)
+            .padding(.top, 12)
+            .padding(.bottom, 8)
+            .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
+
+            Rectangle()
+                .fill(Color.white.opacity(0.10))
+                .frame(height: 1)
+
+            HStack(spacing: VeloraSpacing.s) {
+                liveCardDot(armed: autoSend && !autoSendGuarded)
+                contextChip
+                    .help(model.routeStatus)
+                    .frame(maxWidth: 130, alignment: .leading)
+                timerText
+                    .opacity(isListening ? 1 : 0)
+                Spacer(minLength: 0)
+                if autoSend && !autoSendGuarded {
+                    Text(L10n.text(model.state == .transcribing ? "Sending ↵…" : "Release to Send ↵"))
+                        .font(.system(size: 10.5, weight: .semibold))
+                        .foregroundStyle(VeloraBrand.skyLink.color)
+                        .padding(.horizontal, 8)
+                        .padding(.vertical, 3)
+                        .background(
+                            Capsule().fill(VeloraBrand.sky.color.opacity(0.18))
+                        )
+                        .overlay(
+                            Capsule().strokeBorder(VeloraBrand.sky.color.opacity(0.42), lineWidth: 1)
+                        )
+                } else if autoSend && autoSendGuarded {
+                    Text(L10n.text("Paste only"))
+                        .font(.system(size: 10.5, weight: .semibold))
+                        .foregroundStyle(VeloraStatus.warning)
+                        .padding(.horizontal, 8)
+                        .padding(.vertical, 3)
+                        .background(
+                            Capsule().fill(VeloraStatus.warning.opacity(0.16))
+                        )
+                }
+                Text(L10n.text("esc"))
+                    .font(.system(size: 9.5, weight: .semibold, design: .rounded))
+                    .foregroundStyle(hudSecondaryText)
+                    .padding(.horizontal, 5)
+                    .padding(.vertical, 2)
+                    .background(
+                        RoundedRectangle(cornerRadius: 4, style: .continuous)
+                            .fill(Color.white.opacity(0.10))
+                    )
+                    .overlay(
+                        RoundedRectangle(cornerRadius: 4, style: .continuous)
+                            .strokeBorder(Color.white.opacity(0.16), lineWidth: 1)
+                    )
+            }
+            .padding(.horizontal, HUDGeometry.contentInsetH)
+            .frame(height: 32)
+            .background(Color.white.opacity(0.025))
         }
-        .padding(.horizontal, HUDGeometry.contentInsetH)
         .frame(
             width: HUDGeometry.maxListeningWidth,
-            height: HUDGeometry.height)
+            height: HUDGeometry.liveCardHeight)
+    }
+
+    private func liveCardDot(armed: Bool) -> some View {
+        TimelineView(.animation(minimumInterval: 1.0 / 30.0, paused: !isListening)) { timeline in
+            let phase = timeline.date.timeIntervalSinceReferenceDate
+                .truncatingRemainder(dividingBy: 2) / 2
+            let dotOpacity = 0.55 + 0.45 * (0.5 + 0.5 * cos(phase * 2 * .pi))
+            Circle()
+                .fill(armed ? VeloraBrand.sky.color : Color(nsColor: .systemRed))
+                .opacity(isListening ? dotOpacity : 0)
+        }
+        .frame(width: 7, height: 7)
     }
 
     private var recordingControls: some View {
@@ -1068,8 +1145,12 @@ struct HUDView: View {
             VeloraBrand.apricot, VeloraBrand.RGB(r: 1, g: 1, b: 1), learnedContrastLift)
     }
 
+    private var desiredListeningSize: CGSize {
+        Self.capsuleMetrics(for: .listening, context: model.sessionContext).size
+    }
+
     private var desiredListeningWidth: CGFloat {
-        Self.capsuleMetrics(for: .listening, context: model.sessionContext).size.width
+        desiredListeningSize.width
     }
 
     // MARK: - Transitions
@@ -1097,14 +1178,15 @@ struct HUDView: View {
             }
 
         case .listening:
+            let size = desiredListeningSize
             if old == .standby {
-                // The pill blooms into the listening capsule in place.
+                // The pill blooms into the listening capsule/card in place.
                 withAnimation(VeloraMotion.spring) {
-                    width = desiredListeningWidth
-                    height = HUDGeometry.height
+                    width = size.width
+                    height = size.height
                 }
             } else {
-                resetInstant(width: desiredListeningWidth, height: HUDGeometry.height)
+                resetInstant(width: size.width, height: size.height)
                 withAnimation(VeloraMotion.spring) {
                     opacity = 1
                     scale = 1
@@ -1119,7 +1201,8 @@ struct HUDView: View {
             // live session, e.g. by a stale toast dismissal) must restore the
             // session capsule rather than stay invisible.
             if old != .listening && old != .transcribing {
-                resetInstant(width: desiredListeningWidth, height: HUDGeometry.height)
+                let size = desiredListeningSize
+                resetInstant(width: size.width, height: size.height)
                 withAnimation(VeloraMotion.spring) {
                     opacity = 1
                     scale = 1
@@ -1166,7 +1249,8 @@ struct HUDView: View {
             // non-session state, the capsule must become visible again
             // before it shrinks into the checkmark circle.
             if old != .listening && old != .transcribing {
-                resetInstant(width: desiredListeningWidth, height: HUDGeometry.height)
+                let size = desiredListeningSize
+                resetInstant(width: size.width, height: size.height)
                 withAnimation(VeloraMotion.spring) {
                     opacity = 1
                     scale = 1
@@ -1306,5 +1390,33 @@ struct HUDView: View {
             showCheck = false
             flashGreen = false
         }
+    }
+}
+
+/// Compact 4-bar Sky-tinted live waveform shown in the Live Transcript Card
+/// beside the streaming words. Polls `WaveformLevelStore` at 30 fps only while
+/// actively listening so idle/transcribing frames cost nothing.
+private struct InlineLiveWaveform: View {
+    let levels: WaveformLevelStore
+    let active: Bool
+
+    var body: some View {
+        TimelineView(.animation(minimumInterval: 1.0 / 30.0, paused: !active)) { timeline in
+            let heights = levels.displayHeights(
+                settle: !active,
+                time: timeline.date.timeIntervalSinceReferenceDate)
+            let samples = [heights[0], heights[2], heights[4], heights[6]]
+            HStack(alignment: .center, spacing: 2.5) {
+                ForEach(Array(samples.enumerated()), id: \.offset) { idx, raw in
+                    let normalized = min(1, max(0, (raw - 4) / max(1, HUDGeometry.waveformSize.height - 4)))
+                    let barHeight = active ? (4 + normalized * 12) : 4
+                    Capsule()
+                        .fill(VeloraBrand.barColor(fraction: Double(idx) / 3.0, darkMode: true))
+                        .frame(width: 2.5, height: barHeight)
+                }
+            }
+            .frame(width: 18, height: 16, alignment: .center)
+        }
+        .accessibilityHidden(true)
     }
 }

@@ -96,6 +96,58 @@ enum LateFinalPolicy {
     }
 }
 
+/// Pure decision policy for Dictate & Send. Keeps auto-send opt-in per session,
+/// respects copy-only delivery and blocked email apps, and chooses a safe
+/// post-paste settle delay before synthesizing Return.
+enum AutoSendPolicy {
+    enum Decision: Equatable {
+        case send(AutoSendKey)
+        case blockedByApp(String)
+        case skipped
+    }
+
+    static func isBlocked(bundleID: String?, blockedApps: [String]) -> Bool {
+        guard let bundleID, !bundleID.isEmpty else { return false }
+        let lowered = bundleID.lowercased()
+        return blockedApps.contains { $0.lowercased() == lowered }
+    }
+
+    static func decide(
+        requested: Bool,
+        deliveryMode: DictationDelivery,
+        targetBundleID: String?,
+        targetAppName: String?,
+        blockedApps: [String],
+        sendKey: AutoSendKey,
+        allowAutomaticInsertion: Bool,
+        isVoiceCommand: Bool,
+        textIsEmpty: Bool
+    ) -> Decision {
+        guard requested, allowAutomaticInsertion, !isVoiceCommand, !textIsEmpty,
+              deliveryMode != .copyOnly else {
+            return .skipped
+        }
+        if isBlocked(bundleID: targetBundleID, blockedApps: blockedApps) {
+            let name = (targetAppName?.isEmpty == false) ? targetAppName! : "this app"
+            return .blockedByApp(name)
+        }
+        return .send(sendKey)
+    }
+
+    /// Delay after delivery before pressing Return so Electron/Chromium apps
+    /// finish servicing ⌘V before seeing Return. Typing-fallback terminals
+    /// complete Unicode keystrokes before the callback and need a shorter beat.
+    static func settleDelay(
+        targetBundleID: String?,
+        typingFallbackApps: [String]
+    ) -> TimeInterval {
+        if let bundleID = targetBundleID, typingFallbackApps.contains(bundleID) {
+            return 0.05
+        }
+        return 0.11
+    }
+}
+
 /// Where a take's words go, fixed when the take starts: switching apps
 /// mid-take changes neither the app it is formatted for nor where it lands.
 ///
@@ -470,6 +522,8 @@ final class DictationController: NSObject {
     }
     /// The dictation session whose transcript is a command, not text to insert.
     private var actionSession: String?
+    /// The dictation session started with Dictate & Send; pastes and presses Return on finish.
+    private var autoSendSession: String?
     /// Opt-in session whose provisional transcript owns a bounded live draft
     /// at the original text cursor.
     private var streamSession: (
@@ -2399,6 +2453,7 @@ final class DictationController: NSObject {
         locked: Bool, explicitMode: String? = nil, external: Bool = false,
         hudLabel: String? = nil, streamTyping: Bool = false,
         livePreview: Bool = false,
+        autoSend: Bool = false,
         targetAppOverride: NSRunningApplication? = nil,
         contextPolicy: RecordingContextPolicy = .ordinary,
         delivery: DictationIntent.Delivery = .frontApp
@@ -2505,7 +2560,8 @@ final class DictationController: NSObject {
         let liveExternalApp = liveAppIsExternal ? liveApp : nil
         sessionIntent = DictationIntent(delivery: delivery, startedInVelora: !liveAppIsExternal)
         sessionDeliveryPreference = ordinaryTake ? config.dictationDelivery : .pasteAndKeep
-        sessionShowsLiveWords = ordinaryTake && config.showLiveWords
+        sessionShowsLiveWords = ordinaryTake && (config.showLiveWords || autoSend)
+        autoSendSession = autoSend ? sessionID : nil
         let targetApp = external
             ? nil
             : sessionIntent.targetApp(
@@ -2538,6 +2594,9 @@ final class DictationController: NSObject {
                   enriched.entities.count,
                   enriched.entities.map { $0.type }.joined(separator: ", "))
         }
+        let autoSendGuarded = autoSend && AutoSendPolicy.isBlocked(
+            bundleID: enriched.bundleID,
+            blockedApps: config.autoSendBlockedApps)
         hud.model.beginSession(context: HUDSessionContext(
             appIcon: targetApp?.icon,
             modeName: hudLabel ?? explicitMode
@@ -2547,7 +2606,9 @@ final class DictationController: NSObject {
                     // Detected web app (Gmail, Notion…): the chip mirrors the
                     // engine's site→mode refinement instead of saying "Browser".
                     siteSlug: enriched.entities.first { $0.type == "site" }?.value),
-            livePreview: livePreview || sessionShowsLiveWords))
+            livePreview: livePreview || sessionShowsLiveWords,
+            autoSend: autoSend,
+            autoSendGuarded: autoSendGuarded))
 
         NSLog(
             "Velora: engine start session=%@ target=%@",
@@ -2852,6 +2913,7 @@ final class DictationController: NSObject {
         // Mark this session cancelled so a late `final` for it is refused
         // (the user explicitly gave up on it).
         cancelledSessionID = sessionID
+        autoSendSession = nil
         cancelStreamDraft()
         stopAfterCaptureStarts = false
         editSession?.selection.discardMutableIdentity()
@@ -2919,6 +2981,9 @@ final class DictationController: NSObject {
         }
         if actionSession == failedSession {
             actionSession = nil
+        }
+        if autoSendSession == failedSession {
+            autoSendSession = nil
         }
         if editSession?.session == failedSession {
             editSession?.selection.discardMutableIdentity()
@@ -3012,7 +3077,9 @@ final class DictationController: NSObject {
             hud.model.routeStatus = fallback ?? "Speech language: " + language
             hud.model.sessionContext = HUDSessionContext(appIcon: previous?.appIcon,
                 modeName: fallback == nil ? (previous?.modeName ?? "Default") + " · " + String(language.prefix(12)) : "Model fallback",
-                livePreview: previous?.livePreview ?? false)
+                livePreview: previous?.livePreview ?? false,
+                autoSend: previous?.autoSend ?? false,
+                autoSendGuarded: previous?.autoSendGuarded ?? false)
             if fallback != nil { ActivityStore.shared.record(.modelFallback) }
 
         case .partial(let session, let text):
@@ -3455,6 +3522,10 @@ final class DictationController: NSObject {
     ) {
         let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
         let context = sessionContext
+        let isAutoSendSession = autoSendSession == sessionID
+        if isAutoSendSession {
+            autoSendSession = nil
+        }
 
         if let request = externalRequest, request.session == sessionID {
             let durationMs = recordingDurationMs ?? elapsedRecordingMs
@@ -3708,6 +3779,16 @@ final class DictationController: NSObject {
         }
 
         let session = sessionID
+        let autoSendDecision = AutoSendPolicy.decide(
+            requested: isAutoSendSession,
+            deliveryMode: sessionDeliveryPreference,
+            targetBundleID: context?.bundleID,
+            targetAppName: context?.appName,
+            blockedApps: config.autoSendBlockedApps,
+            sendKey: config.autoSendKey,
+            allowAutomaticInsertion: allowAutomaticInsertion,
+            isVoiceCommand: false,
+            textIsEmpty: trimmed.isEmpty)
         inserter.insert(
             text,
             targetBundleID: context?.bundleID,
@@ -3725,20 +3806,57 @@ final class DictationController: NSObject {
             }
             self.inserter.restoreClipboardAfterSuccessfulDelivery()
             self.logStopStage(.inserted, session: session)
-            if self.failedWindowCount > 0 {
-                self.showNotice(
-                    symbol: "exclamationmark.triangle.fill",
-                    message: self.finalNotice("Inserted"))
-            } else {
-                self.hud.transition(to: .inserted)
-            }
-            self.phase = .idle
             self.lastInsertion = (bundleID: context?.bundleID, at: Date())
             self.captureLearningBaseline(
                 text: text, bundleID: context?.bundleID, session: session)
             NotificationCenter.default.post(name: .veloraDictationInserted, object: text)
-            if self.failedWindowCount == 0 {
-                self.scheduleInsertedHide()
+
+            switch autoSendDecision {
+            case .skipped:
+                if self.failedWindowCount > 0 {
+                    self.showNotice(
+                        symbol: "exclamationmark.triangle.fill",
+                        message: self.finalNotice("Inserted"))
+                } else {
+                    self.hud.transition(to: .inserted)
+                }
+                self.phase = .idle
+                if self.failedWindowCount == 0 {
+                    self.scheduleInsertedHide()
+                }
+
+            case .blockedByApp(let appName):
+                self.phase = .idle
+                self.showNotice(
+                    symbol: "paperplane.slash",
+                    message: self.finalNotice("Pasted — auto-send off for \(appName)"))
+
+            case .send(let sendKey):
+                let generationBeforeSettle = UserInputActivity.snapshot()
+                let settle = AutoSendPolicy.settleDelay(
+                    targetBundleID: context?.bundleID,
+                    typingFallbackApps: self.config.typingFallbackApps)
+                DispatchQueue.main.asyncAfter(deadline: .now() + settle) { [weak self] in
+                    guard let self else { return }
+                    let safeToSend = UserInputActivity.snapshot() == generationBeforeSettle
+                        && TextInserter.deliveryAllowed(
+                            targetBundleID: context?.bundleID,
+                            targetElement: expectedTargetElement)
+                    if safeToSend, self.inserter.pressKey(36, flags: sendKey.cgFlags) {
+                        self.inserter.resetContinuationContext()
+                        let label = (context?.appName?.isEmpty == false)
+                            ? "Sent to \(context!.appName!)" : "Sent"
+                        self.showNotice(
+                            symbol: "paperplane.fill",
+                            message: self.finalNotice(label))
+                    } else {
+                        NSLog("Velora: auto-send skipped after paste — target or input changed")
+                        self.showNotice(
+                            symbol: "doc.on.clipboard.fill",
+                            message: self.finalNotice("Pasted (not sent)"))
+                    }
+                    self.phase = .idle
+                }
             }
         }
     }
@@ -4368,6 +4486,7 @@ extension DictationController: HotkeyMonitorDelegate {
         case .proofread: beginProofreadSession()
         case .stream: streamHotkeyDown()
         case .action: actionHotkeyDown()
+        case .dictateAndSend: dictateAndSendHotkeyDown()
         case .alternateDictation: hotkeyDown()
         }
     }
@@ -4378,7 +4497,60 @@ extension DictationController: HotkeyMonitorDelegate {
         case .proofread: break
         case .stream: streamHotkeyUp()
         case .action: actionHotkeyUp()
+        case .dictateAndSend: dictateAndSendHotkeyUp()
         case .alternateDictation: hotkeyUp()
+        }
+    }
+
+    private func dictateAndSendHotkeyDown() {
+        guard sublimeApplyID == nil else {
+            showNotice(symbol: "hourglass", message: "Finishing edit")
+            return
+        }
+        if sublimeCaptureID != nil {
+            clearSublimeCapture()
+        }
+        if phase == .transcribing { resetIfStuckTranscribing() }
+        let isAutoSendRecording = autoSendSession == sessionID && isRecording
+
+        switch (config.hotkeyMode, phase) {
+        case (.toggle, .idle):
+            sendPrewarmIfNeeded()
+            startRecording(locked: true, autoSend: true)
+        case (.toggle, .starting) where isAutoSendRecording:
+            cancel()
+        case (.toggle, .recording) where isAutoSendRecording:
+            stopAndTranscribe()
+        case (.hold, .idle):
+            hotkeyDownAt = Date()
+            sendPrewarmIfNeeded()
+            startRecording(locked: false, autoSend: true)
+        case (.hold, .starting(locked: true)) where isAutoSendRecording:
+            cancel()
+        case (.hold, .recording(locked: true)) where isAutoSendRecording:
+            stopAndTranscribe()
+        default:
+            break
+        }
+    }
+
+    private func dictateAndSendHotkeyUp() {
+        guard config.hotkeyMode == .hold, autoSendSession == sessionID else { return }
+        let heldFor = hotkeyDownAt.map { -$0.timeIntervalSinceNow } ?? 0
+        if case .starting(locked: false) = phase {
+            if heldFor >= Self.tapThreshold {
+                stopAfterCaptureStarts = true
+            } else {
+                phase = .starting(locked: true)
+            }
+            return
+        }
+        guard case .recording(locked: false) = phase else { return }
+        if heldFor >= Self.tapThreshold {
+            stopAndTranscribe()
+        } else {
+            NSLog("Velora: dictate-and-send tap (%.0f ms) — recording locked on", heldFor * 1000)
+            phase = .recording(locked: true)
         }
     }
 

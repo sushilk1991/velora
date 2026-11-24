@@ -142,6 +142,9 @@ enum VeloraMotion {
 /// changes (success, error, notice) alter the width.
 enum HUDGeometry {
     static let height: CGFloat = 56
+    /// Live Transcript Card height: up to 3 lines of live words over a compact
+    /// app/timer/status footer, fitting comfortably inside HUDPanel.panelSize (480×160).
+    static let liveCardHeight: CGFloat = 104
     static let minListeningWidth: CGFloat = 280
     static let maxListeningWidth: CGFloat = 420
     static let insertedDiameter: CGFloat = height
