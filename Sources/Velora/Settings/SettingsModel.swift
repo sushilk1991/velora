@@ -466,6 +466,8 @@ final class SettingsModel: ObservableObject {
         streamTypingEnabled = config.streamTypingEnabled
         dictateAndSendHotkey = config.dictateAndSendHotkey
         dictateAndSendEnabled = config.dictateAndSendEnabled
+        sendWhileRecordingHotkey = config.sendWhileRecordingHotkey
+        sendWhileRecordingEnabled = config.sendWhileRecordingEnabled
         autoSendKey = config.autoSendKey
         actionHotkey = config.actionHotkey
         actionsEnabled = config.actionsEnabled
@@ -673,6 +675,8 @@ final class SettingsModel: ObservableObject {
         streamTypingEnabled = imported.shortcuts.streamTypingEnabled
         dictateAndSendHotkey = imported.shortcuts.dictateAndSend
         dictateAndSendEnabled = imported.shortcuts.dictateAndSendEnabled
+        sendWhileRecordingHotkey = imported.shortcuts.sendWhileRecording
+        sendWhileRecordingEnabled = imported.shortcuts.sendWhileRecordingEnabled
         autoSendKey = imported.dictation.autoSendKey
         actionHotkey = imported.shortcuts.action
         actionsEnabled = imported.shortcuts.actionsEnabled
@@ -1443,6 +1447,31 @@ final class SettingsModel: ObservableObject {
             NotificationCenter.default.post(name: .veloraHotkeyChanged, object: nil)
         }
     }
+
+    @Published var sendWhileRecordingHotkey: Hotkey {
+        didSet {
+            guard !applyingImportedSettings, sendWhileRecordingHotkey != oldValue else { return }
+            guard sendWhileRecordingHotkey != hotkey,
+                  sendWhileRecordingHotkey != dictateAndSendHotkey else {
+                sendWhileRecordingHotkeyConflict = true
+                sendWhileRecordingHotkey = oldValue
+                return
+            }
+            sendWhileRecordingHotkeyConflict = false
+            config.sendWhileRecordingHotkey = sendWhileRecordingHotkey
+            NotificationCenter.default.post(name: .veloraHotkeyChanged, object: nil)
+        }
+    }
+
+    @Published var sendWhileRecordingEnabled: Bool {
+        didSet {
+            guard !applyingImportedSettings, sendWhileRecordingEnabled != oldValue else { return }
+            config.sendWhileRecordingEnabled = sendWhileRecordingEnabled
+            NotificationCenter.default.post(name: .veloraHotkeyChanged, object: nil)
+        }
+    }
+
+    @Published var sendWhileRecordingHotkeyConflict = false
 
     @Published var autoSendKey: AutoSendKey {
         didSet {

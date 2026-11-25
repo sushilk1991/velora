@@ -306,6 +306,9 @@ extension SettingsDocument {
         /// Dictate & Send: hold, see live words, release to paste and press Return.
         var dictateAndSend: Hotkey = .controlShiftReturn
         var dictateAndSendEnabled: Bool = true
+        /// Pressed during an active ordinary dictation to stop, paste, and send.
+        var sendWhileRecording: Hotkey = .space
+        var sendWhileRecordingEnabled: Bool = true
         var behavior: HotkeyMode
         /// Action Mode: hold, speak a command, Velora carries it out.
         var action: Hotkey
@@ -337,7 +340,9 @@ extension SettingsDocument {
              behavior: HotkeyMode, action: Hotkey, actionsEnabled: Bool,
              backgroundActions: Bool,
              dictateAndSend: Hotkey = .controlShiftReturn,
-             dictateAndSendEnabled: Bool = true) {
+             dictateAndSendEnabled: Bool = true,
+             sendWhileRecording: Hotkey = .space,
+             sendWhileRecordingEnabled: Bool = true) {
             self.dictation = dictation
             self.editSelection = editSelection
             self.voiceEdit = voiceEdit
@@ -351,6 +356,8 @@ extension SettingsDocument {
             self.backgroundActions = backgroundActions
             self.dictateAndSend = dictateAndSend
             self.dictateAndSendEnabled = dictateAndSendEnabled
+            self.sendWhileRecording = sendWhileRecording
+            self.sendWhileRecordingEnabled = sendWhileRecordingEnabled
         }
 
         init(from decoder: Decoder) throws {
@@ -386,6 +393,10 @@ extension SettingsDocument {
                                 streamTyping, action])
             dictateAndSendEnabled = try container.decodeIfPresent(
                 Bool.self, forKey: .dictateAndSendEnabled) ?? true
+            sendWhileRecording = try container.decodeIfPresent(
+                Hotkey.self, forKey: .sendWhileRecording) ?? .space
+            sendWhileRecordingEnabled = try container.decodeIfPresent(
+                Bool.self, forKey: .sendWhileRecordingEnabled) ?? true
         }
 
         static let defaultActionHotkey = Hotkey.controlShiftA
@@ -686,7 +697,8 @@ enum SettingsDocumentCodec {
               value.shortcuts.proofreadSelection.isValidSettingsHotkey,
               value.shortcuts.streamTyping.isValidSettingsHotkey,
               value.shortcuts.action.isValidSettingsHotkey,
-              value.shortcuts.dictateAndSend.isValidSettingsHotkey else {
+              value.shortcuts.dictateAndSend.isValidSettingsHotkey,
+              value.shortcuts.sendWhileRecording.isValidSettingsHotkey else {
             throw SettingsDocumentError.invalidValue("keyboard shortcuts")
         }
         // Every binding must differ. The monitor resolves a collision by

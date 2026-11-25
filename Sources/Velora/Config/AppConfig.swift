@@ -965,6 +965,21 @@ final class AppConfig {
         dictateAndSendEnabled ? dictateAndSendHotkey : nil
     }
 
+    /// Pressed during an active dictation to immediately finish, paste, and send.
+    var sendWhileRecordingHotkey: Hotkey {
+        get { readSetting(\.shortcuts.sendWhileRecording) }
+        set { updateSettings { $0.shortcuts.sendWhileRecording = newValue } }
+    }
+
+    var sendWhileRecordingEnabled: Bool {
+        get { readSetting(\.shortcuts.sendWhileRecordingEnabled) }
+        set { updateSettings { $0.shortcuts.sendWhileRecordingEnabled = newValue } }
+    }
+
+    var activeSendWhileRecordingHotkey: Hotkey? {
+        sendWhileRecordingEnabled ? sendWhileRecordingHotkey : nil
+    }
+
     var autoSendKey: AutoSendKey {
         get { readSetting(\.dictation.autoSendKey) }
         set { updateSettings { $0.dictation.autoSendKey = newValue } }

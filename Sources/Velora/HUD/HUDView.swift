@@ -343,6 +343,25 @@ struct HUDView: View {
                         .background(
                             Capsule().fill(VeloraStatus.warning.opacity(0.16))
                         )
+                } else if isListening, let sendLabel = context?.sendShortcutLabel, !sendLabel.isEmpty {
+                    HStack(spacing: 4) {
+                        Text(L10n.text("Send"))
+                            .font(.system(size: 10.5, weight: .medium))
+                            .foregroundStyle(VeloraBrand.skyLink.color)
+                        Text(sendLabel)
+                            .font(.system(size: 9.5, weight: .semibold, design: .rounded))
+                            .foregroundStyle(hudPrimaryText)
+                            .padding(.horizontal, 5)
+                            .padding(.vertical, 2)
+                            .background(
+                                RoundedRectangle(cornerRadius: 4, style: .continuous)
+                                    .fill(VeloraBrand.sky.color.opacity(0.24))
+                            )
+                            .overlay(
+                                RoundedRectangle(cornerRadius: 4, style: .continuous)
+                                    .strokeBorder(VeloraBrand.sky.color.opacity(0.42), lineWidth: 1)
+                            )
+                    }
                 }
                 Text(L10n.text("esc"))
                     .font(.system(size: 9.5, weight: .semibold, design: .rounded))

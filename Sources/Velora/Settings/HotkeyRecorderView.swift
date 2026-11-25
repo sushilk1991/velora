@@ -18,6 +18,10 @@ struct HotkeyRecorderView: View {
     /// The feature this shortcut runs ("Stream Typing"). Names the field
     /// for VoiceOver where several recorders share one list.
     var feature: String?
+    /// True for shortcuts that only listen during an active recording (such as
+    /// Send while recording): bare Space or Return are valid and must not warn
+    /// about colliding with ordinary typing.
+    var allowsBareTypingKey = false
 
     @State private var isRecording = false
     @State private var monitor: Any?
@@ -98,7 +102,7 @@ struct HotkeyRecorderView: View {
     // MARK: - Inline conflict warning
 
     @ViewBuilder private var warningLabel: some View {
-        if !isRecording, let warning = hotkey.conflictWarning {
+        if !isRecording, !allowsBareTypingKey, let warning = hotkey.conflictWarning {
             Label(warning, systemImage: "exclamationmark.triangle.fill")
                 .font(.callout)
                 .foregroundStyle(VeloraStatus.warningText)
@@ -147,10 +151,14 @@ struct HotkeyRecorderView: View {
     /// A bare Esc, Return or keypad Enter cancels: Esc stays the dictation
     /// cancel key, and a bare ↩ or ⌤ as a global shortcut would fire on
     /// every line break. Anything else, ⌘↩ included, is recorded.
-    static func captureOutcome(keyCode: Int64, modifiers: UInt64) -> CaptureOutcome {
+    static func captureOutcome(
+        keyCode: Int64, modifiers: UInt64, allowsBareReturn: Bool = false
+    ) -> CaptureOutcome {
         let bare = modifiers == 0
-        let cancelKeys = [escapeKeyCode, returnKeyCode, keypadEnterKeyCode]
-        if bare, cancelKeys.contains(keyCode) {
+        if bare, keyCode == escapeKeyCode {
+            return .cancel
+        }
+        if bare, !allowsBareReturn, [returnKeyCode, keypadEnterKeyCode].contains(keyCode) {
             return .cancel
         }
         return .record(Hotkey(keyCode: keyCode, modifiers: modifiers, isModifierOnly: false))
@@ -163,7 +171,9 @@ struct HotkeyRecorderView: View {
             let modifiers = Hotkey.cgFlags(from: event.modifierFlags) & Hotkey.strictModifierMask
             // The local monitor consumes the event either way, so a
             // cancelling Return never reaches the window's default button.
-            switch Self.captureOutcome(keyCode: keyCode, modifiers: modifiers) {
+            switch Self.captureOutcome(
+                keyCode: keyCode, modifiers: modifiers, allowsBareReturn: allowsBareTypingKey
+            ) {
             case .cancel:
                 endRecording(reason: "cancel key")
             case .record(let captured):

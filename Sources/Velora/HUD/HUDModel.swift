@@ -113,13 +113,15 @@ struct HUDSessionContext: Equatable {
     let livePreview: Bool
     let autoSend: Bool
     let autoSendGuarded: Bool
+    let sendShortcutLabel: String?
 
     init(
         appIcon: NSImage?,
         modeName: String,
         livePreview: Bool = false,
         autoSend: Bool = false,
-        autoSendGuarded: Bool = false
+        autoSendGuarded: Bool = false,
+        sendShortcutLabel: String? = nil
     ) {
         if let source = appIcon, let normalized = source.copy() as? NSImage {
             normalized.size = NSSize(
@@ -133,6 +135,7 @@ struct HUDSessionContext: Equatable {
         self.livePreview = livePreview
         self.autoSend = autoSend
         self.autoSendGuarded = autoSendGuarded
+        self.sendShortcutLabel = sendShortcutLabel
     }
 
     static func == (lhs: HUDSessionContext, rhs: HUDSessionContext) -> Bool {
@@ -141,6 +144,7 @@ struct HUDSessionContext: Equatable {
             && lhs.livePreview == rhs.livePreview
             && lhs.autoSend == rhs.autoSend
             && lhs.autoSendGuarded == rhs.autoSendGuarded
+            && lhs.sendShortcutLabel == rhs.sendShortcutLabel
     }
 }
 

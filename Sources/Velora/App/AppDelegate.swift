@@ -658,6 +658,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         supervisor.delegate = self
         dictation.delegate = self
         hotkeyMonitor.delegate = dictation
+        dictation.onInRecordingSendStateChanged = { [weak self] active, holdMask in
+            self?.hotkeyMonitor.setInRecordingSendActive(active, holdModifierMask: holdMask)
+        }
         statusController.delegate = self
 
         // The HUD pill is a control surface: click toggles dictation,
@@ -776,6 +779,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             guard let self else { return }
             self.hotkeyMonitor.hotkey = self.config.hotkey
             self.hotkeyMonitor.secondaryHotkeys = self.config.activeSecondaryHotkeys
+            self.hotkeyMonitor.sendWhileRecordingHotkey = self.config.activeSendWhileRecordingHotkey
             MainMenu.refreshPaneKeys(hotkeys: self.globalHotkeys)
         }
 

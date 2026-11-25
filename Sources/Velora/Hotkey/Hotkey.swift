@@ -94,6 +94,8 @@ extension Hotkey {
         keyCode: 36,
         modifiers: CGEventFlags.maskControl.rawValue | CGEventFlags.maskShift.rawValue,
         isModifierOnly: false)
+    /// Default in-recording Send key: bare Space (only active while recording).
+    static let space = Hotkey(keyCode: 49, modifiers: 0, isModifierOnly: false)
     /// Kept for the tests that exercise the collision this default avoids.
     static let optionShiftA = Hotkey(
         keyCode: 0,

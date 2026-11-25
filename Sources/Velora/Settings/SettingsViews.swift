@@ -1452,51 +1452,71 @@ struct ShortcutsSettingsView: View {
     // MARK: Voice mode cards (same monochrome symbol idiom as Home › Ways to talk)
 
     private var dictateAndSendCard: some View {
-        GroupCard(
+        let anySendEnabled = model.sendWhileRecordingEnabled || model.dictateAndSendEnabled
+        return GroupCard(
             footer: "Mail, Outlook, and Superhuman paste as a draft without auto-sending. If focus moves, Velora copies instead."
         ) {
             HStack(alignment: .center, spacing: VeloraSpacing.m) {
                 Image(systemName: "paperplane.fill")
                     .font(.system(size: 15, weight: .medium))
-                    .foregroundStyle(model.dictateAndSendEnabled ? AnyShapeStyle(VeloraBrand.accent) : AnyShapeStyle(.secondary))
+                    .foregroundStyle(anySendEnabled ? AnyShapeStyle(VeloraBrand.accent) : AnyShapeStyle(.secondary))
                     .frame(width: 22)
                     .accessibilityHidden(true)
                 VStack(alignment: .leading, spacing: 2) {
                     Text(L10n.text("Dictate & Send"))
                         .font(.system(size: 13, weight: .medium))
-                    Text(L10n.text("Hold to see your words live, then release to paste and press Return. Esc cancels."))
+                    Text(L10n.text("Paste and immediately press Return — either by pressing a Send key mid-recording or using a dedicated shortcut."))
                         .font(.system(size: 11))
                         .foregroundStyle(.secondary)
                         .fixedSize(horizontal: false, vertical: true)
                 }
                 Spacer(minLength: VeloraSpacing.s)
-                Toggle(L10n.text("Dictate & Send"), isOn: $model.dictateAndSendEnabled)
-                    .labelsHidden()
-                    .toggleStyle(.switch)
-                    .controlSize(.small)
             }
             .padding(.horizontal, 14)
             .padding(.vertical, VeloraSpacing.m)
             GroupDivider()
-            Group {
+            SettingsToggleRow(
+                title: "Send while recording",
+                subtitle: "Press during any dictation to finish, paste, and send. Swallowed while recording so it never types into your app.",
+                isOn: $model.sendWhileRecordingEnabled)
+            if model.sendWhileRecordingEnabled {
+                GroupDivider()
+                GroupRow(label: L10n.text("Send key during recording")) {
+                    HotkeyRecorderView(
+                        hotkey: $model.sendWhileRecordingHotkey,
+                        showsQuickPicks: false,
+                        feature: "Send while recording",
+                        allowsBareTypingKey: true)
+                }
+                if model.sendWhileRecordingHotkeyConflict {
+                    conflictLabel("Pick a different key than your dictation shortcut.")
+                }
+            }
+            GroupDivider()
+            SettingsToggleRow(
+                title: "Dedicated Dictate & Send shortcut",
+                subtitle: "Hold to see your words live, then release to paste and send automatically.",
+                isOn: $model.dictateAndSendEnabled)
+            if model.dictateAndSendEnabled {
+                GroupDivider()
                 shortcutCardRow(for: "Dictate & Send", hotkey: $model.dictateAndSendHotkey)
                 if model.dictateAndSendHotkeyConflict {
                     conflictLabel("Dictate & Send needs a shortcut of its own.")
                 }
-                GroupDivider()
-                GroupRow(label: L10n.text("Send key")) {
-                    Picker(L10n.text("Send key"), selection: $model.autoSendKey) {
-                        ForEach(AutoSendKey.allCases) { key in
-                            Text(L10n.text(key.title)).tag(key)
-                        }
-                    }
-                    .labelsHidden()
-                    .pickerStyle(.segmented)
-                    .fixedSize()
-                }
             }
-            .disabled(!model.dictateAndSendEnabled)
-            .opacity(model.dictateAndSendEnabled ? 1 : 0.5)
+            GroupDivider()
+            GroupRow(label: L10n.text("Send with")) {
+                Picker(L10n.text("Send with"), selection: $model.autoSendKey) {
+                    ForEach(AutoSendKey.allCases) { key in
+                        Text(L10n.text(key.title)).tag(key)
+                    }
+                }
+                .labelsHidden()
+                .pickerStyle(.segmented)
+                .fixedSize()
+            }
+            .disabled(!anySendEnabled)
+            .opacity(anySendEnabled ? 1 : 0.5)
         }
     }
 

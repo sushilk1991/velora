@@ -30,9 +30,15 @@ protocol HotkeyMonitorDelegate: AnyObject {
     func secondaryHotkeyDown(_ role: SecondaryHotkeyRole)
     func secondaryHotkeyUp(_ role: SecondaryHotkeyRole)
     func escapePressed()
+    /// Pressed during an active ordinary dictation to stop, paste, and send.
+    func inRecordingSendPressed()
     /// A real user keystroke or click happened between dictations. Callers use
     /// this to discard any AX-opaque insertion boundary they had to remember.
     func nonHotkeyInput()
+}
+
+extension HotkeyMonitorDelegate {
+    func inRecordingSendPressed() {}
 }
 
 /// Whether physical input since an action lease can be attributed away from
@@ -361,6 +367,36 @@ final class HotkeyMonitor {
         set { secondaryHotkeys[.edit] = newValue }
     }
 
+    /// Optional key pressed while an ordinary dictation is recording to stop,
+    /// paste, and immediately press Return (e.g. Space). Only active while
+    /// `inRecordingSendActive` is true and a filtering tap can suppress it.
+    var sendWhileRecordingHotkey: Hotkey? = AppConfig.shared.activeSendWhileRecordingHotkey {
+        didSet {
+            guard sendWhileRecordingHotkey != oldValue else { return }
+            sendWhileRecordingLatched = false
+            sendWhileRecordingModifierLatched = false
+            NSLog("Velora: send-while-recording hotkey now %@",
+                  sendWhileRecordingHotkey.map(\.displayLabel) ?? "off")
+        }
+    }
+
+    private(set) var inRecordingSendActive = false
+    private var activeHoldModifierMask: UInt64 = 0
+    private var sendWhileRecordingLatched = false
+    private var sendWhileRecordingModifierLatched = false
+
+    /// Arms or disarms the in-recording Send key for the active dictation take.
+    /// `holdModifierMask` carries the strict modifier bit(s) physically held
+    /// by Push-to-Talk (e.g. Option for Right ⌥) so tapping Space while holding
+    /// Option still matches bare Space without leaking a non-breaking space.
+    func setInRecordingSendActive(_ active: Bool, holdModifierMask: UInt64 = 0) {
+        inRecordingSendActive = active
+        activeHoldModifierMask = active ? (holdModifierMask & Hotkey.strictModifierMask) : 0
+        if !active {
+            sendWhileRecordingModifierLatched = false
+        }
+    }
+
     private var eventTap: CFMachPort?
     private var runLoopSource: CFRunLoopSource?
     private var globalMonitor: Any?
@@ -475,9 +511,16 @@ final class HotkeyMonitor {
                     keyCurrentlyDown: secondaryHotkeys[role]
                         .map { Self.keyState($0.keyCode) } ?? false)
             }
+            sendWhileRecordingLatched = Self.resyncedComboLatch(
+                wasLatched: sendWhileRecordingLatched,
+                keyCurrentlyDown: sendWhileRecordingHotkey.map {
+                    !$0.isModifierOnly && Self.keyState($0.keyCode)
+                } ?? false)
         } else {
             comboIsDown = false
             for role in SecondaryHotkeyRole.allCases { secondaryComboIsDown[role] = false }
+            sendWhileRecordingLatched = false
+            sendWhileRecordingModifierLatched = false
         }
     }
 
@@ -811,6 +854,18 @@ final class HotkeyMonitor {
             emitSecondaryHotkey(role, down: isDown)
             return
         }
+        if inRecordingSendActive,
+           let sendKey = sendWhileRecordingHotkey,
+           sendKey.isModifierOnly,
+           keyCode == sendKey.keyCode,
+           let mask = Hotkey.modifierMask(forKeyCode: keyCode) {
+            let isDown = flags & mask.rawValue != 0
+            guard isDown != sendWhileRecordingModifierLatched else { return }
+            sendWhileRecordingModifierLatched = isDown
+            if isDown {
+                emit { $0.inRecordingSendPressed() }
+            }
+        }
     }
 
     /// Whether a key-down is the autorepeat of a chord Velora is holding
@@ -822,6 +877,12 @@ final class HotkeyMonitor {
     func isLatchedComboRepeat(keyCode: Int64, isRepeat: Bool) -> Bool {
         guard isRepeat else { return false }
         if !hotkey.isModifierOnly, keyCode == hotkey.keyCode, comboIsDown {
+            return true
+        }
+        if sendWhileRecordingLatched,
+           let sendKey = sendWhileRecordingHotkey,
+           !sendKey.isModifierOnly,
+           keyCode == sendKey.keyCode {
             return true
         }
         return SecondaryHotkeyRole.allCases.contains { role in
@@ -860,7 +921,17 @@ final class HotkeyMonitor {
         }
         // First matching role wins, so one chord never triggers two features.
         let matchedRole = SecondaryHotkeyRole.allCases.first(where: comboMatches)
-        if !comboCanBeSuppressed, hotkeyComboMatches || matchedRole != nil {
+        let sendWhileRecordingMatches: Bool = {
+            guard inRecordingSendActive,
+                  let sendKey = sendWhileRecordingHotkey,
+                  !sendKey.isModifierOnly,
+                  keyCode == sendKey.keyCode
+            else { return false }
+            let effectiveFlags = (flags & Hotkey.strictModifierMask) & ~activeHoldModifierMask
+            let requiredFlags = (sendKey.modifiers & Hotkey.strictModifierMask) & ~activeHoldModifierMask
+            return effectiveFlags == requiredFlags
+        }()
+        if !comboCanBeSuppressed, hotkeyComboMatches || matchedRole != nil || sendWhileRecordingMatches {
             if !isRepeat {
                 NSLog(
                     "Velora: combo hotkey ignored — filtering event tap unavailable")
@@ -878,6 +949,12 @@ final class HotkeyMonitor {
                keyCode == secondary.keyCode, secondaryComboIsDown[role] == true {
                 return true
             }
+        }
+        if sendWhileRecordingLatched,
+           let sendKey = sendWhileRecordingHotkey,
+           !sendKey.isModifierOnly,
+           keyCode == sendKey.keyCode {
+            return true
         }
         if hotkeyComboMatches {
             if !isRepeat, !comboIsDown {
@@ -900,6 +977,16 @@ final class HotkeyMonitor {
                 emitSecondaryHotkey(matchedRole, down: true)
             }
             return secondaryComboIsDown[matchedRole] ?? false
+        }
+        if sendWhileRecordingMatches, let sendKey = sendWhileRecordingHotkey {
+            if !isRepeat, !sendWhileRecordingLatched {
+                sendWhileRecordingLatched = true
+                NSLog(
+                    "Velora: send-while-recording key matched %@ (keyCode=%lld flags=0x%llx mask=0x%llx)",
+                    sendKey.displayLabel, keyCode, flags, activeHoldModifierMask)
+                emit { $0.inRecordingSendPressed() }
+            }
+            return true
         }
         if invalidateContinuation {
             if recordedGeneration == nil {
@@ -930,6 +1017,13 @@ final class HotkeyMonitor {
                 emitSecondaryHotkey(role, down: false)
                 return true
             }
+        }
+        if sendWhileRecordingLatched,
+           let sendKey = sendWhileRecordingHotkey,
+           !sendKey.isModifierOnly,
+           keyCode == sendKey.keyCode {
+            sendWhileRecordingLatched = false
+            return true
         }
         return false
     }

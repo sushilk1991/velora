@@ -474,6 +474,9 @@ final class DictationController: NSObject {
     /// App-owned foreground capture exclusion (currently meeting recording).
     /// Post-meeting background processing does not block dictation.
     var recordingBlockReason: (() -> String?)?
+    /// Bridges active ordinary-dictation recording state (plus any physically
+    /// held Push-to-Talk modifier mask) to `HotkeyMonitor` for Send-while-recording.
+    var onInRecordingSendStateChanged: ((Bool, UInt64) -> Void)?
 
     private let config = AppConfig.shared
     private let capture: AudioCapture
@@ -524,6 +527,11 @@ final class DictationController: NSObject {
     private var actionSession: String?
     /// The dictation session started with Dictate & Send; pastes and presses Return on finish.
     private var autoSendSession: String?
+    /// Set for ordinary dictation takes (excludes Edit, Action, Stream, External, and explicit modes).
+    private var ordinaryDictationSession: String?
+    /// Strict modifier bit(s) held by the hotkey that started the active ordinary take
+    /// so `HotkeyMonitor` can mask them when matching bare Space/Return during recording.
+    private var activeRecordingHoldModifierMask: UInt64 = 0
     /// Opt-in session whose provisional transcript owns a bounded live draft
     /// at the original text cursor.
     private var streamSession: (
@@ -568,6 +576,7 @@ final class DictationController: NSObject {
                 cleanupLabelWork = nil
             }
             NSLog("Velora: phase %@ → %@", oldValue.label, phase.label)
+            syncInRecordingSendMonitor()
             delegate?.dictationController(self, didChangePhase: phase)
             if phase == .idle {
                 schedulePendingRecordingLimitNotice()
@@ -2562,6 +2571,7 @@ final class DictationController: NSObject {
         sessionDeliveryPreference = ordinaryTake ? config.dictationDelivery : .pasteAndKeep
         sessionShowsLiveWords = ordinaryTake && (config.showLiveWords || autoSend)
         autoSendSession = autoSend ? sessionID : nil
+        ordinaryDictationSession = ordinaryTake ? sessionID : nil
         let targetApp = external
             ? nil
             : sessionIntent.targetApp(
@@ -2597,6 +2607,17 @@ final class DictationController: NSObject {
         let autoSendGuarded = autoSend && AutoSendPolicy.isBlocked(
             bundleID: enriched.bundleID,
             blockedApps: config.autoSendBlockedApps)
+        let inRecordingSendLabel: String? = {
+            guard ordinaryTake, !autoSend,
+                  sessionIntent.delivery == .frontApp,
+                  sessionDeliveryPreference != .copyOnly,
+                  let sendKey = config.activeSendWhileRecordingHotkey,
+                  !AutoSendPolicy.isBlocked(
+                      bundleID: enriched.bundleID,
+                      blockedApps: config.autoSendBlockedApps)
+            else { return nil }
+            return sendKey.displayLabel
+        }()
         hud.model.beginSession(context: HUDSessionContext(
             appIcon: targetApp?.icon,
             modeName: hudLabel ?? explicitMode
@@ -2608,7 +2629,8 @@ final class DictationController: NSObject {
                     siteSlug: enriched.entities.first { $0.type == "site" }?.value),
             livePreview: livePreview || sessionShowsLiveWords,
             autoSend: autoSend,
-            autoSendGuarded: autoSendGuarded))
+            autoSendGuarded: autoSendGuarded,
+            sendShortcutLabel: inRecordingSendLabel))
 
         NSLog(
             "Velora: engine start session=%@ target=%@",
@@ -3079,7 +3101,8 @@ final class DictationController: NSObject {
                 modeName: fallback == nil ? (previous?.modeName ?? "Default") + " · " + String(language.prefix(12)) : "Model fallback",
                 livePreview: previous?.livePreview ?? false,
                 autoSend: previous?.autoSend ?? false,
-                autoSendGuarded: previous?.autoSendGuarded ?? false)
+                autoSendGuarded: previous?.autoSendGuarded ?? false,
+                sendShortcutLabel: previous?.sendShortcutLabel)
             if fallback != nil { ActivityStore.shared.record(.modelFallback) }
 
         case .partial(let session, let text):
@@ -3832,13 +3855,17 @@ final class DictationController: NSObject {
                     message: self.finalNotice("Pasted — auto-send off for \(appName)"))
 
             case .send(let sendKey):
-                let generationBeforeSettle = UserInputActivity.snapshot()
+                // Use selectionSnapshot (presses/clicks only), NOT snapshot():
+                // lifting a held Push-to-Talk modifier (Right ⌥ / ⌃ / ⇧) right
+                // after triggering Send emits a keyReleased event that must not
+                // abort the pending Return.
+                let generationBeforeSettle = UserInputActivity.selectionSnapshot()
                 let settle = AutoSendPolicy.settleDelay(
                     targetBundleID: context?.bundleID,
                     typingFallbackApps: self.config.typingFallbackApps)
                 DispatchQueue.main.asyncAfter(deadline: .now() + settle) { [weak self] in
                     guard let self else { return }
-                    let safeToSend = UserInputActivity.snapshot() == generationBeforeSettle
+                    let safeToSend = UserInputActivity.selectionSnapshot() == generationBeforeSettle
                         && TextInserter.deliveryAllowed(
                             targetBundleID: context?.bundleID,
                             targetElement: expectedTargetElement)
@@ -4430,6 +4457,7 @@ extension DictationController: HotkeyMonitorDelegate {
 
         switch (config.hotkeyMode, phase) {
         case (.toggle, .idle):
+            activeRecordingHoldModifierMask = 0
             sendPrewarmIfNeeded()
             startRecording(locked: true)
         case (.toggle, .starting):
@@ -4443,6 +4471,7 @@ extension DictationController: HotkeyMonitorDelegate {
 
         case (.hold, .idle):
             hotkeyDownAt = Date()
+            activeRecordingHoldModifierMask = config.hotkey.modifiers & Hotkey.strictModifierMask
             sendPrewarmIfNeeded()
             startRecording(locked: false)
         case (.hold, .starting(locked: true)):
@@ -4487,7 +4516,13 @@ extension DictationController: HotkeyMonitorDelegate {
         case .stream: streamHotkeyDown()
         case .action: actionHotkeyDown()
         case .dictateAndSend: dictateAndSendHotkeyDown()
-        case .alternateDictation: hotkeyDown()
+        case .alternateDictation:
+            hotkeyDown()
+            if case .starting(locked: false) = phase {
+                activeRecordingHoldModifierMask =
+                    config.secondDictationHotkey.modifiers & Hotkey.strictModifierMask
+                syncInRecordingSendMonitor()
+            }
         }
     }
 
@@ -4500,6 +4535,56 @@ extension DictationController: HotkeyMonitorDelegate {
         case .dictateAndSend: dictateAndSendHotkeyUp()
         case .alternateDictation: hotkeyUp()
         }
+    }
+
+    func inRecordingSendPressed() {
+        guard isOrdinaryDictationEligibleForInRecordingSend else { return }
+        autoSendSession = sessionID
+        let guarded = AutoSendPolicy.isBlocked(
+            bundleID: sessionContext?.bundleID,
+            blockedApps: config.autoSendBlockedApps)
+        if let previous = hud.model.sessionContext {
+            hud.model.sessionContext = HUDSessionContext(
+                appIcon: previous.appIcon,
+                modeName: previous.modeName,
+                livePreview: previous.livePreview,
+                autoSend: true,
+                autoSendGuarded: guarded,
+                sendShortcutLabel: nil)
+        }
+        NSLog("Velora: in-recording Send pressed — finishing session=%@ with auto-send", sessionID)
+        stopAndTranscribe()
+    }
+
+    private var isOrdinaryDictationEligibleForInRecordingSend: Bool {
+        let recordingNow: Bool
+        switch phase {
+        case .starting, .recording:
+            recordingNow = true
+        default:
+            recordingNow = false
+        }
+        return recordingNow
+            && ordinaryDictationSession == sessionID
+            && autoSendSession == nil
+            && actionSession == nil
+            && editSession == nil
+            && streamSession == nil
+            && externalRequest == nil
+            && sessionIntent.delivery == .frontApp
+            && sessionDeliveryPreference != .copyOnly
+    }
+
+    private func syncInRecordingSendMonitor() {
+        let eligible = isOrdinaryDictationEligibleForInRecordingSend
+        let holdMask: UInt64
+        switch phase {
+        case .starting(locked: false), .recording(locked: false):
+            holdMask = activeRecordingHoldModifierMask
+        default:
+            holdMask = 0
+        }
+        onInRecordingSendStateChanged?(eligible, eligible ? holdMask : 0)
     }
 
     private func dictateAndSendHotkeyDown() {

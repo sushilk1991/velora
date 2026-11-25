@@ -32,6 +32,7 @@ final class HotkeySelftestDelegate: HotkeyMonitorDelegate {
     var actionHotkeyUpCount = 0
     var dictateAndSendDownCount = 0
     var dictateAndSendUpCount = 0
+    var inRecordingSendCount = 0
     var escapeCount = 0
     var nonHotkeyInputCount = 0
 
@@ -60,6 +61,7 @@ final class HotkeySelftestDelegate: HotkeyMonitorDelegate {
         }
     }
     func escapePressed() { escapeCount += 1 }
+    func inRecordingSendPressed() { inRecordingSendCount += 1 }
     func nonHotkeyInput() { nonHotkeyInputCount += 1 }
 }
 
@@ -18447,6 +18449,102 @@ private final class RecordingOutputVolume: OutputVolumeControlling {
             expect(false, "Dictate & Send shortcut rejects collision with primary dictation")
         } catch {
             expect(true, "Dictate & Send shortcut collision rejected")
+        }
+
+        // 5. Send-while-recording shortcut (bare Space while recording, masked Push-to-Talk modifiers)
+        expect(Hotkey.space.isValidSettingsHotkey && Hotkey.space.displayLabel == "Space",
+               "default Send-while-recording shortcut is valid and renders as Space")
+        if case .record(let capturedReturn) = HotkeyRecorderView.captureOutcome(
+            keyCode: 36, modifiers: 0, allowsBareReturn: true
+        ) {
+            expect(capturedReturn == Hotkey(keyCode: 36, modifiers: 0, isModifierOnly: false),
+                   "in-recording recorder accepts bare Return when allowsBareReturn is enabled")
+        } else {
+            expect(false, "in-recording recorder should accept bare Return")
+        }
+        if case .cancel = HotkeyRecorderView.captureOutcome(
+            keyCode: 36, modifiers: 0, allowsBareReturn: false
+        ) {
+            expect(true, "global shortcut recorder still cancels on bare Return")
+        } else {
+            expect(false, "global shortcut recorder must cancel on bare Return")
+        }
+        if case .cancel = HotkeyRecorderView.captureOutcome(
+            keyCode: 53, modifiers: 0, allowsBareReturn: true
+        ) {
+            expect(true, "Esc always cancels recording even when bare Return is allowed")
+        } else {
+            expect(false, "Esc must always cancel shortcut capture")
+        }
+
+        let sendMonitor = HotkeyMonitor()
+        let sendDelegate = HotkeySelftestDelegate()
+        sendMonitor.delegate = sendDelegate
+        sendMonitor.hotkey = .rightOption
+        sendMonitor.sendWhileRecordingHotkey = .space
+        expect(!sendMonitor.handleKeyDown(keyCode: 49, flags: 0, isRepeat: false),
+               "Space is ignored and never swallowed when not recording")
+
+        // Armed with Push-to-Talk Right Option held: Option+Space matches bare Space,
+        // autorepeats and keyUp are swallowed, and Cmd+Space is never hijacked.
+        sendMonitor.setInRecordingSendActive(true, holdModifierMask: CGEventFlags.maskAlternate.rawValue)
+        let optionFlag = CGEventFlags.maskAlternate.rawValue
+        let cmdOptionFlags = CGEventFlags.maskCommand.rawValue | optionFlag
+        expect(!sendMonitor.handleKeyDown(keyCode: 49, flags: cmdOptionFlags, isRepeat: false),
+               "Cmd+Space is not hijacked when Send-while-recording is bare Space")
+        expect(!sendMonitor.handleKeyDown(
+            keyCode: 49, flags: optionFlag, isRepeat: false, comboCanBeSuppressed: false),
+               "Send-while-recording fails closed when combo suppression is unavailable")
+        expect(sendMonitor.handleKeyDown(keyCode: 49, flags: optionFlag, isRepeat: false),
+               "Space matches and is swallowed while holding Push-to-Talk Option")
+        expect(sendMonitor.handleKeyDown(keyCode: 49, flags: optionFlag, isRepeat: true),
+               "autorepeat of latched Send-while-recording key is swallowed")
+        sendMonitor.setInRecordingSendActive(false)
+        expect(sendMonitor.handleKeyUp(keyCode: 49),
+               "keyUp of latched Send-while-recording key stays swallowed after disarming")
+        RunLoop.main.run(until: Date().addingTimeInterval(0.05))
+        expect(sendDelegate.inRecordingSendCount == 1,
+               "Send-while-recording dispatches once per press")
+
+        // Lifting a held Push-to-Talk modifier emits keyReleased, which must not
+        // advance selectionSnapshot() used across the post-paste Send settle window.
+        let selBeforeRelease = UserInputActivity.selectionSnapshot()
+        _ = UserInputActivity.keyReleased(61)
+        expect(UserInputActivity.selectionSnapshot() == selBeforeRelease,
+               "releasing a held Push-to-Talk modifier does not abort pending auto-send settle")
+
+        // HUDSessionContext equality includes sendShortcutLabel.
+        let baseCard = HUDSessionContext(
+            appIcon: nil, modeName: "Chat", livePreview: true, autoSend: false, sendShortcutLabel: nil)
+        let hintCard = HUDSessionContext(
+            appIcon: nil, modeName: "Chat", livePreview: true, autoSend: false, sendShortcutLabel: "Space")
+        expect(baseCard != hintCard,
+               "sendShortcutLabel participates in HUDSessionContext equality")
+
+        // SettingsDocument round-trip & legacy upgrade for send_while_recording.
+        var sendDoc = SettingsDocument.defaults
+        sendDoc.settings.shortcuts.sendWhileRecording = Hotkey(keyCode: 36, modifiers: 0, isModifierOnly: false)
+        sendDoc.settings.shortcuts.sendWhileRecordingEnabled = false
+        do {
+            let encoded = try SettingsDocumentCodec.encode(sendDoc)
+            let decoded = try SettingsDocumentCodec.decode(encoded)
+            expect(decoded == sendDoc, "Send-while-recording settings round-trip cleanly")
+
+            var json = try JSONSerialization.jsonObject(with: encoded) as! [String: Any]
+            var settings = json["settings"] as! [String: Any]
+            var shortcuts = settings["shortcuts"] as! [String: Any]
+            shortcuts.removeValue(forKey: "send_while_recording")
+            shortcuts.removeValue(forKey: "send_while_recording_enabled")
+            settings["shortcuts"] = shortcuts
+            json["settings"] = settings
+            let upgraded = try SettingsDocumentCodec.decode(
+                JSONSerialization.data(withJSONObject: json))
+            expect(
+                upgraded.settings.shortcuts.sendWhileRecording == .space
+                    && upgraded.settings.shortcuts.sendWhileRecordingEnabled,
+                "legacy settings files upgrade cleanly with default Space Send-while-recording")
+        } catch {
+            expect(false, "Send-while-recording settings round-trip failed: \(error)")
         }
     }
 
